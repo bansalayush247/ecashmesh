@@ -7,10 +7,17 @@
 
 #![forbid(unsafe_code)]
 
+pub mod evidence;
 mod model;
+pub mod risk;
 
+pub use evidence::{
+    ConfidenceLevel, ConnectorEvidence, ConnectorHealth, Evidence, EvidenceAggregate,
+    EvidenceFreshness, EvidenceObservation, EvidenceSource, EvidenceTimestamp, SolvencyStatus,
+};
 pub use model::{
     Amount, AmountError, ConnectorCapabilities, ConnectorId, ConnectorIdError, ConnectorType,
-    Evidence, EvidenceTimestamp, FeeQuote, LiquidityInfo, ReliabilityInfo, RiskFactor, Route,
-    RouteCandidate, RouteCandidateError, RouteExplanation, RouteHop, RouteQuality,
+    FeeQuote, LiquidityInfo, ReliabilityInfo, Route, RouteCandidate, RouteCandidateError,
+    RouteExplanation, RouteHop, RouteQuality,
 };
+pub use risk::{EvidenceField, EvidenceRiskPolicy, RiskFactor, evaluate_connector_evidence};

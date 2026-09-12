@@ -1,6 +1,9 @@
 use core::fmt;
 use std::error::Error;
 
+use crate::evidence::Evidence;
+use crate::risk::RiskFactor;
+
 /// A Bitcoin-denominated amount expressed in whole satoshis.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Amount(u64);
@@ -226,115 +229,6 @@ impl ConnectorCapabilities {
     }
 }
 
-/// A Unix timestamp in whole seconds associated with an observation.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct EvidenceTimestamp(u64);
-
-impl EvidenceTimestamp {
-    /// Creates a timestamp from seconds since the Unix epoch.
-    #[must_use]
-    pub const fn from_unix_seconds(seconds: u64) -> Self {
-        Self(seconds)
-    }
-
-    /// Returns seconds since the Unix epoch.
-    #[must_use]
-    pub const fn unix_seconds(self) -> u64 {
-        self.0
-    }
-}
-
-/// An observed fact, with explicit uncertainty and freshness states.
-///
-/// `Unknown` means no usable observation is available. `Stale` retains the
-/// last observation so callers can explain what is out of date without treating
-/// it as current evidence.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Evidence<T> {
-    /// A current observation.
-    Known {
-        /// The observed value.
-        value: T,
-        /// When the value was observed.
-        observed_at: EvidenceTimestamp,
-    },
-    /// No usable observation is available.
-    Unknown,
-    /// A retained observation that must not be treated as current.
-    Stale {
-        /// The last observed value.
-        value: T,
-        /// When that value was observed.
-        observed_at: EvidenceTimestamp,
-    },
-}
-
-impl<T> Evidence<T> {
-    /// Creates current evidence.
-    #[must_use]
-    pub const fn known(value: T, observed_at: EvidenceTimestamp) -> Self {
-        Self::Known { value, observed_at }
-    }
-
-    /// Creates unknown evidence.
-    #[must_use]
-    pub const fn unknown() -> Self {
-        Self::Unknown
-    }
-
-    /// Creates stale evidence while retaining the last observed value.
-    #[must_use]
-    pub const fn stale(value: T, observed_at: EvidenceTimestamp) -> Self {
-        Self::Stale { value, observed_at }
-    }
-
-    /// Returns the observation value for known or stale evidence.
-    #[must_use]
-    pub const fn value(&self) -> Option<&T> {
-        match self {
-            Self::Known { value, .. } | Self::Stale { value, .. } => Some(value),
-            Self::Unknown => None,
-        }
-    }
-
-    /// Returns the observation timestamp for known or stale evidence.
-    #[must_use]
-    pub const fn observed_at(&self) -> Option<EvidenceTimestamp> {
-        match self {
-            Self::Known { observed_at, .. } | Self::Stale { observed_at, .. } => Some(*observed_at),
-            Self::Unknown => None,
-        }
-    }
-
-    /// Returns whether the evidence is a current observation.
-    #[must_use]
-    pub const fn is_known(&self) -> bool {
-        matches!(self, Self::Known { .. })
-    }
-
-    /// Returns whether the evidence is unavailable.
-    #[must_use]
-    pub const fn is_unknown(&self) -> bool {
-        matches!(self, Self::Unknown)
-    }
-
-    /// Returns whether the evidence is retained but stale.
-    #[must_use]
-    pub const fn is_stale(&self) -> bool {
-        matches!(self, Self::Stale { .. })
-    }
-
-    /// Maps an observed value while preserving its evidence state and timestamp.
-    #[must_use]
-    pub fn map<U>(self, transform: impl FnOnce(T) -> U) -> Evidence<U> {
-        match self {
-            Self::Known { value, observed_at } => Evidence::known(transform(value), observed_at),
-            Self::Unknown => Evidence::Unknown,
-            Self::Stale { value, observed_at } => Evidence::stale(transform(value), observed_at),
-        }
-    }
-}
-
 /// A connector's reported liquidity for a route amount.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LiquidityInfo {
@@ -395,48 +289,6 @@ impl ReliabilityInfo {
             None
         }
     }
-}
-
-/// A factual concern that a caller may attach to a candidate or selected route.
-///
-/// This enum intentionally classifies concerns only; it does not assign a score
-/// or decide whether a route should be selected.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RiskFactor {
-    /// Reported liquidity cannot cover the requested amount.
-    InsufficientLiquidity {
-        /// Amount required by the route.
-        required: Amount,
-        /// Amount reported as available.
-        available: Amount,
-    },
-    /// No usable liquidity observation is available.
-    UnknownLiquidity,
-    /// The available liquidity observation is stale.
-    StaleLiquidity,
-    /// No usable fee quote is available.
-    UnknownFee,
-    /// The available fee quote is stale.
-    StaleFee,
-    /// No usable reliability observation is available.
-    UnknownReliability,
-    /// The available reliability observation is stale.
-    StaleReliability,
-    /// Reliability is low according to a policy outside this crate.
-    LowReliability {
-        /// Observed success rate in basis points.
-        success_rate_basis_points: u16,
-    },
-    /// A needed generic capability was not reported.
-    MissingCapability {
-        /// Name of the required capability.
-        capability: &'static str,
-    },
-    /// An adapter supplied a domain-specific concern not yet modeled here.
-    Other {
-        /// Stable, human-readable classification.
-        code: String,
-    },
 }
 
 /// One connector traversal in a candidate route.
@@ -613,6 +465,7 @@ impl Route {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evidence::EvidenceTimestamp;
 
     const OBSERVED_AT: EvidenceTimestamp = EvidenceTimestamp::from_unix_seconds(1_700_000_000);
 
