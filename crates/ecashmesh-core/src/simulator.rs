@@ -417,7 +417,7 @@ fn healthy_connector(id: &str, fee: u64) -> Result<SimulatedConnector, ScenarioE
         id: id.clone(),
         connector_type: ConnectorType::Cashu,
         capabilities: ConnectorCapabilities::new(true, true, true, true),
-        liquidity: fresh(LiquidityInfo::new(Amount::from_sats(20_000), None)),
+        liquidity: fresh(LiquidityInfo::new(Amount::from_sats(200_000), None)),
         fee: fresh(FeeQuote::new(Amount::from_sats(fee))),
         reliability: fresh(reliability),
         evidence: ConnectorEvidence::new(

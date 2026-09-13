@@ -23,20 +23,30 @@ const DEFAULT_ADDRESS: &str = "127.0.0.1:5000";
 
 #[tokio::main]
 async fn main() {
-    let app = Router::new()
+    let listener = tokio::net::TcpListener::bind(api_address())
+        .await
+        .unwrap_or_else(|error| panic!("failed to bind API address: {error}"));
+    println!(
+        "EcashMesh API listening on http://{}",
+        listener
+            .local_addr()
+            .expect("bound listener has an address")
+    );
+    axum::serve(listener, app())
+        .await
+        .expect("HTTP server terminated unexpectedly");
+}
+
+fn app() -> Router {
+    Router::new()
         .route("/", get(index))
         .route("/health", get(health))
         .route("/v1/routes/rank", post(rank))
-        .route("/v1/routes/evaluate", post(evaluate));
-    let address =
-        std::env::var("ECASHMESH_API_ADDRESS").unwrap_or_else(|_| DEFAULT_ADDRESS.to_owned());
-    let listener = tokio::net::TcpListener::bind(&address)
-        .await
-        .unwrap_or_else(|error| panic!("failed to bind {address}: {error}"));
-    println!("EcashMesh API listening on http://{address}");
-    axum::serve(listener, app)
-        .await
-        .expect("HTTP server terminated unexpectedly");
+        .route("/v1/routes/evaluate", post(evaluate))
+}
+
+fn api_address() -> String {
+    std::env::var("ECASHMESH_API_ADDRESS").unwrap_or_else(|_| DEFAULT_ADDRESS.to_owned())
 }
 
 async fn index() -> Json<serde_json::Value> {
@@ -96,34 +106,43 @@ async fn evaluate(
     request.validate()?;
     let EvaluateRequest {
         amount,
-        currency,
-        asset,
+        asset: _,
         destination,
         payment_intent,
         candidate_connectors,
     } = request;
 
     let available = demo_connectors()
-        .map_err(|error| ApiError::new("simulator_error", error.to_string()))?
+        .map_err(|error| ApiError::internal("simulator_error", error.to_string()))?
         .into_iter()
-        .map(|connector| (connector.id.to_string(), connector))
+        .map(|connector| (connector.id.clone(), connector))
         .collect::<BTreeMap<_, _>>();
-    let mut selected = Vec::with_capacity(candidate_connectors.len());
+    let mut selected = Vec::with_capacity(candidate_connectors.len().max(available.len()));
     let mut seen = BTreeSet::new();
-    for id in candidate_connectors {
-        if !seen.insert(id.clone()) {
-            return Err(ApiError::new(
-                "duplicate_candidate_connector",
-                format!("candidate connector is repeated: {id}"),
-            ));
+    if candidate_connectors.is_empty() {
+        selected.extend(available.values().cloned());
+    } else {
+        for raw_id in candidate_connectors {
+            let id = ConnectorId::new(&raw_id).map_err(|error| {
+                ApiError::validation(
+                    "candidate_connectors contains an invalid connector identifier",
+                    vec![error.to_string()],
+                )
+            })?;
+            if !seen.insert(id.clone()) {
+                return Err(ApiError::validation(
+                    "candidate_connectors contains a duplicate connector",
+                    vec![id.to_string()],
+                ));
+            }
+            let connector = available.get(&id).ok_or_else(|| {
+                ApiError::validation(
+                    "candidate_connectors contains an unavailable connector",
+                    vec![id.to_string()],
+                )
+            })?;
+            selected.push(connector.clone());
         }
-        let connector = available.get(&id).ok_or_else(|| {
-            ApiError::new(
-                "unknown_candidate_connector",
-                format!("unknown simulated connector: {id}"),
-            )
-        })?;
-        selected.push(connector.clone());
     }
 
     let amount = Amount::from_sats(amount);
@@ -131,10 +150,10 @@ async fn evaluate(
         .iter()
         .map(|connector| connector.quote(amount))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| ApiError::new("simulator_error", error.to_string()))?;
+        .map_err(|error| ApiError::internal("simulator_error", error.to_string()))?;
     let connector_evidence = selected
-        .into_iter()
-        .map(|connector| (connector.id.clone(), connector.evidence))
+        .iter()
+        .map(|connector| (connector.id.clone(), connector.evidence.clone()))
         .collect::<BTreeMap<_, _>>();
     let ranking = rank_routes(
         PaymentRequest::new(amount),
@@ -144,29 +163,69 @@ async fn evaluate(
         RouteRankingConfig::default(),
     );
 
+    if ranking.ranked.is_empty() {
+        return Err(ApiError::no_viable(
+            "No available route can satisfy this payment.",
+            ranking
+                .rejected
+                .iter()
+                .flat_map(|route| route.reasons.iter())
+                .map(|reason| format!("{reason:?}"))
+                .collect(),
+        ));
+    }
+
     Ok(Json(EvaluateResponse::from_ranking(
-        PaymentResponse {
-            amount_sats: amount.sats(),
-            currency,
-            asset,
-            destination,
-            payment_intent,
-        },
+        deterministic_quote_id(amount, &destination, &payment_intent, &selected),
+        &destination,
+        &payment_intent,
+        &selected,
         ranking,
     )))
 }
 
 #[derive(Debug)]
 struct ApiError {
+    status: StatusCode,
     code: &'static str,
     message: String,
+    details: Vec<String>,
 }
 
 impl ApiError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
+            status: StatusCode::BAD_REQUEST,
             code,
             message: message.into(),
+            details: Vec::new(),
+        }
+    }
+
+    fn validation(message: impl Into<String>, details: Vec<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "VALIDATION_ERROR",
+            message: message.into(),
+            details,
+        }
+    }
+
+    fn no_viable(message: impl Into<String>, details: Vec<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "NO_VIABLE_ROUTE",
+            message: message.into(),
+            details,
+        }
+    }
+
+    fn internal(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code,
+            message: message.into(),
+            details: Vec::new(),
         }
     }
 }
@@ -174,8 +233,12 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": { "code": self.code, "message": self.message } })),
+            self.status,
+            Json(json!({ "error": {
+                "code": self.code,
+                "message": self.message,
+                "details": self.details,
+            }})),
         )
             .into_response()
     }
@@ -184,51 +247,48 @@ impl IntoResponse for ApiError {
 #[derive(Deserialize)]
 struct EvaluateRequest {
     amount: u64,
-    currency: String,
     asset: String,
-    destination: Option<String>,
-    payment_intent: Option<String>,
+    destination: DestinationInput,
+    payment_intent: String,
+    #[serde(default)]
     candidate_connectors: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct DestinationInput {
+    #[serde(rename = "type")]
+    kind: String,
+    value: String,
 }
 
 impl EvaluateRequest {
     fn validate(&self) -> Result<(), ApiError> {
         if self.amount == 0 {
-            return Err(ApiError::new(
-                "invalid_amount",
+            return Err(ApiError::validation(
                 "amount must be greater than zero",
+                vec!["amount".into()],
             ));
         }
-        if self.currency != "sat" {
-            return Err(ApiError::new(
-                "unsupported_currency",
-                "demo evaluation supports currency 'sat' only",
+        if self.asset != "BTC" {
+            return Err(ApiError::validation(
+                "asset must be BTC",
+                vec![self.asset.clone()],
             ));
         }
-        if self.asset != "bitcoin" {
-            return Err(ApiError::new(
-                "unsupported_asset",
-                "demo evaluation supports asset 'bitcoin' only",
+        if self.destination.kind != "lightning" || self.destination.value.trim().is_empty() {
+            return Err(ApiError::validation(
+                "destination must be a non-empty lightning target",
+                vec!["destination".into()],
             ));
         }
-        if !has_text(self.destination.as_deref()) && !has_text(self.payment_intent.as_deref()) {
-            return Err(ApiError::new(
-                "missing_payment_target",
-                "destination or payment_intent is required",
-            ));
-        }
-        if self.candidate_connectors.is_empty() {
-            return Err(ApiError::new(
-                "missing_candidate_connectors",
-                "at least one candidate connector is required",
+        if self.payment_intent != "send" {
+            return Err(ApiError::validation(
+                "payment_intent must be send",
+                vec![self.payment_intent.clone()],
             ));
         }
         Ok(())
     }
-}
-
-fn has_text(value: Option<&str>) -> bool {
-    value.is_some_and(|value| !value.trim().is_empty())
 }
 
 #[derive(Deserialize)]
@@ -616,34 +676,276 @@ impl RankResponse {
 
 #[derive(Serialize)]
 struct EvaluateResponse {
-    payment: PaymentResponse,
-    recommended_route: Option<RankedRouteResponse>,
-    ranked_alternatives: Vec<RankedRouteResponse>,
-    rejected_routes: Vec<RejectedRouteResponse>,
-    explanation: DecisionResponse,
+    quote_id: String,
+    recommended_route: EvaluatedRouteResponse,
+    alternatives: Vec<EvaluatedRouteResponse>,
+    score_breakdown: ScoreBreakdownResponse,
+    risk_flags: Vec<&'static str>,
+    evidence: Vec<EvidenceResponse>,
+    explanation: EvaluationExplanationResponse,
+    expires_at: String,
+    expires_at_unix_seconds: u64,
 }
 
 impl EvaluateResponse {
-    fn from_ranking(payment: PaymentResponse, ranking: ecashmesh_core::RouteRanking) -> Self {
-        let explanation = DecisionResponse::from(explain_ranking(&ranking));
-        let mut routes = ranking.ranked.into_iter().map(Into::into);
+    fn from_ranking(
+        quote_id: String,
+        destination: &DestinationInput,
+        payment_intent: &str,
+        connectors: &[ecashmesh_core::SimulatedConnector],
+        ranking: ecashmesh_core::RouteRanking,
+    ) -> Self {
+        let decision = explain_ranking(&ranking);
+        let mut routes = ranking
+            .ranked
+            .into_iter()
+            .map(|route| EvaluatedRouteResponse::from_ranked(&quote_id, &route))
+            .collect::<Vec<_>>();
+        let recommended_route = routes.remove(0);
+        let score_breakdown = ScoreBreakdownResponse::from_route(&recommended_route);
+        let risk_flags = recommended_route.risk_flags.clone();
+        let explanation = EvaluationExplanationResponse::from_decision(
+            decision,
+            &recommended_route,
+            destination,
+            payment_intent,
+        );
         Self {
-            payment,
-            recommended_route: routes.next(),
-            ranked_alternatives: routes.collect(),
-            rejected_routes: ranking.rejected.into_iter().map(Into::into).collect(),
+            quote_id,
+            recommended_route,
+            alternatives: routes,
+            score_breakdown,
+            risk_flags,
+            evidence: connectors
+                .iter()
+                .map(EvidenceResponse::from_connector)
+                .collect(),
             explanation,
+            expires_at: format!("unix:{}", DEMO_EVALUATED_AT.unix_seconds() + 300),
+            expires_at_unix_seconds: DEMO_EVALUATED_AT.unix_seconds() + 300,
         }
     }
 }
 
 #[derive(Serialize)]
-struct PaymentResponse {
-    amount_sats: u64,
-    currency: String,
-    asset: String,
-    destination: Option<String>,
-    payment_intent: Option<String>,
+struct EvaluatedRouteResponse {
+    route_id: String,
+    connector: String,
+    path: Vec<String>,
+    score: u8,
+    score_basis_points: u16,
+    fee: FeeResponse,
+    estimated_time_seconds: u64,
+    liquidity_confidence: u8,
+    reliability_confidence: u8,
+    evidence_freshness: u8,
+    risk_flags: Vec<&'static str>,
+    fee_reasonableness: u8,
+    risk_penalty: u8,
+}
+
+impl EvaluatedRouteResponse {
+    fn from_ranked(quote_id: &str, route: &ecashmesh_core::RankedRoute) -> Self {
+        let path = route
+            .candidate
+            .hops
+            .iter()
+            .map(|hop| hop.connector_id.to_string())
+            .collect::<Vec<_>>();
+        let connector = path.first().cloned().unwrap_or_default();
+        Self {
+            route_id: deterministic_route_id(quote_id, &path),
+            connector,
+            path,
+            score: as_percent(route.score),
+            score_basis_points: route.score,
+            fee: FeeResponse {
+                amount: route
+                    .quality
+                    .total_fee
+                    .value()
+                    .map(|quote| quote.amount.sats()),
+                asset: "sats",
+                freshness: freshness_code(route.quality.total_fee.freshness()),
+            },
+            estimated_time_seconds: u64::try_from(route.candidate.hop_count())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(3),
+            liquidity_confidence: as_percent(route.signals.liquidity_confidence),
+            reliability_confidence: as_percent(route.signals.reliability),
+            evidence_freshness: as_percent(route.signals.freshness),
+            risk_flags: route
+                .quality
+                .risk_factors
+                .iter()
+                .map(ecashmesh_core::RiskFactor::reason_code)
+                .collect(),
+            fee_reasonableness: as_percent(route.signals.fee_reasonableness),
+            risk_penalty: as_percent(route.risk_penalty),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct FeeResponse {
+    amount: Option<u64>,
+    asset: &'static str,
+    freshness: &'static str,
+}
+
+#[derive(Serialize)]
+struct ScoreBreakdownResponse {
+    liquidity: u8,
+    reliability: u8,
+    evidence_freshness: u8,
+    fees: u8,
+    route_complexity: usize,
+    risk_penalty: u8,
+}
+
+impl ScoreBreakdownResponse {
+    fn from_route(route: &EvaluatedRouteResponse) -> Self {
+        Self {
+            liquidity: route.liquidity_confidence,
+            reliability: route.reliability_confidence,
+            evidence_freshness: route.evidence_freshness,
+            fees: route.fee_reasonableness,
+            route_complexity: route.path.len(),
+            risk_penalty: route.risk_penalty,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct EvidenceResponse {
+    connector: String,
+    first_observed_at_unix_seconds: Option<u64>,
+    liquidity: EvidenceStateResponse,
+    fee: EvidenceStateResponse,
+    hop_reliability: EvidenceStateResponse,
+    health: EvidenceStateResponse,
+    solvency: EvidenceStateResponse,
+    connector_reliability: EvidenceStateResponse,
+}
+
+impl EvidenceResponse {
+    fn from_connector(connector: &ecashmesh_core::SimulatedConnector) -> Self {
+        Self {
+            connector: connector.id.to_string(),
+            first_observed_at_unix_seconds: connector
+                .evidence
+                .first_observed_at
+                .map(EvidenceTimestamp::unix_seconds),
+            liquidity: EvidenceStateResponse::from_core(&connector.liquidity, |liquidity| {
+                json!({
+                    "available_sats": liquidity.available.sats(),
+                    "maximum_sats": liquidity.maximum.map(Amount::sats),
+                })
+            }),
+            fee: EvidenceStateResponse::from_core(
+                &connector.fee,
+                |fee| json!({ "amount_sats": fee.amount.sats() }),
+            ),
+            hop_reliability: EvidenceStateResponse::from_core(
+                &connector.reliability,
+                reliability_value,
+            ),
+            health: EvidenceStateResponse::from_core(&connector.evidence.health, |health| {
+                json!(connector_health_code(*health))
+            }),
+            solvency: EvidenceStateResponse::from_core(&connector.evidence.solvency, |solvency| {
+                json!(solvency_status_code(*solvency))
+            }),
+            connector_reliability: EvidenceStateResponse::from_core(
+                &connector.evidence.reliability,
+                reliability_value,
+            ),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct EvidenceStateResponse {
+    state: &'static str,
+    freshness: &'static str,
+    source: Option<&'static str>,
+    observed_at_unix_seconds: Option<u64>,
+    confidence: Option<&'static str>,
+    value: Option<serde_json::Value>,
+}
+
+impl EvidenceStateResponse {
+    fn from_core<T>(evidence: &Evidence<T>, value: impl FnOnce(&T) -> serde_json::Value) -> Self {
+        let Some(observation) = evidence.observation() else {
+            return Self {
+                state: evidence_state_code(evidence),
+                freshness: freshness_code(evidence.freshness()),
+                source: None,
+                observed_at_unix_seconds: None,
+                confidence: None,
+                value: None,
+            };
+        };
+
+        Self {
+            state: evidence_state_code(evidence),
+            freshness: freshness_code(evidence.freshness()),
+            source: Some(evidence_source_code(observation.source)),
+            observed_at_unix_seconds: Some(observation.observed_at.unix_seconds()),
+            confidence: Some(confidence_code(observation.confidence)),
+            value: Some(value(&observation.value)),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct EvaluationExplanationResponse {
+    summary: String,
+    reasons: Vec<DecisionReasonResponse>,
+    alternative_weaknesses: Vec<AlternativeWeaknessResponse>,
+}
+
+impl EvaluationExplanationResponse {
+    fn from_decision(
+        decision: RouteDecisionExplanation,
+        recommended: &EvaluatedRouteResponse,
+        destination: &DestinationInput,
+        payment_intent: &str,
+    ) -> Self {
+        Self {
+            summary: format!(
+                "Selected {} for {} to {} with the strongest deterministic route score.",
+                recommended.connector, payment_intent, destination.value
+            ),
+            reasons: decision
+                .reasons_selected
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            alternative_weaknesses: decision
+                .alternatives
+                .into_iter()
+                .map(|alternative| AlternativeWeaknessResponse {
+                    connector: alternative
+                        .route
+                        .connector_ids
+                        .first()
+                        .map_or_else(String::new, ToString::to_string),
+                    reasons: alternative
+                        .reasons_not_selected
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct AlternativeWeaknessResponse {
+    connector: String,
+    reasons: Vec<DecisionReasonResponse>,
 }
 
 #[derive(Serialize)]
@@ -839,6 +1141,93 @@ struct AlternativeResponse {
 struct RejectedExplanationResponse {
     connectors: Vec<String>,
     reasons: Vec<String>,
+}
+
+fn deterministic_quote_id(
+    amount: Amount,
+    destination: &DestinationInput,
+    payment_intent: &str,
+    connectors: &[ecashmesh_core::SimulatedConnector],
+) -> String {
+    let mut values = vec![
+        amount.sats().to_string(),
+        destination.kind.clone(),
+        destination.value.clone(),
+        payment_intent.to_owned(),
+    ];
+    values.extend(connectors.iter().map(|connector| connector.id.to_string()));
+    values.sort_unstable();
+    deterministic_id("quote", &values)
+}
+
+fn deterministic_route_id(quote_id: &str, path: &[String]) -> String {
+    let mut values = Vec::with_capacity(path.len() + 1);
+    values.push(quote_id.to_owned());
+    values.extend(path.iter().cloned());
+    deterministic_id("route", &values)
+}
+
+fn deterministic_id(prefix: &str, values: &[String]) -> String {
+    let mut hash = 1_469_598_103_934_665_603_u64;
+    for value in std::iter::once(prefix).chain(values.iter().map(String::as_str)) {
+        for byte in value.bytes().chain(std::iter::once(0)) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+    }
+    format!("{prefix}_{hash:016x}")
+}
+
+fn as_percent(value: u16) -> u8 {
+    u8::try_from(value / 100).unwrap_or(100)
+}
+
+fn reliability_value(reliability: &ReliabilityInfo) -> serde_json::Value {
+    json!({
+        "success_rate_basis_points": reliability.success_rate_basis_points,
+        "observations": reliability.observations,
+    })
+}
+
+fn evidence_state_code<T>(evidence: &Evidence<T>) -> &'static str {
+    match evidence {
+        Evidence::Known(_) => "known",
+        Evidence::Unknown => "unknown",
+        Evidence::Stale(_) => "stale",
+    }
+}
+
+const fn evidence_source_code(source: EvidenceSource) -> &'static str {
+    match source {
+        EvidenceSource::Connector => "connector",
+        EvidenceSource::Observer => "observer",
+        EvidenceSource::Independent => "independent",
+        EvidenceSource::Historical => "historical",
+    }
+}
+
+const fn confidence_code(confidence: ConfidenceLevel) -> &'static str {
+    match confidence {
+        ConfidenceLevel::None => "none",
+        ConfidenceLevel::Low => "low",
+        ConfidenceLevel::Medium => "medium",
+        ConfidenceLevel::High => "high",
+    }
+}
+
+const fn connector_health_code(health: ConnectorHealth) -> &'static str {
+    match health {
+        ConnectorHealth::Healthy => "healthy",
+        ConnectorHealth::Degraded => "degraded",
+        ConnectorHealth::Unavailable => "unavailable",
+    }
+}
+
+const fn solvency_status_code(solvency: SolvencyStatus) -> &'static str {
+    match solvency {
+        SolvencyStatus::Supported => "supported",
+        SolvencyStatus::Concerning => "concerning",
+    }
 }
 
 const fn freshness_code(freshness: EvidenceFreshness) -> &'static str {

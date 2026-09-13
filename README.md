@@ -615,6 +615,32 @@ and risk codes. `decision.reasons_selected` answers “why this route?”, while
 each `decision.alternatives[*].reasons_not_selected` answers “why not this
 alternative?”.
 
+### Payment-Intent Evaluation
+
+`POST /v1/routes/evaluate` is the wallet-facing deterministic demo endpoint.
+It uses the built-in simulated connectors when `candidate_connectors` is empty.
+
+```bash
+curl -X POST http://127.0.0.1:5000/v1/routes/evaluate \
+  -H 'content-type: application/json' \
+  --data '{
+    "amount": 100000,
+    "asset": "BTC",
+    "destination": {
+      "type": "lightning",
+      "value": "lnbc1simulateddestination"
+    },
+    "payment_intent": "send",
+    "candidate_connectors": []
+  }'
+```
+
+The response has stable `quote_id` and route IDs, `recommended_route`, ordered
+`alternatives`, evidence and risk flags, score breakdown, selected-route and
+alternative explanations, and an explicit quote expiry. Validation failures
+return `{ "error": { "code", "message", "details" } }`; a request with no
+feasible simulated route returns `NO_VIABLE_ROUTE`.
+
 ## Deterministic Simulator
 
 Run every offline routing fixture and verify its checked-in expected result:

@@ -345,13 +345,13 @@ fn rejection_reasons(
                 connector_id: hop.connector_id.clone(),
             });
         }
-        if let Evidence::Known(observation) = &hop.liquidity
-            && !observation.value.can_cover(request.amount)
+        if let Some(liquidity) = hop.liquidity.value()
+            && !liquidity.can_cover(request.amount)
         {
             reasons.push(RouteRejectionReason::InsufficientLiquidity {
                 connector_id: hop.connector_id.clone(),
                 required: request.amount,
-                available: observation.value.available,
+                available: liquidity.available,
             });
         }
         if let Some(fee) = hop.fee.value()

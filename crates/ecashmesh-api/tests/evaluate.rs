@@ -82,63 +82,138 @@ impl Drop for ApiServer {
     }
 }
 
-fn valid_request() -> Value {
+fn valid_request(amount: u64, candidate_connectors: &Value) -> Value {
     json!({
-        "amount": 10000,
-        "currency": "sat",
-        "asset": "bitcoin",
-        "payment_intent": "demo-lightning-invoice",
-        "candidate_connectors": [
-            "cashu:cheap-stale",
-            "cashu:low-liquidity",
-            "cashu:healthy"
-        ]
+        "amount": amount,
+        "asset": "BTC",
+        "destination": {
+            "type": "lightning",
+            "value": "lnbc1simulateddestination"
+        },
+        "payment_intent": "send",
+        "candidate_connectors": candidate_connectors
     })
 }
 
 #[test]
 fn evaluate_demo_payment_end_to_end_with_simulated_connectors() {
     let server = ApiServer::start();
-    let request = valid_request();
+    let request = valid_request(100_000, &json!([]));
     let (status, response) = server.request(&request);
 
     assert_eq!(status, 200);
-    assert_eq!(response["payment"]["amount_sats"], 10000);
-    assert_eq!(
-        response["recommended_route"]["connectors"][0],
-        "cashu:healthy"
+    assert!(
+        response["quote_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("quote_"))
     );
-    assert_eq!(
-        response["ranked_alternatives"][0]["connectors"][0],
-        "cashu:cheap-stale"
+    assert_eq!(response["recommended_route"]["connector"], "cashu:healthy");
+    assert!(
+        response["alternatives"]
+            .as_array()
+            .is_some_and(|routes| !routes.is_empty())
     );
-    assert_eq!(
-        response["rejected_routes"][0]["connectors"][0],
-        "cashu:low-liquidity"
+    assert!(
+        response["recommended_route"]["route_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("route_"))
     );
     assert!(response["recommended_route"]["score"].is_u64());
-    assert!(response["recommended_route"]["estimated_fee_sats"].is_u64());
-    assert!(response["recommended_route"]["risk_codes"].is_array());
-    assert_eq!(
-        response["explanation"]["recommendation"]["connectors"][0],
-        "cashu:healthy"
-    );
-    assert!(response["explanation"]["alternatives"][0]["reasons_not_selected"].is_array());
+    assert!(response["recommended_route"]["fee"]["amount"].is_u64());
+    assert!(response["score_breakdown"]["liquidity"].is_u64());
+    assert!(response["evidence"].is_array());
+    let healthy_evidence = response["evidence"]
+        .as_array()
+        .and_then(|evidence| {
+            evidence
+                .iter()
+                .find(|item| item["connector"] == "cashu:healthy")
+        })
+        .expect("healthy connector evidence is present");
+    assert_eq!(healthy_evidence["liquidity"]["state"], "known");
+    assert!(healthy_evidence["liquidity"]["value"]["available_sats"].is_u64());
+    assert!(response["explanation"]["reasons"].is_array());
+    assert!(response["expires_at"].is_string());
 }
 
 #[test]
-fn evaluate_returns_structured_validation_errors() {
+fn risk_aware_selection_prefers_fresh_evidence_over_a_cheaper_stale_route() {
     let server = ApiServer::start();
-    let request = json!({
-        "amount": 0,
-        "currency": "sat",
-        "asset": "bitcoin",
-        "destination": "demo-destination",
-        "candidate_connectors": ["cashu:healthy"]
-    });
+    let request = valid_request(10_000, &json!(["cashu:cheap-stale", "cashu:healthy"]));
+    let (status, response) = server.request(&request);
+
+    assert_eq!(status, 200);
+    assert_eq!(response["recommended_route"]["connector"], "cashu:healthy");
+    assert_eq!(
+        response["alternatives"][0]["connector"],
+        "cashu:cheap-stale"
+    );
+    assert!(
+        response["alternatives"][0]["risk_flags"]
+            .as_array()
+            .is_some_and(|risks| risks.iter().any(|risk| risk == "stale_liquidity"))
+    );
+}
+
+#[test]
+fn no_viable_route_returns_a_structured_error() {
+    let server = ApiServer::start();
+    let request = valid_request(500_000, &json!([]));
+    let (status, response) = server.request(&request);
+
+    assert_eq!(status, 422);
+    assert_eq!(response["error"]["code"], "NO_VIABLE_ROUTE");
+    assert!(response["error"]["details"].is_array());
+}
+
+#[test]
+fn invalid_amount_returns_a_structured_validation_error() {
+    let server = ApiServer::start();
+    let request = valid_request(0, &json!(["cashu:healthy"]));
     let (status, response) = server.request(&request);
 
     assert_eq!(status, 400);
-    assert_eq!(response["error"]["code"], "invalid_amount");
+    assert_eq!(response["error"]["code"], "VALIDATION_ERROR");
     assert!(response["error"]["message"].is_string());
+    assert!(response["error"]["details"].is_array());
+}
+
+#[test]
+fn stale_evidence_is_preserved_as_a_risk_and_reduces_the_route_score() {
+    let server = ApiServer::start();
+    let request = valid_request(10_000, &json!(["cashu:healthy", "cashu:cheap-stale"]));
+    let (status, response) = server.request(&request);
+
+    assert_eq!(status, 200);
+    let recommended_score = response["recommended_route"]["score_basis_points"]
+        .as_u64()
+        .expect("recommended score");
+    let stale_route = response["alternatives"]
+        .as_array()
+        .expect("alternatives")
+        .iter()
+        .find(|route| route["connector"] == "cashu:cheap-stale")
+        .expect("stale alternative");
+    assert!(
+        stale_route["risk_flags"]
+            .as_array()
+            .is_some_and(|risks| risks.iter().any(|risk| risk == "stale_evidence"))
+    );
+    assert!(
+        stale_route["score_basis_points"]
+            .as_u64()
+            .is_some_and(|score| score < recommended_score)
+    );
+}
+
+#[test]
+fn evaluation_is_deterministic_for_the_same_simulator_state() {
+    let server = ApiServer::start();
+    let request = valid_request(10_000, &json!([]));
+    let (first_status, first) = server.request(&request);
+    let (second_status, second) = server.request(&request);
+
+    assert_eq!(first_status, 200);
+    assert_eq!(second_status, 200);
+    assert_eq!(first, second);
 }
