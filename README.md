@@ -483,6 +483,107 @@ Future Fedimint / Lightning adapters
 
 The initial implementation is designed to work with deterministic simulated data before relying on live network infrastructure.
 
+## Local Ranking API
+
+The local API is for manual testing only. It has no authentication and binds only
+to `127.0.0.1:5000`.
+
+Start it from the repository root:
+
+```bash
+nix develop -c cargo run -p ecashmesh-api
+```
+
+In a second terminal, confirm that it is running:
+
+```bash
+curl http://127.0.0.1:5000/health
+```
+
+Submit candidate routes to `POST /v1/routes/rank`. Evidence is explicitly
+`known`, `stale`, or `unknown`; known and stale evidence require a value and
+an `observed_at` Unix timestamp.
+
+```bash
+curl -X POST http://127.0.0.1:5000/v1/routes/rank \
+  -H 'content-type: application/json' \
+  --data @- <<'JSON'
+{
+  "amount_sats": 10000,
+  "evaluated_at": 5000000,
+  "connectors": [
+    {
+      "id": "cashu:cheap",
+      "first_observed_at": 1000,
+      "health": { "state": "known", "value": "healthy", "observed_at": 5000000 },
+      "solvency": { "state": "known", "value": "supported", "observed_at": 5000000 },
+      "reliability": {
+        "state": "known",
+        "value": { "success_rate_basis_points": 9900, "observations": 500 },
+        "observed_at": 5000000
+      }
+    },
+    {
+      "id": "cashu:expensive",
+      "first_observed_at": 1000,
+      "health": { "state": "known", "value": "healthy", "observed_at": 5000000 },
+      "solvency": { "state": "known", "value": "supported", "observed_at": 5000000 },
+      "reliability": {
+        "state": "known",
+        "value": { "success_rate_basis_points": 9900, "observations": 500 },
+        "observed_at": 5000000
+      }
+    }
+  ],
+  "candidates": [
+    {
+      "amount_sats": 10000,
+      "hops": [
+        {
+          "connector_id": "cashu:cheap",
+          "connector_type": "cashu",
+          "liquidity": {
+            "state": "known",
+            "value": { "available_sats": 20000 },
+            "observed_at": 5000000
+          },
+          "fee": { "state": "known", "value": { "amount_sats": 5 }, "observed_at": 5000000 },
+          "reliability": {
+            "state": "known",
+            "value": { "success_rate_basis_points": 9900, "observations": 500 },
+            "observed_at": 5000000
+          }
+        }
+      ]
+    },
+    {
+      "amount_sats": 10000,
+      "hops": [
+        {
+          "connector_id": "cashu:expensive",
+          "connector_type": "cashu",
+          "liquidity": {
+            "state": "known",
+            "value": { "available_sats": 20000 },
+            "observed_at": 5000000
+          },
+          "fee": { "state": "known", "value": { "amount_sats": 50 }, "observed_at": 5000000 },
+          "reliability": {
+            "state": "known",
+            "value": { "success_rate_basis_points": 9900, "observations": 500 },
+            "observed_at": 5000000
+          }
+        }
+      ]
+    }
+  ]
+}
+JSON
+```
+
+The response separates usable `ranked` routes from `rejected` routes, exposing
+component signals, final score, explicit penalty, and risk reason codes.
+
 ---
 
 ## Roadmap

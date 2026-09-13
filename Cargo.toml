@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ecashmesh-core"]
+members = ["crates/ecashmesh-api", "crates/ecashmesh-core"]
 resolver = "2"
 
 [workspace.package]
