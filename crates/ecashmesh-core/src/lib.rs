@@ -10,6 +10,7 @@
 pub mod evidence;
 mod model;
 pub mod risk;
+pub mod routing;
 
 pub use evidence::{
     ConfidenceLevel, ConnectorEvidence, ConnectorHealth, Evidence, EvidenceAggregate,
@@ -21,3 +22,7 @@ pub use model::{
     RouteExplanation, RouteHop, RouteQuality,
 };
 pub use risk::{EvidenceField, EvidenceRiskPolicy, RiskFactor, evaluate_connector_evidence};
+pub use routing::{
+    PaymentRequest, RankedRoute, RejectedRoute, RiskPenaltyPolicy, RouteRanking,
+    RouteRankingConfig, RouteRejectionReason, RouteSignalWeights, RouteSignals, rank_routes,
+};
