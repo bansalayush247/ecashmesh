@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod evidence;
+pub mod explain;
 mod model;
 pub mod risk;
 pub mod routing;
@@ -15,6 +16,10 @@ pub mod routing;
 pub use evidence::{
     ConfidenceLevel, ConnectorEvidence, ConnectorHealth, Evidence, EvidenceAggregate,
     EvidenceFreshness, EvidenceObservation, EvidenceSource, EvidenceTimestamp, SolvencyStatus,
+};
+pub use explain::{
+    AlternativeExplanation, DecisionReason, DecisionReasonCode, ExplainedRoute,
+    RejectedRouteExplanation, RouteDecisionExplanation, explain_ranking,
 };
 pub use model::{
     Amount, AmountError, ConnectorCapabilities, ConnectorId, ConnectorIdError, ConnectorType,

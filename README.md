@@ -581,8 +581,12 @@ curl -X POST http://127.0.0.1:5000/v1/routes/rank \
 JSON
 ```
 
-The response separates usable `ranked` routes from `rejected` routes, exposing
-component signals, final score, explicit penalty, and risk reason codes.
+The response preserves machine-readable `ranked` and `rejected` routes, and
+adds a human-readable `decision` object. `decision.recommendation` exposes the
+selected route, score, estimated fee, confidence signals, evidence freshness,
+and risk codes. `decision.reasons_selected` answers “why this route?”, while
+each `decision.alternatives[*].reasons_not_selected` answers “why not this
+alternative?”.
 
 ---
 

@@ -10,9 +10,10 @@ use axum::{
 };
 use ecashmesh_core::{
     Amount, ConfidenceLevel, ConnectorCapabilities, ConnectorEvidence, ConnectorHealth,
-    ConnectorId, ConnectorType, Evidence, EvidenceSource, EvidenceTimestamp, FeeQuote,
-    LiquidityInfo, PaymentRequest, ReliabilityInfo, RouteCandidate, RouteHop, RouteRankingConfig,
-    SolvencyStatus, rank_routes,
+    ConnectorId, ConnectorType, DecisionReason, Evidence, EvidenceFreshness, EvidenceSource,
+    EvidenceTimestamp, ExplainedRoute, FeeQuote, LiquidityInfo, PaymentRequest, ReliabilityInfo,
+    RouteCandidate, RouteDecisionExplanation, RouteHop, RouteRankingConfig, SolvencyStatus,
+    explain_ranking, rank_routes,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -77,7 +78,7 @@ async fn rank(Json(request): Json<RankRequest>) -> Result<Json<RankResponse>, Ap
         config,
     );
 
-    Ok(Json(RankResponse::from(ranking)))
+    Ok(Json(RankResponse::from_ranking(ranking)))
 }
 
 #[derive(Debug)]
@@ -461,13 +462,16 @@ fn connector_id(value: &str) -> Result<ConnectorId, ApiError> {
 struct RankResponse {
     ranked: Vec<RankedRouteResponse>,
     rejected: Vec<RejectedRouteResponse>,
+    decision: DecisionResponse,
 }
 
-impl From<ecashmesh_core::RouteRanking> for RankResponse {
-    fn from(ranking: ecashmesh_core::RouteRanking) -> Self {
+impl RankResponse {
+    fn from_ranking(ranking: ecashmesh_core::RouteRanking) -> Self {
+        let decision = DecisionResponse::from(explain_ranking(&ranking));
         Self {
             ranked: ranking.ranked.into_iter().map(Into::into).collect(),
             rejected: ranking.rejected.into_iter().map(Into::into).collect(),
+            decision,
         }
     }
 }
@@ -478,6 +482,8 @@ struct RankedRouteResponse {
     score: u16,
     base_score: u16,
     risk_penalty: u16,
+    estimated_fee_sats: Option<u64>,
+    estimated_fee_freshness: &'static str,
     signals: SignalsResponse,
     risk_codes: Vec<&'static str>,
 }
@@ -494,6 +500,12 @@ impl From<ecashmesh_core::RankedRoute> for RankedRouteResponse {
             score: route.score,
             base_score: route.base_score,
             risk_penalty: route.risk_penalty,
+            estimated_fee_sats: route
+                .quality
+                .total_fee
+                .value()
+                .map(|quote| quote.amount.sats()),
+            estimated_fee_freshness: freshness_code(route.quality.total_fee.freshness()),
             signals: route.signals.into(),
             risk_codes: route
                 .quality
@@ -549,6 +561,121 @@ impl From<ecashmesh_core::RejectedRoute> for RejectedRouteResponse {
                 .map(|reason| format!("{reason:?}"))
                 .collect(),
         }
+    }
+}
+
+#[derive(Serialize)]
+struct DecisionResponse {
+    recommendation: Option<ExplainedRouteResponse>,
+    reasons_selected: Vec<DecisionReasonResponse>,
+    alternatives: Vec<AlternativeResponse>,
+    rejected_routes: Vec<RejectedExplanationResponse>,
+}
+
+impl From<RouteDecisionExplanation> for DecisionResponse {
+    fn from(explanation: RouteDecisionExplanation) -> Self {
+        Self {
+            recommendation: explanation.recommended_route.map(Into::into),
+            reasons_selected: explanation
+                .reasons_selected
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            alternatives: explanation
+                .alternatives
+                .into_iter()
+                .map(|alternative| AlternativeResponse {
+                    route: alternative.route.into(),
+                    reasons_not_selected: alternative
+                        .reasons_not_selected
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                })
+                .collect(),
+            rejected_routes: explanation
+                .rejected_routes
+                .into_iter()
+                .map(|route| RejectedExplanationResponse {
+                    connectors: route
+                        .connector_ids
+                        .into_iter()
+                        .map(|id| id.to_string())
+                        .collect(),
+                    reasons: route.reasons,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ExplainedRouteResponse {
+    connectors: Vec<String>,
+    quality_score: u16,
+    estimated_fee_sats: Option<u64>,
+    estimated_fee_freshness: &'static str,
+    liquidity_confidence: u16,
+    reliability_confidence: u16,
+    evidence_freshness: u16,
+    major_risk_codes: Vec<&'static str>,
+}
+
+impl From<ExplainedRoute> for ExplainedRouteResponse {
+    fn from(route: ExplainedRoute) -> Self {
+        Self {
+            connectors: route
+                .connector_ids
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect(),
+            quality_score: route.quality_score,
+            estimated_fee_sats: route.estimated_fee.map(Amount::sats),
+            estimated_fee_freshness: freshness_code(route.estimated_fee_freshness),
+            liquidity_confidence: route.liquidity_confidence,
+            reliability_confidence: route.reliability_confidence,
+            evidence_freshness: route.evidence_freshness,
+            major_risk_codes: route
+                .major_risks
+                .iter()
+                .map(ecashmesh_core::RiskFactor::reason_code)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DecisionReasonResponse {
+    code: &'static str,
+    message: String,
+}
+
+impl From<DecisionReason> for DecisionReasonResponse {
+    fn from(reason: DecisionReason) -> Self {
+        Self {
+            code: reason.code.as_str(),
+            message: reason.message,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct AlternativeResponse {
+    route: ExplainedRouteResponse,
+    reasons_not_selected: Vec<DecisionReasonResponse>,
+}
+
+#[derive(Serialize)]
+struct RejectedExplanationResponse {
+    connectors: Vec<String>,
+    reasons: Vec<String>,
+}
+
+const fn freshness_code(freshness: EvidenceFreshness) -> &'static str {
+    match freshness {
+        EvidenceFreshness::Fresh => "fresh",
+        EvidenceFreshness::Stale => "stale",
+        EvidenceFreshness::Unknown => "unknown",
     }
 }
 
