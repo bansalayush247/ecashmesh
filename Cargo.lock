@@ -82,6 +82,13 @@ name = "ecashmesh-core"
 version = "0.1.0"
 
 [[package]]
+name = "ecashmesh-simulator"
+version = "0.1.0"
+dependencies = [
+ "ecashmesh-core",
+]
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

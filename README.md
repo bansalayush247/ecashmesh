@@ -588,6 +588,19 @@ and risk codes. `decision.reasons_selected` answers “why this route?”, while
 each `decision.alternatives[*].reasons_not_selected` answers “why not this
 alternative?”.
 
+## Deterministic Simulator
+
+Run every offline routing fixture and verify its checked-in expected result:
+
+```bash
+nix develop -c cargo run -p ecashmesh-simulator
+```
+
+The command has no network dependency. It prints stable ranked and rejected
+connector IDs for healthy high-liquidity, low-liquidity exclusion, cheap stale,
+reliable expensive, new/unobserved, equal-score, and mixed regression cases.
+It exits non-zero if any expected ordering changes.
+
 ---
 
 ## Roadmap
