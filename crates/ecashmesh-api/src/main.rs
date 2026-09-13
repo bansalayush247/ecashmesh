@@ -1,32 +1,35 @@
 //! Local HTTP surface for manually exercising deterministic route ranking.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{
     Json, Router,
+    extract::rejection::JsonRejection,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use ecashmesh_core::{
     Amount, ConfidenceLevel, ConnectorCapabilities, ConnectorEvidence, ConnectorHealth,
-    ConnectorId, ConnectorType, DecisionReason, Evidence, EvidenceFreshness, EvidenceSource,
-    EvidenceTimestamp, ExplainedRoute, FeeQuote, LiquidityInfo, PaymentRequest, ReliabilityInfo,
-    RouteCandidate, RouteDecisionExplanation, RouteHop, RouteRankingConfig, SolvencyStatus,
-    explain_ranking, rank_routes,
+    ConnectorId, ConnectorType, DEMO_EVALUATED_AT, DecisionReason, Evidence, EvidenceFreshness,
+    EvidenceSource, EvidenceTimestamp, ExplainedRoute, FeeQuote, LiquidityInfo, PaymentRequest,
+    ReliabilityInfo, RouteCandidate, RouteDecisionExplanation, RouteHop, RouteRankingConfig,
+    SolvencyStatus, demo_connectors, explain_ranking, rank_routes,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-const DEFAULT_PORT: u16 = 5000;
+const DEFAULT_ADDRESS: &str = "127.0.0.1:5000";
 
 #[tokio::main]
 async fn main() {
     let app = Router::new()
         .route("/", get(index))
         .route("/health", get(health))
-        .route("/v1/routes/rank", post(rank));
-    let address = format!("127.0.0.1:{DEFAULT_PORT}");
+        .route("/v1/routes/rank", post(rank))
+        .route("/v1/routes/evaluate", post(evaluate));
+    let address =
+        std::env::var("ECASHMESH_API_ADDRESS").unwrap_or_else(|_| DEFAULT_ADDRESS.to_owned());
     let listener = tokio::net::TcpListener::bind(&address)
         .await
         .unwrap_or_else(|error| panic!("failed to bind {address}: {error}"));
@@ -41,7 +44,8 @@ async fn index() -> Json<serde_json::Value> {
         "service": "ecashmesh-api",
         "endpoints": {
             "health": "GET /health",
-            "rank_routes": "POST /v1/routes/rank"
+            "rank_routes": "POST /v1/routes/rank",
+            "evaluate_routes": "POST /v1/routes/evaluate"
         }
     }))
 }
@@ -61,7 +65,10 @@ async fn rank(Json(request): Json<RankRequest>) -> Result<Json<RankResponse>, Ap
         .into_iter()
         .try_fold(BTreeMap::new(), |mut evidence, (id, connector)| {
             if evidence.insert(id.clone(), connector).is_some() {
-                return Err(ApiError::new(format!("duplicate connector id: {id}")));
+                return Err(ApiError::new(
+                    "invalid_request",
+                    format!("duplicate connector id: {id}"),
+                ));
             }
             Ok(evidence)
         })?;
@@ -81,14 +88,84 @@ async fn rank(Json(request): Json<RankRequest>) -> Result<Json<RankResponse>, Ap
     Ok(Json(RankResponse::from_ranking(ranking)))
 }
 
+async fn evaluate(
+    request: Result<Json<EvaluateRequest>, JsonRejection>,
+) -> Result<Json<EvaluateResponse>, ApiError> {
+    let Json(request) = request
+        .map_err(|error| ApiError::new("invalid_json", format!("invalid request body: {error}")))?;
+    request.validate()?;
+    let EvaluateRequest {
+        amount,
+        currency,
+        asset,
+        destination,
+        payment_intent,
+        candidate_connectors,
+    } = request;
+
+    let available = demo_connectors()
+        .map_err(|error| ApiError::new("simulator_error", error.to_string()))?
+        .into_iter()
+        .map(|connector| (connector.id.to_string(), connector))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = Vec::with_capacity(candidate_connectors.len());
+    let mut seen = BTreeSet::new();
+    for id in candidate_connectors {
+        if !seen.insert(id.clone()) {
+            return Err(ApiError::new(
+                "duplicate_candidate_connector",
+                format!("candidate connector is repeated: {id}"),
+            ));
+        }
+        let connector = available.get(&id).ok_or_else(|| {
+            ApiError::new(
+                "unknown_candidate_connector",
+                format!("unknown simulated connector: {id}"),
+            )
+        })?;
+        selected.push(connector.clone());
+    }
+
+    let amount = Amount::from_sats(amount);
+    let candidates = selected
+        .iter()
+        .map(|connector| connector.quote(amount))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ApiError::new("simulator_error", error.to_string()))?;
+    let connector_evidence = selected
+        .into_iter()
+        .map(|connector| (connector.id.clone(), connector.evidence))
+        .collect::<BTreeMap<_, _>>();
+    let ranking = rank_routes(
+        PaymentRequest::new(amount),
+        candidates,
+        &connector_evidence,
+        DEMO_EVALUATED_AT,
+        RouteRankingConfig::default(),
+    );
+
+    Ok(Json(EvaluateResponse::from_ranking(
+        PaymentResponse {
+            amount_sats: amount.sats(),
+            currency,
+            asset,
+            destination,
+            payment_intent,
+        },
+        ranking,
+    )))
+}
+
 #[derive(Debug)]
 struct ApiError {
+    code: &'static str,
     message: String,
 }
 
 impl ApiError {
-    fn new(message: impl Into<String>) -> Self {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
+            code,
             message: message.into(),
         }
     }
@@ -98,10 +175,60 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": self.message })),
+            Json(json!({ "error": { "code": self.code, "message": self.message } })),
         )
             .into_response()
     }
+}
+
+#[derive(Deserialize)]
+struct EvaluateRequest {
+    amount: u64,
+    currency: String,
+    asset: String,
+    destination: Option<String>,
+    payment_intent: Option<String>,
+    candidate_connectors: Vec<String>,
+}
+
+impl EvaluateRequest {
+    fn validate(&self) -> Result<(), ApiError> {
+        if self.amount == 0 {
+            return Err(ApiError::new(
+                "invalid_amount",
+                "amount must be greater than zero",
+            ));
+        }
+        if self.currency != "sat" {
+            return Err(ApiError::new(
+                "unsupported_currency",
+                "demo evaluation supports currency 'sat' only",
+            ));
+        }
+        if self.asset != "bitcoin" {
+            return Err(ApiError::new(
+                "unsupported_asset",
+                "demo evaluation supports asset 'bitcoin' only",
+            ));
+        }
+        if !has_text(self.destination.as_deref()) && !has_text(self.payment_intent.as_deref()) {
+            return Err(ApiError::new(
+                "missing_payment_target",
+                "destination or payment_intent is required",
+            ));
+        }
+        if self.candidate_connectors.is_empty() {
+            return Err(ApiError::new(
+                "missing_candidate_connectors",
+                "at least one candidate connector is required",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn has_text(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.trim().is_empty())
 }
 
 #[derive(Deserialize)]
@@ -195,7 +322,7 @@ impl CandidateInput {
             .map(HopInput::into_core)
             .collect::<Result<Vec<_>, _>>()?;
         RouteCandidate::new(Amount::from_sats(self.amount_sats), hops)
-            .map_err(|error| ApiError::new(error.to_string()))
+            .map_err(|error| ApiError::new("invalid_candidate", error.to_string()))
     }
 }
 
@@ -282,11 +409,17 @@ impl<T> EvidenceInput<T> {
         match self.state {
             EvidenceStateInput::Unknown => Ok(Evidence::unknown()),
             EvidenceStateInput::Known | EvidenceStateInput::Stale => {
-                let value = self
-                    .value
-                    .ok_or_else(|| ApiError::new(format!("{field} evidence needs a value")))?;
+                let value = self.value.ok_or_else(|| {
+                    ApiError::new(
+                        "invalid_evidence",
+                        format!("{field} evidence needs a value"),
+                    )
+                })?;
                 let observed_at = self.observed_at.ok_or_else(|| {
-                    ApiError::new(format!("{field} known or stale evidence needs observed_at"))
+                    ApiError::new(
+                        "invalid_evidence",
+                        format!("{field} known or stale evidence needs observed_at"),
+                    )
                 })?;
                 let source = self
                     .source
@@ -415,8 +548,12 @@ struct ReliabilityInput {
 
 impl ReliabilityInput {
     fn into_core(self) -> Result<ReliabilityInfo, ApiError> {
-        ReliabilityInfo::new(self.success_rate_basis_points, self.observations)
-            .ok_or_else(|| ApiError::new("success_rate_basis_points cannot exceed 10000"))
+        ReliabilityInfo::new(self.success_rate_basis_points, self.observations).ok_or_else(|| {
+            ApiError::new(
+                "invalid_reliability",
+                "success_rate_basis_points cannot exceed 10000",
+            )
+        })
     }
 }
 
@@ -455,7 +592,8 @@ impl SolvencyInput {
 }
 
 fn connector_id(value: &str) -> Result<ConnectorId, ApiError> {
-    ConnectorId::new(value).map_err(|error| ApiError::new(error.to_string()))
+    ConnectorId::new(value)
+        .map_err(|error| ApiError::new("invalid_connector_id", error.to_string()))
 }
 
 #[derive(Serialize)]
@@ -474,6 +612,38 @@ impl RankResponse {
             decision,
         }
     }
+}
+
+#[derive(Serialize)]
+struct EvaluateResponse {
+    payment: PaymentResponse,
+    recommended_route: Option<RankedRouteResponse>,
+    ranked_alternatives: Vec<RankedRouteResponse>,
+    rejected_routes: Vec<RejectedRouteResponse>,
+    explanation: DecisionResponse,
+}
+
+impl EvaluateResponse {
+    fn from_ranking(payment: PaymentResponse, ranking: ecashmesh_core::RouteRanking) -> Self {
+        let explanation = DecisionResponse::from(explain_ranking(&ranking));
+        let mut routes = ranking.ranked.into_iter().map(Into::into);
+        Self {
+            payment,
+            recommended_route: routes.next(),
+            ranked_alternatives: routes.collect(),
+            rejected_routes: ranking.rejected.into_iter().map(Into::into).collect(),
+            explanation,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PaymentResponse {
+    amount_sats: u64,
+    currency: String,
+    asset: String,
+    destination: Option<String>,
+    payment_intent: Option<String>,
 }
 
 #[derive(Serialize)]

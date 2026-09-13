@@ -500,6 +500,33 @@ In a second terminal, confirm that it is running:
 curl http://127.0.0.1:5000/health
 ```
 
+For the dashboard/demo flow, use `POST /v1/routes/evaluate`. It validates the
+payment metadata and generates deterministic quotes and evidence for the named
+simulator connectors. The available connector IDs are `cashu:healthy`,
+`cashu:low-liquidity`, `cashu:cheap-stale`, `cashu:reliable-expensive`, and
+`cashu:new`.
+
+```bash
+curl -X POST http://127.0.0.1:5000/v1/routes/evaluate \
+  -H 'content-type: application/json' \
+  --data '{
+    "amount": 10000,
+    "currency": "sat",
+    "asset": "bitcoin",
+    "payment_intent": "demo-lightning-invoice",
+    "candidate_connectors": [
+      "cashu:cheap-stale",
+      "cashu:low-liquidity",
+      "cashu:healthy"
+    ]
+  }'
+```
+
+The response contains `recommended_route`, `ranked_alternatives`,
+`rejected_routes`, and `explanation`. Every ranked route includes its score,
+fee estimate, evidence freshness, and risk codes. Validation failures return
+a `400` JSON error with a stable `error.code`.
+
 Submit candidate routes to `POST /v1/routes/rank`. Evidence is explicitly
 `known`, `stale`, or `unknown`; known and stale evidence require a value and
 an `observed_at` Unix timestamp.

@@ -200,7 +200,8 @@ impl Error for ScenarioError {}
 
 const PAYMENT_AMOUNT: Amount = Amount::from_sats(10_000);
 const FIRST_SEEN: EvidenceTimestamp = EvidenceTimestamp::from_unix_seconds(1_000);
-const EVALUATED_AT: EvidenceTimestamp = EvidenceTimestamp::from_unix_seconds(5_000_000);
+/// Fixed evaluation time used by all built-in simulator fixtures.
+pub const DEMO_EVALUATED_AT: EvidenceTimestamp = EvidenceTimestamp::from_unix_seconds(5_000_000);
 
 /// Returns every built-in scenario in a fixed order.
 ///
@@ -220,6 +221,15 @@ pub fn all_scenarios() -> Result<Vec<RoutingScenario>, ScenarioError> {
         equal_score_tie_break()?,
         mixed_route_regression()?,
     ])
+}
+
+/// Returns the full deterministic connector set used by the demo API.
+///
+/// # Errors
+///
+/// Returns an error if a built-in connector fixture contains an invalid id.
+pub fn demo_connectors() -> Result<Vec<SimulatedConnector>, ScenarioError> {
+    Ok(mixed_route_regression()?.connectors)
 }
 
 /// Runs every built-in scenario without checking its expected output.
@@ -392,7 +402,7 @@ fn scenario<const RANKED: usize, const REJECTED: usize>(
     RoutingScenario {
         name,
         request: PaymentRequest::new(PAYMENT_AMOUNT),
-        evaluated_at: EVALUATED_AT,
+        evaluated_at: DEMO_EVALUATED_AT,
         config: RouteRankingConfig::default(),
         connectors,
         expected_ranked: expected_ranked.map(str::to_owned).to_vec(),
@@ -429,7 +439,7 @@ fn fresh<T>(value: T) -> Evidence<T> {
     Evidence::reported(
         value,
         EvidenceSource::Observer,
-        EVALUATED_AT,
+        DEMO_EVALUATED_AT,
         ConfidenceLevel::High,
     )
 }

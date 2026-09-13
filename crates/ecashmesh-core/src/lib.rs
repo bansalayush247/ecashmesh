@@ -33,6 +33,6 @@ pub use routing::{
     RouteRankingConfig, RouteRejectionReason, RouteSignalWeights, RouteSignals, rank_routes,
 };
 pub use simulator::{
-    RoutingScenario, ScenarioError, ScenarioName, ScenarioResult, SimulatedConnector,
-    all_scenarios, run_all_scenarios, verify_all_scenarios,
+    DEMO_EVALUATED_AT, RoutingScenario, ScenarioError, ScenarioName, ScenarioResult,
+    SimulatedConnector, all_scenarios, demo_connectors, run_all_scenarios, verify_all_scenarios,
 };
