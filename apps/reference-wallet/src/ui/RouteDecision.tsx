@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import type {
   EvidenceState,
   Reason,
@@ -24,6 +24,23 @@ const protocolIcon = (connector: string) =>
     : connector.startsWith("fedimint")
       ? "◉"
       : "ϟ";
+
+const compactId = (value: string, start = 18, end = 10) =>
+  value.length <= start + end + 3
+    ? value
+    : `${value.slice(0, start)}...${value.slice(-end)}`;
+
+const compactDecisionText = (value: string) =>
+  value.replace(/cashu:[a-zA-Z0-9]+/g, (match) => compactId(match));
+
+type DetailsTab = "overview" | "evidence" | "risks" | "path";
+
+const detailTabs: { key: DetailsTab; label: string }[] = [
+  { key: "overview", label: "Overview" },
+  { key: "evidence", label: "Evidence" },
+  { key: "risks", label: "Risks" },
+  { key: "path", label: "Path" },
+];
 
 function Score({ score }: { score: number }) {
   return (
@@ -148,7 +165,9 @@ function RouteCard({
         <View style={local.routeIdentity}>
           <ConnectorMark connector={route.connector} />
           <View style={{ flex: 1, gap: 3 }}>
-            <Text style={local.routeName}>{route.connector}</Text>
+            <Text selectable style={local.routeName}>
+              {compactId(route.connector)}
+            </Text>
             <Text style={styles.small}>
               {sats(route.fee.amount)} ·{" "}
               {estimatedTime(route.estimated_time_seconds)}
@@ -161,6 +180,7 @@ function RouteCard({
       <Button
         secondary
         onPress={onInspect}
+        accessibilityLabel={`Inspect ${route.connector}`}
       >{`Inspect ${route.connector}`}</Button>
     </View>
   );
@@ -209,7 +229,9 @@ export function DecisionView({
           <View style={local.routeIdentity}>
             <ConnectorMark connector={recommended.connector} />
             <View style={{ flex: 1, gap: 3 }}>
-              <Text style={local.routeName}>{recommended.connector}</Text>
+              <Text selectable style={local.routeName}>
+                {compactId(recommended.connector)}
+              </Text>
               <Protocols route={recommended} />
             </View>
           </View>
@@ -227,9 +249,21 @@ export function DecisionView({
         <RouteMetrics route={recommended} />
         <View style={local.whyStrip}>
           <Text style={local.whyCheck}>✓</Text>
-          <Text style={local.whyText}>{decision.explanation.summary}</Text>
+          <Text style={local.whyText}>
+            {compactDecisionText(decision.explanation.summary)}
+          </Text>
         </View>
-        <Risks flags={recommended.risk_flags} />
+        {recommended.risk_flags.length > 0 && (
+          <View style={local.riskSummary}>
+            <Text style={local.riskSummaryTitle}>
+              {recommended.risk_flags.length} important risk
+              {recommended.risk_flags.length === 1 ? "" : "s"}
+            </Text>
+            <Text style={local.riskSummaryText}>
+              Open route details to review evidence, risks and path.
+            </Text>
+          </View>
+        )}
         <Button onPress={() => select(recommended)}>
           Use recommended route
         </Button>
@@ -299,6 +333,7 @@ export function RouteDetails({
   select: (route: Route) => void;
 }) {
   const [showRaw, setShowRaw] = useState(false);
+  const [activeTab, setActiveTab] = useState<DetailsTab>("overview");
   const isRecommended = route.route_id === decision.recommended_route?.route_id;
   const reasons = isRecommended
     ? decision.explanation.reasons
@@ -312,7 +347,9 @@ export function RouteDetails({
           <View style={local.routeIdentity}>
             <ConnectorMark connector={route.connector} />
             <View style={{ flex: 1, gap: 4 }}>
-              <Text style={local.routeName}>{route.connector}</Text>
+              <Text selectable style={local.routeName}>
+                {compactId(route.connector)}
+              </Text>
               <Protocols route={route} />
             </View>
           </View>
@@ -320,103 +357,162 @@ export function RouteDetails({
         </View>
       </Surface>
       <View style={local.tabs}>
-        <Text style={local.activeTab}>Overview</Text>
-        <Text style={local.tab}>Evidence</Text>
-        <Text style={local.tab}>Risks</Text>
-        <Text style={local.tab}>Path</Text>
+        {detailTabs.map((tab) => (
+          <Pressable
+            accessibilityRole="tab"
+            accessibilityState={{ selected: activeTab === tab.key }}
+            key={tab.key}
+            onPress={() => setActiveTab(tab.key)}
+            style={[
+              local.tabButton,
+              activeTab === tab.key && local.activeTabButton,
+            ]}
+          >
+            <Text style={activeTab === tab.key ? local.activeTab : local.tab}>
+              {tab.label}
+            </Text>
+          </Pressable>
+        ))}
       </View>
-      <Section
-        title={
-          isRecommended ? "✦ Why this route?" : "Why not this alternative?"
-        }
-      >
-        <Reasons reasons={reasons} />
-      </Section>
-      <Risks flags={route.risk_flags} />
-      <Section title="Score Breakdown">
-        <Metric
-          label="Liquidity"
-          value={route.liquidity_confidence}
-          color={colors.green}
-        />
-        <Metric
-          label="Reliability"
-          value={route.reliability_confidence}
-          color={colors.blue}
-        />
-        <Metric
-          label="Evidence"
-          value={route.evidence_freshness}
-          color={colors.violet}
-        />
-        <Metric label="Fees" value={route.fee_reasonableness} color="#FFB11B" />
-        <Metric
-          label="Risk penalty"
-          value={100 - route.risk_penalty}
-          color="#A8B7CF"
-        />
-      </Section>
-      <Button onPress={() => select(route)}>Use this route</Button>
-      <Section title="Route / path">
-        <Text style={styles.small}>
-          Host wallet → connector path → Lightning destination
-        </Text>
-        {route.path.map((connector, i) => {
-          const evidence = decision.evidence.find(
-            (item) => item.connector === connector,
-          );
-          return (
-            <View key={`${connector}-${i}`} style={local.pathCard}>
-              <Text style={local.pathStep}>{i + 1}</Text>
-              <View style={{ flex: 1, gap: 6 }}>
-                <Text style={styles.subtitle}>{connector}</Text>
-                {evidence ? (
-                  <>
-                    <Row label="Protocol" value={evidence.connector_type} />
-                    {(
-                      [
-                        "liquidity",
-                        "fee",
-                        "hop_reliability",
-                        "health",
-                        "solvency",
-                        "connector_reliability",
-                      ] as const
-                    ).map((key) => (
-                      <EvidenceObservation
-                        key={key}
-                        label={key}
-                        evidence={evidence[key]}
-                      />
-                    ))}
-                  </>
-                ) : (
+      {activeTab === "overview" && (
+        <>
+          <Section
+            title={
+              isRecommended ? "✦ Why this route?" : "Why not this alternative?"
+            }
+          >
+            <Reasons reasons={reasons.slice(0, 3)} />
+          </Section>
+          <Section title="Score Breakdown">
+            <Metric
+              label="Liquidity"
+              value={route.liquidity_confidence}
+              color={colors.green}
+            />
+            <Metric
+              label="Reliability"
+              value={route.reliability_confidence}
+              color={colors.blue}
+            />
+            <Metric
+              label="Evidence"
+              value={route.evidence_freshness}
+              color={colors.violet}
+            />
+            <Metric
+              label="Fees"
+              value={route.fee_reasonableness}
+              color="#FFB11B"
+            />
+            <Metric
+              label="Risk penalty"
+              value={100 - route.risk_penalty}
+              color="#A8B7CF"
+            />
+          </Section>
+          {route.risk_flags.length > 0 && (
+            <Text style={styles.small}>
+              {route.risk_flags.length} risk warning
+              {route.risk_flags.length === 1 ? "" : "s"} found. Open Risks for
+              the full list.
+            </Text>
+          )}
+        </>
+      )}
+      {activeTab === "evidence" && (
+        <Section title="Evidence">
+          {route.path.map((connector, i) => {
+            const evidence = decision.evidence.find(
+              (item) => item.connector === connector,
+            );
+            if (!evidence) {
+              return (
+                <View key={`${connector}-${i}`} style={local.pathCard}>
                   <Text style={styles.body}>
                     No connector evidence returned.
                   </Text>
-                )}
+                </View>
+              );
+            }
+            return (
+              <View key={`${connector}-${i}`} style={local.pathCard}>
+                <View style={{ flex: 1, gap: 6 }}>
+                  <Text selectable style={local.compactCode}>
+                    {compactId(connector)}
+                  </Text>
+                  <Row label="Protocol" value={evidence.connector_type} />
+                  {(
+                    [
+                      "liquidity",
+                      "fee",
+                      "hop_reliability",
+                      "health",
+                      "solvency",
+                      "connector_reliability",
+                    ] as const
+                  ).map((key) => (
+                    <EvidenceObservation
+                      key={key}
+                      label={key}
+                      evidence={evidence[key]}
+                    />
+                  ))}
+                </View>
               </View>
-            </View>
-          );
-        })}
-      </Section>
-      <Section title="Evaluation details">
-        <Row label="Route ID" value={route.route_id} />
-        <Row label="Quote ID" value={decision.quote_id} />
-        <Row label="Estimated fee" value={sats(route.fee.amount)} />
-        <Row
-          label="Estimated time"
-          value={estimatedTime(route.estimated_time_seconds)}
-        />
-        <Button secondary onPress={() => setShowRaw(!showRaw)}>
-          {showRaw ? "Hide response JSON" : "Inspect response JSON"}
-        </Button>
-        {showRaw && (
-          <Text selectable style={styles.code}>
-            {JSON.stringify(decision, null, 2)}
-          </Text>
-        )}
-      </Section>
+            );
+          })}
+        </Section>
+      )}
+      {activeTab === "risks" && (
+        <Section title="Risks">
+          {route.risk_flags.length === 0 ? (
+            <Text style={styles.body}>No important risks returned.</Text>
+          ) : (
+            <Risks flags={route.risk_flags} />
+          )}
+          {reasons.length > 3 && <Reasons reasons={reasons.slice(3)} />}
+        </Section>
+      )}
+      {activeTab === "path" && (
+        <>
+          <Section title="Route / path">
+            <Text style={styles.small}>
+              Host wallet → connector path → Lightning destination
+            </Text>
+            {route.path.map((connector, i) => (
+              <View key={`${connector}-${i}`} style={local.pathCard}>
+                <Text style={local.pathStep}>{i + 1}</Text>
+                <View style={{ flex: 1, gap: 6 }}>
+                  <Text selectable style={local.pathName}>
+                    {compactId(connector, 24, 14)}
+                  </Text>
+                  <Text selectable style={local.compactCode}>
+                    {connector}
+                  </Text>
+                </View>
+              </View>
+            ))}
+          </Section>
+          <Section title="Evaluation details">
+            <Row label="Route ID" value={compactId(route.route_id)} />
+            <Row label="Quote ID" value={decision.quote_id} />
+            <Row label="Estimated fee" value={sats(route.fee.amount)} />
+            <Row
+              label="Estimated time"
+              value={estimatedTime(route.estimated_time_seconds)}
+            />
+            <Button secondary onPress={() => setShowRaw(!showRaw)}>
+              {showRaw ? "Hide response JSON" : "Inspect response JSON"}
+            </Button>
+            {showRaw && (
+              <Text selectable style={styles.code}>
+                {JSON.stringify(decision, null, 2)}
+              </Text>
+            )}
+          </Section>
+        </>
+      )}
+      <Button onPress={() => select(route)}>Use this route</Button>
     </View>
   );
 }
@@ -466,6 +562,7 @@ const local = StyleSheet.create({
   },
   routeIdentity: {
     flex: 1,
+    minWidth: 0,
     flexDirection: "row",
     gap: 10,
     alignItems: "center",
@@ -479,7 +576,13 @@ const local = StyleSheet.create({
     alignItems: "center",
   },
   connectorMarkText: { color: "white", fontSize: 26, fontWeight: "700" },
-  routeName: { color: colors.ink, fontSize: 15, fontWeight: "700" },
+  routeName: {
+    color: colors.ink,
+    fontSize: 15,
+    lineHeight: 20,
+    fontWeight: "700",
+    flexShrink: 1,
+  },
   pills: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -545,6 +648,19 @@ const local = StyleSheet.create({
   },
   whyCheck: { color: colors.green, fontWeight: "800" },
   whyText: { flex: 1, color: "#087D49", fontSize: 12, lineHeight: 17 },
+  riskSummary: {
+    backgroundColor: colors.sand,
+    borderRadius: 8,
+    padding: 10,
+    gap: 3,
+  },
+  riskSummaryTitle: {
+    color: colors.amber,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: "700",
+  },
+  riskSummaryText: { color: colors.amber, fontSize: 11, lineHeight: 16 },
   risks: { backgroundColor: colors.sand, borderRadius: 9, padding: 11, gap: 4 },
   riskTitle: { color: colors.amber, fontWeight: "700", fontSize: 12 },
   riskText: { color: colors.amber, fontSize: 12, lineHeight: 17 },
@@ -573,20 +689,23 @@ const local = StyleSheet.create({
   },
   tabs: {
     flexDirection: "row",
-    justifyContent: "space-around",
     backgroundColor: "#F0F4FA",
     borderRadius: 8,
-    paddingVertical: 9,
+    padding: 4,
   },
-  tab: { color: colors.muted, fontSize: 12 },
+  tabButton: {
+    flex: 1,
+    minHeight: 38,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 7,
+  },
+  activeTabButton: { backgroundColor: colors.surface },
+  tab: { color: colors.muted, fontSize: 12, fontWeight: "600" },
   activeTab: {
     color: colors.ink,
     fontSize: 12,
     fontWeight: "700",
-    borderBottomWidth: 2,
-    borderColor: colors.blue,
-    paddingBottom: 7,
-    marginBottom: -9,
   },
   pathCard: {
     flexDirection: "row",
@@ -617,4 +736,18 @@ const local = StyleSheet.create({
     paddingVertical: 6,
   },
   observationTitle: { color: colors.ink, fontSize: 12, fontWeight: "700" },
+  pathName: {
+    color: colors.ink,
+    fontSize: 14,
+    lineHeight: 19,
+    fontWeight: "700",
+    flexShrink: 1,
+  },
+  compactCode: {
+    color: colors.muted,
+    fontSize: 10,
+    lineHeight: 15,
+    fontFamily: "monospace",
+    flexShrink: 1,
+  },
 });

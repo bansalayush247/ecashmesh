@@ -39,14 +39,17 @@ export function Button({
   onPress,
   secondary = false,
   disabled = false,
+  accessibilityLabel,
 }: {
   children: string;
   onPress: () => void;
   secondary?: boolean;
   disabled?: boolean;
+  accessibilityLabel?: string;
 }) {
   return (
     <Pressable
+      accessibilityLabel={accessibilityLabel}
       accessibilityRole="button"
       accessibilityState={{ disabled }}
       disabled={disabled}
@@ -57,7 +60,11 @@ export function Button({
         (pressed || disabled) && { opacity: 0.7 },
       ]}
     >
-      <Text style={[styles.buttonText, secondary && styles.secondaryText]}>
+      <Text
+        numberOfLines={1}
+        ellipsizeMode="middle"
+        style={[styles.buttonText, secondary && styles.secondaryText]}
+      >
         {children}
       </Text>
     </Pressable>
@@ -233,6 +240,7 @@ export const styles = StyleSheet.create({
   rowLabel: { flex: 1, fontSize: 13, lineHeight: 19, color: colors.muted },
   rowValue: {
     flex: 1.25,
+    flexShrink: 1,
     fontSize: 13,
     lineHeight: 19,
     fontWeight: "700",

@@ -41,10 +41,12 @@ test("real API decision → path and evidence → host confirmation → server s
     fullPage: true,
   });
   await page.getByRole("button", { name: "Inspect recommended path" }).click();
+  await page.getByRole("tab", { name: "Evidence" }).click();
+  await expect(page.getByText("solvency", { exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "Path" }).click();
   await expect(
     page.getByRole("heading", { name: "Route / path" }),
   ).toBeVisible();
-  await expect(page.getByText("solvency", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Inspect response JSON" }).click();
   await expect(page.getByText('"quote_id"', { exact: false })).toBeVisible();
   await page
@@ -90,12 +92,13 @@ test("choosing a stale alternative preserves its warnings and route through conf
     .getByRole("button", { name: "Inspect cashu:cheap-stale", exact: true })
     .click();
   await expect(
+    page.getByRole("heading", { name: "Why not this alternative?" }),
+  ).toBeVisible();
+  await page.getByRole("tab", { name: "Risks" }).click();
+  await expect(
     page
       .getByText("• stale evidence (stale_evidence)", { exact: true })
       .first(),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Why not this alternative?" }),
   ).toBeVisible();
   await page
     .getByRole("button", { name: "Use this route", exact: true })
