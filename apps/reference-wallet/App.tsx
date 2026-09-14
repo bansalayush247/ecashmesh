@@ -3,6 +3,7 @@ import {
   BackHandler,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -24,6 +25,7 @@ import {
   sats,
   Section,
   styles,
+  Surface,
 } from "./src/ui/components";
 import { DecisionView, Risks, RouteDetails } from "./src/ui/RouteDecision";
 
@@ -43,10 +45,99 @@ export default function App() {
   );
 }
 
+function ScreenHeader({
+  title,
+  onBack,
+  backLabel = "Go back",
+  end = "⌁",
+}: {
+  title: string;
+  onBack?: () => void;
+  backLabel?: string;
+  end?: string;
+}) {
+  return (
+    <View style={local.screenHeader}>
+      {onBack ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={backLabel}
+          onPress={onBack}
+          style={local.iconButton}
+        >
+          <Text style={local.headerIcon}>‹</Text>
+        </Pressable>
+      ) : (
+        <View style={local.iconButton} />
+      )}
+      <Text style={local.screenTitle}>{title}</Text>
+      <View style={local.iconButton}>
+        <Text style={local.headerEnd}>{end}</Text>
+      </View>
+    </View>
+  );
+}
+
+function EcashMeshMark({ small = false }: { small?: boolean }) {
+  return (
+    <View style={[local.meshMark, small && local.meshMarkSmall]}>
+      <Text style={[local.meshNode, small && local.meshNodeSmall]}>✦</Text>
+    </View>
+  );
+}
+
+function Choice({
+  title,
+  copy,
+  icon,
+  selected = false,
+}: {
+  title: string;
+  copy: string;
+  icon: string;
+  selected?: boolean;
+}) {
+  return (
+    <View style={[local.choice, selected && local.choiceSelected]}>
+      <Text style={[local.choiceIcon, selected && { color: colors.blue }]}>
+        {icon}
+      </Text>
+      <View style={{ flex: 1, gap: 2 }}>
+        <Text style={local.choiceTitle}>{title}</Text>
+        <Text style={styles.small}>{copy}</Text>
+      </View>
+      <View style={[local.radio, selected && local.radioSelected]}>
+        {selected && <View style={local.radioDot} />}
+      </View>
+    </View>
+  );
+}
+
+function BottomNav() {
+  return (
+    <View style={local.bottomNav}>
+      {[
+        ["⌂", "Home"],
+        ["◒", "Assets"],
+        ["◷", "Activity"],
+        ["⚙", "Settings"],
+      ].map(([icon, label], i) => (
+        <View key={label} style={local.navItem}>
+          <Text style={[local.navIcon, i === 0 && local.navActive]}>
+            {icon}
+          </Text>
+          <Text style={[local.navText, i === 0 && local.navTextActive]}>
+            {label}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 function ReferenceWallet() {
   const flow = usePaymentFlow(ecashmesh, simulator);
   const scroll = useRef<ScrollView>(null);
-  const embedded = flow.screen === "decision" || flow.screen === "details";
   useEffect(() => {
     scroll.current?.scrollTo({ y: 0, animated: false });
   }, [flow.screen]);
@@ -75,118 +166,201 @@ function ReferenceWallet() {
           keyboardShouldPersistTaps="handled"
         >
           <View style={local.shell}>
-            <View style={local.brandRow}>
-              <View style={local.brand}>
-                <View style={local.mark}>
-                  <Text style={local.markText}>p</Text>
-                </View>
-                <Text style={local.brandText}>Pocket</Text>
-              </View>
-              <Text style={local.demoBadge}>REFERENCE CLIENT</Text>
-            </View>
-            <Text style={styles.small}>Simulation mode · No funds move</Text>
-            {flow.screen !== "home" && (
-              <Button secondary onPress={flow.back}>
-                {flow.screen === "decision"
-                  ? "Back to payment"
-                  : flow.screen === "confirmation" || flow.screen === "details"
-                    ? "Back to Smart Route"
-                    : "Back to Pocket"}
-              </Button>
-            )}
-
             {flow.screen === "home" && (
               <>
-                <Heading
-                  eyebrow="Your wallet, a smarter send"
-                  title="Where to next?"
-                >
-                  Send a demo payment with a little more confidence in the path
-                  it takes.
-                </Heading>
-                <View
-                  style={local.homeGraphic}
-                  accessibilityElementsHidden
-                  importantForAccessibility="no-hide-descendants"
-                >
-                  <Text style={local.graphicText}>↗</Text>
-                  <Text style={local.graphicCaption}>
-                    A better way through.
-                  </Text>
+                <View style={local.homeHeader}>
+                  <View style={local.avatar}>
+                    <Text style={local.avatarText}>A</Text>
+                  </View>
+                  <Text style={local.homeTitle}>My Wallet⌄</Text>
+                  <Text style={local.settings}>⚙</Text>
                 </View>
-                <Button onPress={flow.edit}>Send payment</Button>
-                <Section title="EcashMesh Smart Route">
-                  <Text style={styles.body}>
-                    Your wallet asks EcashMesh to compare available routes.
-                    Review the evidence and cost, then return here to confirm.
-                  </Text>
-                  <Text style={styles.small}>
-                    Powered by deterministic simulated connectors.
-                  </Text>
+                <View style={local.balanceCard}>
+                  <Text style={local.balanceLabel}>Total Balance ◉</Text>
+                  <Text style={local.balance}>1,234,567 sats</Text>
+                  <Text style={local.balanceFiat}>≈ $742.11</Text>
+                </View>
+                <View style={local.quickActions}>
+                  {[
+                    ["↑", "Send"],
+                    ["↓", "Receive"],
+                    ["⌘", "Scan"],
+                    ["•••", "More"],
+                  ].map(([icon, label]) => (
+                    <View key={label} style={local.quickAction}>
+                      <View style={local.quickCircle}>
+                        <Text style={local.quickIcon}>{icon}</Text>
+                      </View>
+                      <Text style={local.quickLabel}>{label}</Text>
+                    </View>
+                  ))}
+                </View>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={flow.edit}
+                  style={local.meshPromo}
+                >
+                  <EcashMeshMark small />
+                  <View style={{ flex: 1 }}>
+                    <Text style={local.promoOverline}>
+                      Smarter Payments with
+                    </Text>
+                    <Text style={local.promoTitle}>EcashMesh</Text>
+                    <Text style={styles.small}>
+                      Find the best route across Cashu, Fedimint and Lightning.
+                    </Text>
+                  </View>
+                  <Text style={local.promoArrow}>›</Text>
+                </Pressable>
+                <Section title="Recent Activity">
+                  <View style={local.activityHead}>
+                    <Text style={local.activityNote}>Simulator examples</Text>
+                    <Text style={local.seeAll}>See all</Text>
+                  </View>
+                  {[
+                    [
+                      "↓",
+                      "Received",
+                      "+21,000 sats",
+                      "2 hours ago",
+                      "#E5FAF1",
+                      colors.green,
+                    ],
+                    [
+                      "↑",
+                      "Sent",
+                      "-50,000 sats",
+                      "1 day ago",
+                      "#FFF0F1",
+                      colors.red,
+                    ],
+                    [
+                      "↓",
+                      "Received",
+                      "+100,000 sats",
+                      "2 days ago",
+                      "#E5FAF1",
+                      colors.green,
+                    ],
+                  ].map(([icon, label, amount, time, bg, color]) => (
+                    <View key={`${label}-${time}`} style={local.activityRow}>
+                      <View
+                        style={[
+                          local.activityIcon,
+                          { backgroundColor: bg as string },
+                        ]}
+                      >
+                        <Text
+                          style={{ color: color as string, fontWeight: "800" }}
+                        >
+                          {icon}
+                        </Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={local.activityLabel}>{label}</Text>
+                        <Text style={styles.small}>{time}</Text>
+                      </View>
+                      <Text
+                        style={[
+                          local.activityAmount,
+                          { color: color as string },
+                        ]}
+                      >
+                        {amount}
+                      </Text>
+                    </View>
+                  ))}
                 </Section>
+                <Button onPress={flow.edit}>Send payment</Button>
+                <BottomNav />
               </>
             )}
 
             {flow.screen === "payment" && (
               <>
-                <Heading eyebrow="Pocket / Send" title="Make a demo payment">
-                  Enter the payment you want Smart Route to evaluate.
-                </Heading>
-                <Text style={styles.subtitle}>Amount in sats</Text>
-                <TextInput
-                  accessibilityLabel="Amount in sats"
-                  keyboardType="number-pad"
-                  value={flow.amount}
-                  onChangeText={flow.setAmount}
-                  style={[styles.input, local.amount]}
-                  placeholder="100000"
-                />
-                <Text style={styles.small}>
-                  Asset: BTC · 1 sat = 0.00000001 BTC
-                </Text>
-                <Text style={styles.subtitle}>Lightning destination</Text>
-                <TextInput
-                  accessibilityLabel="Lightning destination"
-                  value={flow.destination}
-                  onChangeText={flow.setDestination}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  style={styles.input}
-                  placeholder="Lightning payment target"
-                />
-                <Text style={styles.small}>
-                  The prefilled target is simulated. Payment intent: Send.
-                </Text>
+                <ScreenHeader title="Send" onBack={flow.back} end="⌗" />
+                <Text style={local.fieldLabel}>Amount</Text>
+                <View style={local.amountWrap}>
+                  <TextInput
+                    accessibilityLabel="Amount in sats"
+                    keyboardType="number-pad"
+                    value={flow.amount}
+                    onChangeText={flow.setAmount}
+                    style={local.amountInput}
+                    placeholder="100000"
+                  />
+                  <Text style={local.satsSuffix}>sats</Text>
+                </View>
+                <Text style={local.fiatHint}>≈ $60.09</Text>
+                <Text style={local.fieldLabel}>Destination</Text>
+                <View style={local.destinationWrap}>
+                  <TextInput
+                    accessibilityLabel="Lightning destination"
+                    value={flow.destination}
+                    onChangeText={flow.setDestination}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    style={local.destinationInput}
+                    placeholder="Lightning payment target"
+                  />
+                  <Text style={local.destinationIcon}>⌗</Text>
+                </View>
+                <View style={local.contactCard}>
+                  <Text style={local.contactBolt}>ϟ</Text>
+                  <View>
+                    <Text style={local.contactName}>Coffee Shop</Text>
+                    <Text style={styles.small}>Online store</Text>
+                  </View>
+                </View>
                 {flow.error && <ErrorNotice error={flow.error} />}
-                <Section title="Choose how to send">
-                  <Text style={styles.body}>
-                    Compare fees, liquidity, reliability and evidence before you
-                    choose a route.
-                  </Text>
-                  <Button onPress={() => void flow.evaluate()}>
-                    EcashMesh Smart Route
-                  </Button>
-                  <Text style={styles.small}>
-                    All available simulator connectors are evaluated.
-                  </Text>
+                <Section title="Payment Method">
+                  <Choice
+                    title="Use EcashMesh"
+                    copy="Find the best route automatically"
+                    icon="✦"
+                    selected
+                  />
+                  <Choice
+                    title="Lightning (direct)"
+                    copy="May be faster, higher fees"
+                    icon="ϟ"
+                  />
+                  <Choice
+                    title="Cashu (specific mint)"
+                    copy="Use a specific mint"
+                    icon="◈"
+                  />
+                  <Choice
+                    title="Fedimint (specific federation)"
+                    copy="Use a specific federation"
+                    icon="◉"
+                  />
                 </Section>
-              </>
-            )}
-
-            {embedded && (
-              <View style={local.embeddedHeader}>
-                <Text style={styles.eyebrow}>Powered by EcashMesh</Text>
-                <Text style={styles.small}>
-                  Smart Route · integrated into Pocket
+                <Button onPress={() => void flow.evaluate()}>
+                  EcashMesh Smart Route
+                </Button>
+                <Text style={local.powered}>
+                  Powered by EcashMesh · deterministic simulator
                 </Text>
-              </View>
+              </>
             )}
 
             {flow.screen === "decision" && (
               <>
+                <ScreenHeader
+                  title="EcashMesh"
+                  onBack={flow.back}
+                  backLabel="Back to payment"
+                />
+                <View style={local.integrationLine}>
+                  <EcashMeshMark small />
+                  <Text style={styles.small}>
+                    Smart Route · integrated into My Wallet
+                  </Text>
+                </View>
                 <Heading
                   eyebrow="Smart Route / Evaluation"
-                  title="A path worth choosing."
+                  title="Route Options"
                 >
                   {flow.payment
                     ? `${sats(flow.payment.amount)} · Lightning · Send`
@@ -218,9 +392,10 @@ function ReferenceWallet() {
 
             {flow.screen === "details" && flow.decision && flow.selected && (
               <>
+                <ScreenHeader title="Route Details" onBack={flow.back} />
                 <Heading
                   eyebrow="Smart Route / Details"
-                  title="Look at the whole path."
+                  title="Understand the route."
                 />
                 <RouteDetails
                   key={flow.selected.route_id}
@@ -235,38 +410,54 @@ function ReferenceWallet() {
               flow.payment &&
               flow.selected && (
                 <>
-                  <Heading
-                    eyebrow="Pocket / Confirmation"
-                    title="Ready to simulate?"
-                  >
-                    Smart Route has returned your selected path to Pocket.
-                    Review it before confirming.
-                  </Heading>
-                  <Text style={local.paymentAmount}>
-                    {sats(flow.payment.amount)}
-                  </Text>
-                  <Row label="To" value={flow.payment.destination.value} />
-                  <Row label="Intent" value="Send · BTC" />
-                  <Row
-                    label="Selected connector"
-                    value={flow.selected.connector}
-                  />
-                  <Row
-                    label="Selected route ID"
-                    value={flow.selected.route_id}
-                  />
-                  <Row
-                    label="Estimated fee"
-                    value={sats(flow.selected.fee.amount)}
-                  />
-                  <Row
-                    label="Estimated time"
-                    value={`${flow.selected.estimated_time_seconds} seconds`}
-                  />
+                  <ScreenHeader title="Confirm Payment" onBack={flow.back} />
+                  <Text style={local.testEyebrow}>Pocket / Confirmation</Text>
+                  <Surface>
+                    <View style={local.confirmTop}>
+                      <View style={local.confirmIdentity}>
+                        <EcashMeshMark small />
+                        <View>
+                          <Text style={local.confirmName}>
+                            {flow.selected.connector}
+                          </Text>
+                          <Text style={styles.small}>
+                            ◈ Cashu · ϟ Lightning
+                          </Text>
+                          <Text style={styles.small}>
+                            ⌁ {flow.selected.path.length} hops
+                          </Text>
+                        </View>
+                      </View>
+                      <View style={local.confirmScore}>
+                        <Text style={local.confirmScoreNumber}>
+                          {flow.selected.score}
+                        </Text>
+                        <Text style={styles.small}>/100</Text>
+                      </View>
+                    </View>
+                    <View style={local.divider} />
+                    <Row label="Amount" value={sats(flow.payment.amount)} />
+                    <Row
+                      label="Fee"
+                      value={`${sats(flow.selected.fee.amount)} (${flow.selected.fee_reasonableness}%)`}
+                    />
+                    <Row
+                      label="Estimated time"
+                      value={`~ ${flow.selected.estimated_time_seconds} seconds`}
+                    />
+                    <Row
+                      label="Destination"
+                      value={flow.payment.destination.value}
+                    />
+                    <Row
+                      label="Selected route ID"
+                      value={flow.selected.route_id}
+                    />
+                  </Surface>
                   <Risks flags={flow.selected.risk_flags} />
                   <Text style={styles.body}>
-                    Confirmation runs the selected route in the local simulator.
-                    It does not send a real payment.
+                    This host-wallet confirmation runs only the selected route
+                    in the local simulator. It does not send a real payment.
                   </Text>
                   {flow.error && <ErrorNotice error={flow.error} />}
                   {flow.busy ? (
@@ -286,33 +477,51 @@ function ReferenceWallet() {
 
             {flow.screen === "success" && flow.receipt && (
               <>
-                <View style={local.successMark}>
-                  <Text style={local.successCheck}>✓</Text>
+                <ScreenHeader title="Payment Complete" onBack={flow.home} />
+                <View style={local.successHero}>
+                  <View style={local.successMark}>
+                    <Text style={local.successCheck}>✓</Text>
+                  </View>
+                  <Text style={local.successTitle}>Payment Sent!</Text>
+                  <Text style={local.successAmount}>
+                    {sats(flow.receipt.amount)}
+                  </Text>
+                  <Text style={styles.body}>to Coffee Shop</Text>
                 </View>
+                <Text style={local.testEyebrow}>Pocket / Simulator result</Text>
                 <Heading
-                  eyebrow="Pocket / Simulator result"
+                  eyebrow="Simulator-backed success"
                   title="Simulation complete"
                 >
                   {flow.receipt.message}
                 </Heading>
-                <Row label="Amount" value={sats(flow.receipt.amount)} />
-                <Row
-                  label="Simulated fee"
-                  value={sats(flow.receipt.fee.amount)}
-                />
-                <Row label="Path" value={flow.receipt.path.join(" → ")} />
-                <Row label="Route ID" value={flow.receipt.route_id} />
-                <Row label="Simulation ID" value={flow.receipt.simulation_id} />
+                <Surface>
+                  <Row
+                    label="Simulated fee"
+                    value={sats(flow.receipt.fee.amount)}
+                  />
+                  <Row label="Path" value={flow.receipt.path.join(" → ")} />
+                  <Row label="Route ID" value={flow.receipt.route_id} />
+                  <Row
+                    label="Simulation ID"
+                    value={flow.receipt.simulation_id}
+                  />
+                </Surface>
                 <Text style={styles.small}>
                   This result is returned by the simulator. Nothing is stored as
                   a transaction.
                 </Text>
-                <Button onPress={flow.home}>Return to Pocket</Button>
+                <Button secondary onPress={flow.home}>
+                  Return to Pocket
+                </Button>
               </>
             )}
-            <Text style={local.footer}>
-              Pocket is a reference host. EcashMesh powers route decisions.
-            </Text>
+            {flow.screen !== "home" && (
+              <Text style={local.footer}>
+                EcashMesh is an evidence-aware routing capability inside this
+                reference wallet.
+              </Text>
+            )}
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -322,81 +531,298 @@ function ReferenceWallet() {
 
 const local = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.paper },
-  scroll: { flexGrow: 1, alignItems: "center", padding: 16 },
-  shell: { width: "100%", maxWidth: 540, padding: 12, gap: 16 },
-  brandRow: {
+  scroll: {
+    flexGrow: 1,
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingBottom: 32,
+  },
+  shell: { width: "100%", maxWidth: 460, paddingTop: 8, gap: 13 },
+  screenHeader: {
+    minHeight: 54,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 8,
-    paddingVertical: 12,
   },
-  brand: { flexDirection: "row", alignItems: "center", gap: 9 },
-  brandText: {
-    color: colors.ink,
-    fontSize: 25,
-    fontWeight: "700",
-    letterSpacing: -1,
-  },
-  mark: {
-    height: 36,
+  iconButton: {
     width: 36,
-    borderRadius: 12,
-    backgroundColor: colors.ink,
-    alignItems: "center",
+    height: 36,
     justifyContent: "center",
+    alignItems: "center",
   },
-  markText: {
-    fontSize: 30,
-    color: colors.paper,
-    fontWeight: "700",
-    marginTop: -5,
-  },
-  demoBadge: {
-    fontSize: 9,
-    fontWeight: "700",
-    color: colors.muted,
-    letterSpacing: 1,
-  },
-  homeGraphic: {
-    height: 210,
-    backgroundColor: colors.mint,
-    borderRadius: 24,
-    padding: 24,
-    justifyContent: "space-between",
-    marginBottom: 12,
-  },
-  graphicText: { fontSize: 96, lineHeight: 105, color: colors.green },
-  graphicCaption: { fontSize: 18, color: colors.green, fontWeight: "500" },
-  embeddedHeader: {
-    borderLeftWidth: 3,
-    borderColor: colors.green,
-    paddingLeft: 12,
-    gap: 5,
-    marginTop: 8,
-  },
-  amount: { fontSize: 34, fontWeight: "600", paddingVertical: 22 },
-  paymentAmount: {
-    fontSize: 36,
+  headerIcon: {
+    fontSize: 34,
+    lineHeight: 34,
     color: colors.ink,
-    fontWeight: "700",
-    paddingVertical: 14,
+    fontWeight: "300",
   },
-  successMark: {
-    height: 72,
-    width: 72,
-    borderRadius: 36,
-    backgroundColor: colors.mint,
+  headerEnd: { fontSize: 20, color: colors.ink },
+  screenTitle: { fontSize: 16, color: colors.ink, fontWeight: "700" },
+  meshMark: {
+    width: 45,
+    height: 45,
+    borderRadius: 23,
+    backgroundColor: colors.blue,
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 28,
+    transform: [{ rotate: "15deg" }],
   },
-  successCheck: { fontSize: 36, color: colors.green },
-  footer: {
-    fontSize: 12,
-    lineHeight: 18,
+  meshMarkSmall: { width: 37, height: 37, borderRadius: 19 },
+  meshNode: {
+    color: "white",
+    fontSize: 28,
+    fontWeight: "800",
+    transform: [{ rotate: "-15deg" }],
+  },
+  meshNodeSmall: { fontSize: 22 },
+  homeHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    minHeight: 68,
+  },
+  avatar: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: "#4B8DEA",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  avatarText: { color: "white", fontSize: 14, fontWeight: "700" },
+  homeTitle: { flex: 1, color: colors.ink, fontSize: 16, fontWeight: "700" },
+  settings: { color: colors.ink, fontSize: 19 },
+  balanceCard: {
+    backgroundColor: colors.navy,
+    borderRadius: 17,
+    padding: 18,
+    gap: 6,
+  },
+  balanceLabel: { color: "#D6E4FE", fontSize: 12 },
+  balance: {
+    color: "white",
+    fontSize: 27,
+    fontWeight: "700",
+    letterSpacing: -0.4,
+  },
+  balanceFiat: { color: "#DBE6F9", fontSize: 13 },
+  quickActions: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+    paddingVertical: 5,
+  },
+  quickAction: { alignItems: "center", gap: 6 },
+  quickCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: colors.blue,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  quickIcon: { color: "white", fontSize: 24, lineHeight: 26 },
+  quickLabel: { color: colors.muted, fontSize: 11 },
+  meshPromo: {
+    flexDirection: "row",
+    gap: 10,
+    backgroundColor: "#EDF6FF",
+    padding: 14,
+    borderRadius: 12,
+    alignItems: "center",
+  },
+  promoOverline: { color: colors.muted, fontSize: 11 },
+  promoTitle: { color: colors.ink, fontSize: 17, fontWeight: "700" },
+  promoArrow: { color: colors.blue, fontSize: 28 },
+  activityHead: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: -6,
+  },
+  activityNote: { fontSize: 11, color: colors.muted },
+  seeAll: { fontSize: 12, color: colors.blue, fontWeight: "700" },
+  activityRow: {
+    flexDirection: "row",
+    gap: 10,
+    paddingVertical: 10,
+    alignItems: "center",
+    borderBottomWidth: 1,
+    borderColor: "#EDF1F7",
+  },
+  activityIcon: {
+    width: 35,
+    height: 35,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  activityLabel: { color: colors.ink, fontSize: 13, fontWeight: "600" },
+  activityAmount: { fontSize: 12, fontWeight: "700" },
+  bottomNav: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderColor: colors.line,
+  },
+  navItem: { alignItems: "center", gap: 2, minWidth: 48 },
+  navIcon: { color: "#97A7C1", fontSize: 20 },
+  navActive: { color: colors.blue },
+  navText: { color: "#97A7C1", fontSize: 9 },
+  navTextActive: { color: colors.blue, fontWeight: "700" },
+  fieldLabel: {
+    color: colors.ink,
+    fontSize: 13,
+    fontWeight: "700",
+    marginTop: 6,
+  },
+  amountWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#C9D7EC",
+    borderRadius: 10,
+    backgroundColor: colors.surface,
+  },
+  amountInput: {
+    flex: 1,
+    fontSize: 21,
+    fontWeight: "700",
+    color: colors.ink,
+    paddingHorizontal: 14,
+    minHeight: 50,
+  },
+  satsSuffix: {
     color: colors.muted,
+    fontSize: 13,
+    fontWeight: "600",
+    paddingHorizontal: 14,
+  },
+  fiatHint: { color: colors.muted, fontSize: 12, marginTop: -7 },
+  destinationWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#C9D7EC",
+    borderRadius: 10,
+    backgroundColor: colors.surface,
+  },
+  destinationInput: {
+    flex: 1,
+    fontSize: 14,
+    color: colors.ink,
+    paddingHorizontal: 14,
+    minHeight: 50,
+  },
+  destinationIcon: { color: colors.muted, fontSize: 20, paddingHorizontal: 14 },
+  contactCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: "#F5F8FC",
+  },
+  contactBolt: { fontSize: 28, color: "#FFB11B" },
+  contactName: { color: colors.ink, fontSize: 13, fontWeight: "700" },
+  choice: {
+    flexDirection: "row",
+    gap: 10,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 10,
+    padding: 12,
+    alignItems: "center",
+  },
+  choiceSelected: { borderColor: colors.blue, backgroundColor: "#F1F7FF" },
+  choiceIcon: {
+    color: colors.violet,
+    fontSize: 26,
+    width: 31,
     textAlign: "center",
-    marginVertical: 20,
+  },
+  choiceTitle: { color: colors.ink, fontSize: 13, fontWeight: "700" },
+  radio: {
+    width: 18,
+    height: 18,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: "#AAB9CF",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  radioSelected: { borderColor: colors.blue },
+  radioDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: colors.blue,
+  },
+  powered: { color: colors.muted, fontSize: 11, textAlign: "center" },
+  integrationLine: {
+    flexDirection: "row",
+    gap: 9,
+    alignItems: "center",
+    marginTop: 3,
+  },
+  testEyebrow: { color: colors.faint, fontSize: 10, textAlign: "center" },
+  confirmTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  confirmIdentity: {
+    flex: 1,
+    flexDirection: "row",
+    gap: 10,
+    alignItems: "center",
+  },
+  confirmName: { color: colors.ink, fontSize: 15, fontWeight: "700" },
+  confirmScore: {
+    alignItems: "center",
+    backgroundColor: colors.mint,
+    padding: 8,
+    borderRadius: 8,
+  },
+  confirmScoreNumber: { color: "#087D49", fontSize: 22, fontWeight: "800" },
+  divider: { height: 1, backgroundColor: "#E7EDF6", marginVertical: 4 },
+  successHero: { alignItems: "center", gap: 7, paddingVertical: 32 },
+  successMark: {
+    width: 78,
+    height: 78,
+    borderRadius: 40,
+    backgroundColor: "#DDF8EB",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: colors.green,
+    shadowOpacity: 0.16,
+    shadowRadius: 18,
+    elevation: 3,
+  },
+  successCheck: {
+    color: "white",
+    backgroundColor: colors.green,
+    width: 43,
+    height: 43,
+    borderRadius: 22,
+    overflow: "hidden",
+    textAlign: "center",
+    lineHeight: 43,
+    fontSize: 27,
+    fontWeight: "700",
+  },
+  successTitle: {
+    color: colors.ink,
+    fontSize: 20,
+    fontWeight: "700",
+    marginTop: 10,
+  },
+  successAmount: { color: colors.ink, fontSize: 27, fontWeight: "800" },
+  footer: {
+    color: colors.muted,
+    fontSize: 11,
+    lineHeight: 16,
+    textAlign: "center",
+    paddingVertical: 20,
   },
 });

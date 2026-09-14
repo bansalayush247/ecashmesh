@@ -9,16 +9,25 @@ import {
 import { EcashMeshError } from "../ecashmesh/transport";
 
 export const colors = {
-  paper: "#F5F3ED",
+  canvas: "#F7FAFF",
+  paper: "#F8FAFE",
   surface: "#FFFFFF",
-  ink: "#172C32",
-  muted: "#52666A",
-  line: "#D4DEDA",
-  green: "#176249",
-  mint: "#E8F2EC",
-  amber: "#7B4519",
-  sand: "#FFF0DB",
+  ink: "#0E1533",
+  muted: "#50618B",
+  faint: "#8C9ABB",
+  line: "#DCE5F4",
+  blue: "#1677F8",
+  blueDark: "#0B55D9",
+  navy: "#092855",
+  green: "#12A86B",
+  mint: "#E5FAF1",
+  violet: "#7B20E8",
+  violetSoft: "#F2E8FF",
+  amber: "#B55C00",
+  sand: "#FFF4DF",
+  red: "#D93F57",
 };
+
 export const humanize = (value: string) => value.replace(/_/g, " ");
 export const sats = (amount: number | null) =>
   amount === null ? "Unknown fee" : `${amount.toLocaleString("en-US")} sats`;
@@ -43,10 +52,10 @@ export function Button({
       style={({ pressed }) => [
         styles.button,
         secondary && styles.secondary,
-        (pressed || disabled) && { opacity: 0.6 },
+        (pressed || disabled) && { opacity: 0.7 },
       ]}
     >
-      <Text style={[styles.buttonText, secondary && { color: colors.ink }]}>
+      <Text style={[styles.buttonText, secondary && styles.secondaryText]}>
         {children}
       </Text>
     </Pressable>
@@ -101,17 +110,22 @@ export function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
+export function Surface({ children }: { children: ReactNode }) {
+  return <View style={styles.surface}>{children}</View>;
+}
+
 export function Loading({ label }: { label: string }) {
   return (
     <View style={styles.state}>
       <ActivityIndicator
         accessibilityLabel={label}
         size="large"
-        color={colors.green}
+        color={colors.blue}
       />
       <Text accessibilityLiveRegion="polite" style={styles.subtitle}>
         {label}
       </Text>
+      <Text style={styles.small}>Checking simulated connector evidence…</Text>
     </View>
   );
 }
@@ -140,61 +154,73 @@ export function ErrorNotice({ error }: { error: EcashMeshError }) {
 }
 
 export const styles = StyleSheet.create({
-  heading: { gap: 10, marginTop: 18, marginBottom: 14 },
+  heading: { gap: 6, marginTop: 8, marginBottom: 8 },
   eyebrow: {
     fontSize: 11,
-    letterSpacing: 1.8,
+    letterSpacing: 0.7,
     fontWeight: "700",
-    color: colors.green,
+    color: colors.blue,
     textTransform: "uppercase",
   },
   title: {
-    fontSize: 34,
-    lineHeight: 39,
+    fontSize: 27,
+    lineHeight: 33,
     fontWeight: "700",
     color: colors.ink,
-    letterSpacing: -1,
+    letterSpacing: -0.7,
   },
   subtitle: {
-    fontSize: 19,
-    lineHeight: 25,
-    fontWeight: "600",
+    fontSize: 16,
+    lineHeight: 22,
+    fontWeight: "700",
     color: colors.ink,
   },
-  body: { fontSize: 16, lineHeight: 24, color: colors.muted },
-  small: { fontSize: 13, lineHeight: 20, color: colors.muted },
+  body: { fontSize: 14, lineHeight: 20, color: colors.muted },
+  small: { fontSize: 12, lineHeight: 17, color: colors.muted },
   code: {
-    fontSize: 12,
-    lineHeight: 19,
+    fontSize: 11,
+    lineHeight: 17,
     color: colors.muted,
     fontFamily: "monospace",
   },
-  section: {
-    gap: 12,
-    paddingVertical: 20,
-    borderTopWidth: 1,
-    borderColor: colors.line,
-  },
-  button: {
-    minHeight: 52,
-    padding: 15,
-    borderRadius: 14,
-    backgroundColor: colors.green,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  secondary: {
-    backgroundColor: colors.paper,
+  surface: {
+    backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.line,
+    borderRadius: 15,
+    padding: 15,
+    gap: 10,
+  },
+  section: { gap: 11, paddingTop: 10 },
+  button: {
+    minHeight: 52,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderRadius: 10,
+    backgroundColor: colors.blue,
+    justifyContent: "center",
+    alignItems: "center",
+    shadowColor: colors.blue,
+    shadowOpacity: 0.18,
+    shadowRadius: 7,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
+  },
+  secondary: {
+    backgroundColor: "#EEF5FF",
+    borderWidth: 1,
+    borderColor: "#CFE0FC",
+    shadowOpacity: 0,
+    elevation: 0,
   },
   buttonText: {
-    fontSize: 16,
-    lineHeight: 22,
+    fontSize: 15,
+    lineHeight: 21,
     color: "white",
-    fontWeight: "600",
+    fontWeight: "700",
     textAlign: "center",
   },
+  secondaryText: { color: colors.blueDark },
   row: {
     flexDirection: "row",
     gap: 16,
@@ -202,31 +228,43 @@ export const styles = StyleSheet.create({
     justifyContent: "space-between",
     paddingVertical: 7,
   },
-  rowLabel: { flex: 1, fontSize: 14, lineHeight: 21, color: colors.muted },
+  rowLabel: { flex: 1, fontSize: 13, lineHeight: 19, color: colors.muted },
   rowValue: {
-    flex: 1.3,
-    fontSize: 14,
-    lineHeight: 21,
-    fontWeight: "600",
+    flex: 1.25,
+    fontSize: 13,
+    lineHeight: 19,
+    fontWeight: "700",
     color: colors.ink,
     textAlign: "right",
   },
-  state: { paddingVertical: 48, alignItems: "center", gap: 20, minHeight: 200 },
+  state: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 16,
+    padding: 28,
+    alignItems: "center",
+    gap: 12,
+    minHeight: 190,
+    justifyContent: "center",
+  },
   warning: {
     backgroundColor: colors.sand,
-    padding: 16,
+    borderWidth: 1,
+    borderColor: "#FFE0A8",
+    padding: 15,
     borderRadius: 12,
-    gap: 9,
+    gap: 7,
   },
   input: {
     borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: 12,
-    padding: 16,
+    borderColor: "#C9D7EC",
+    borderRadius: 10,
+    padding: 14,
     fontSize: 16,
     color: colors.ink,
     backgroundColor: colors.surface,
-    minHeight: 54,
+    minHeight: 52,
   },
   stack: { gap: 12 },
 });
