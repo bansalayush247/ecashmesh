@@ -472,7 +472,7 @@ ecashmesh/
 
 ## Development Status
 
-**Current status: Phase 8 complete — deterministic demo plus read-only Cashu adapter**
+**Current status: Phase 8 complete — deterministic demo, read-only Cashu adapter, and mint discovery**
 
 Development is being done incrementally.
 
@@ -652,16 +652,19 @@ execution. It collects payment input, calls the EcashMesh API through a thin SDK
 adapter, renders the returned decision, and confirms through a simulator-only
 receipt endpoint.
 
-### Phase 8 — Read-only Cashu adapter
+### Phase 8 — Read-only Cashu adapter and mint discovery
 
 Implemented in `crates/ecashmesh-cashu`, connected through the protocol-independent
 `ConnectorSnapshot` boundary and the API's connector provider. No protocol logic
 or HTTP dependencies were added to the core or reference wallet.
 
-The adapter only sends `GET /v1/info` and `GET /v1/keysets`. It exposes mint display
-metadata, advertised mint/melt capabilities, method/unit transaction limits,
-keyset input fee schedules, public endpoint health and availability, source URLs,
-confidence, timestamps, and structured diagnostics. These follow
+The adapter sends only public GETs: `/v1/info`, `/v1/keysets`, `/v1/keys`, and
+configured directory endpoints. It exposes canonical mint URLs, display metadata,
+mint identity public keys, implementation/version, all advertised NUT settings,
+method/unit transaction limits, supported units, active keyset descriptors,
+denominations and their public keys, input fee schedules, endpoint availability,
+source provenance, confidence, timestamps, and structured diagnostics. These follow
+[NUT-01](https://github.com/cashubtc/nuts/blob/main/01.md),
 [NUT-06](https://github.com/cashubtc/nuts/blob/main/06.md),
 [NUT-04](https://github.com/cashubtc/nuts/blob/main/04.md),
 [NUT-05](https://github.com/cashubtc/nuts/blob/main/05.md), and
@@ -684,10 +687,45 @@ and unsupported method/unit/amount combinations cannot advertise send capability
 The core rejects those candidates before scoring. `/v1/connectors` still exposes
 their observations when `/v1/routes/evaluate` returns `NO_VIABLE_ROUTE`.
 
-There are no mint/melt quote POSTs, token operations, keys, custody, or execution.
-The adapter reads public keyset identifiers only; it does not retrieve public keys.
+There are no mint/melt quote POSTs, token operations, private keys, custody, or execution.
+Public keys are checked for valid compressed secp256k1 encoding and curve points;
+this does not authenticate the operator or prove reserves. Conflicting keyset
+units and duplicate identities are reported rather than silently merged.
 HTTP requests have a five-second timeout, a 1 MiB response limit, and no redirects.
-Mint URLs are configured by the API operator, never accepted from payment requests.
+Untrusted discovered targets are resolved with a three-second DNS timeout, checked
+against a conservative public-address policy, and pinned to those addresses for
+the HTTP request. Environment proxies are disabled. Private/local targets are
+allowed only when their exact canonical mint URL is configured as a seed or in
+the operator's `ECASHMESH_CASHU_ALLOWED_MINTS` list.
+
+Discovery accepts four kinds of input, preserving them separately:
+
+* Configured seeds in `ECASHMESH_CASHU_MINTS` (optional `id` alias plus `url`).
+* Known/public directories in `ECASHMESH_CASHU_DIRECTORIES` (JSON array of URLs,
+  or the preset `"mint-audit"`). The preset uses the public auditor's
+  [`/mints/` listing](https://docs.rs/cashu-mint-audit/latest/src/cashu_mint_audit/lib.rs.html).
+  Supported directory shapes are URL arrays, arrays of objects containing `url`,
+  or a `{"mints":[...]}` envelope. Directory claims supply URLs only; copied
+  metadata or reputation claims do not override a mint's freshly observed data.
+* Host-wallet URLs in a request's `wallet_mint_urls` array.
+* Explicit payment hints in `mint_urls`, and `destination.mint_url`.
+
+Canonicalization normalizes hostname case/IDNA, default ports, trailing DNS dots,
+trailing slashes, dot segments, and unreserved percent escapes. It preserves
+HTTP versus HTTPS, non-default ports, and distinct deployment paths. Credentials,
+queries, fragments, malformed escapes, and encoded separators are rejected.
+SHA-256 of the canonical URL supplies a stable canonical connector ID. Equivalent
+URLs merge before fetching while retaining every source and timestamp. Configured
+aliases remain usable by `candidate_connectors`; aliases that identify different
+canonical URLs are quarantined. Public keys alone never merge different mint URLs.
+
+The MVP accepts up to 64 seeds, eight directory sources, and 64 request URL hints.
+At most 64 canonical mints are probed per collection, selected in stable URL order;
+truncation is explicit. There is no persistent mint graph. Seed observations and
+directory responses have bounded in-memory caches; request-only mint hints do not
+persist or change the allowlist. Directory refresh failures preserve stale URL
+claims, separately from fresh mint probes. Simulator mode is the default fallback;
+Cashu-mode failures never silently substitute simulated data.
 
 Run the offline adapter tests and the API tests with local fixture servers:
 
@@ -697,7 +735,8 @@ nix develop -c cargo test -p ecashmesh-api --test cashu
 ```
 
 Fixtures cover fresh, stale, missing, malformed, partial, conflicting, and
-unavailable data; advertised limits; read-only HTTP behavior; and deterministic
+unavailable data; discovery source merging; canonical normalization and deduplication;
+private-address blocking; advertised limits; read-only HTTP behavior; and deterministic
 core ranking. Tests do not contact public mints. Live reads naturally acquire new
 timestamps; replaying a capture with the same evaluation time produces the same
 evidence and ranking.
@@ -710,9 +749,16 @@ ECASHMESH_CASHU_MINTS='[{"id":"cashu:my-mint","url":"https://mint.example"}]' \
 nix develop -c cargo run -p ecashmesh-api
 ```
 
-`ECASHMESH_CASHU_MAX_AGE_SECONDS` defaults to `300`. Configure 1–16 mints with unique
-IDs; HTTP(S) URLs can include a deployment subpath. Each API observation/evaluation
-refreshes both public endpoints, retaining an in-memory stale fallback on failure.
+`ECASHMESH_CASHU_MAX_AGE_SECONDS` defaults to `300`. Seed lists may be empty when
+using directories or request-provided URLs. HTTP(S) mint URLs can include a
+deployment subpath. Each observation/evaluation refreshes the three public mint
+endpoints. Directory discovery is opt-in, for example:
+
+```bash
+ECASHMESH_CONNECTOR_MODE=cashu \
+ECASHMESH_CASHU_DIRECTORIES='["mint-audit"]' \
+nix develop -c cargo run -p ecashmesh-api
+```
 
 ```bash
 curl http://127.0.0.1:5000/v1/connectors
@@ -724,9 +770,36 @@ curl -X POST http://127.0.0.1:5000/v1/routes/evaluate \
 The connector catalog evaluates advertised amount limits for 100,000 sats by
 default; use `/v1/connectors?amount=5000` to inspect a different amount.
 
-Evaluation preserves the Phase 6 fields and adds `simulated: false` and
+Evaluation preserves the Phase 6 fields and adds `simulated: false`, `discovery`, and
 `connector_observations` with the Cashu metadata, capabilities, schedules, and
-diagnostics. Destination validation remains the existing non-empty Lightning
+diagnostics. `discovery.mints` contains canonical identity, aliases, and provenance;
+`discovery.issues` includes failed directory reads and rejected URL/identity claims.
+Metadata evidence includes `public_key`, `supported_nuts`, `supported_units`,
+`public_keysets`, and `denominations`; missing values are unknown, not empty facts.
+
+Wallet integrations can supply mint hints without adding frontend protocol logic:
+
+```json
+{
+  "amount": 100000,
+  "asset": "BTC",
+  "destination": {
+    "type": "lightning",
+    "value": "inspection-only-target",
+    "mint_url": "https://mint.example"
+  },
+  "payment_intent": "send",
+  "candidate_connectors": [],
+  "wallet_mint_urls": ["https://mint.example/"],
+  "mint_urls": ["https://other-mint.example"]
+}
+```
+
+Send this JSON to `POST /v1/routes/evaluate`, or to
+`POST /v1/connectors/discover` to inspect discovery and normalized observations
+without requiring a viable route. Request hints are scoped to that request.
+They must explicitly name mint URLs; the adapter does not decode tokens or infer
+mint URLs from an invoice string. Destination validation remains the existing non-empty Lightning
 target validation; this phase does not validate invoices or request payment
 quotes. Cashu-mode `/v1/simulator/confirm` returns a structured validation error.
 Use default simulator mode for the reference wallet's complete confirmation flow:
@@ -920,12 +993,13 @@ It exits non-zero if any expected ordering changes.
 * [x] Phase 5: deterministic simulator
 * [x] Phase 6: HTTP API
 * [x] Phase 7: React Native reference wallet integration
-* [x] Phase 8: read-only Cashu protocol adapter
+* [x] Phase 8: read-only Cashu protocol adapter and mint discovery
 
 ### Next: protocol integrations
 
 * [x] Read-only Cashu adapter
-* [ ] Mint discovery
+* [x] Seed, public-directory, wallet, and payment-hint mint discovery
+* [x] Canonical identity deduplication and source provenance
 * [x] Public keyset and input fee information
 * [x] Cashu capability detection
 * [ ] Proof/state information

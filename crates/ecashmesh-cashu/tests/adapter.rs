@@ -25,6 +25,7 @@ fn capture() -> MintCapture {
     MintCapture {
         info: endpoint(INFO),
         keysets: endpoint(KEYSETS),
+        keys: Some(endpoint(include_str!("fixtures/keys.json"))),
     }
 }
 
@@ -120,6 +121,7 @@ fn missing_is_distinct_from_observed_unavailability() {
         &MintCapture {
             info: missing.clone(),
             keysets: missing.clone(),
+            keys: None,
         },
         NOW,
     );
@@ -134,6 +136,7 @@ fn missing_is_distinct_from_observed_unavailability() {
         &MintCapture {
             info: failed.clone(),
             keysets: failed,
+            keys: None,
         },
         NOW,
     );

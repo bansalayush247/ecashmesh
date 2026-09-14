@@ -68,6 +68,7 @@ fn app(provider: Provider) -> Router {
         .route("/v1/routes/rank", post(rank))
         .route("/v1/routes/evaluate", post(evaluate))
         .route("/v1/connectors", get(connector_observations))
+        .route("/v1/connectors/discover", post(discover_connectors))
         .route("/v1/simulator/confirm", post(simulation::confirm))
         .with_state(provider)
         .layer(
@@ -168,14 +169,36 @@ async fn connector_observations(
             vec!["amount".into()],
         ));
     }
-    let batch = provider.collect(Amount::from_sats(amount)).await?;
-    Ok(Json(json!({
+    let batch = provider
+        .collect(Amount::from_sats(amount), Vec::new())
+        .await?;
+    Ok(Json(catalog_json(&batch, amount)))
+}
+
+fn catalog_json(batch: &connectors::ConnectorBatch, amount: u64) -> serde_json::Value {
+    json!({
         "evaluated_amount_sats": amount,
         "mode": if batch.simulated { "simulator" } else { "cashu" },
         "read_only": true,
         "evidence": batch.connectors.iter().map(EvidenceResponse::from_connector).collect::<Vec<_>>(),
         "observations": batch.observations,
-    })))
+        "discovery": batch.discovery,
+    })
+}
+
+async fn discover_connectors(
+    State(provider): State<Provider>,
+    request: Result<Json<EvaluateRequest>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(request) = request.map_err(|error| {
+        ApiError::validation("Invalid discovery request", vec![error.to_string()])
+    })?;
+    request.validate()?;
+    let hints = request.discovery_hints()?;
+    let batch = provider
+        .collect(Amount::from_sats(request.amount), hints)
+        .await?;
+    Ok(Json(catalog_json(&batch, request.amount)))
 }
 
 async fn evaluate_using(
@@ -185,15 +208,18 @@ async fn evaluate_using(
     let Json(request) = request
         .map_err(|error| ApiError::new("invalid_json", format!("invalid request body: {error}")))?;
     request.validate()?;
+    let hints = request.discovery_hints()?;
     let EvaluateRequest {
         amount,
         asset: _,
         destination,
         payment_intent,
         candidate_connectors,
+        ..
     } = request;
 
-    let mut batch = provider.collect(Amount::from_sats(amount)).await?;
+    let mut batch = provider.collect(Amount::from_sats(amount), hints).await?;
+    let candidate_connectors = connectors::resolve_ids(candidate_connectors, &batch.discovery);
     let selected = connectors::select(batch.connectors, candidate_connectors)?;
     batch.observations.retain(|observation| {
         selected
@@ -227,6 +253,11 @@ async fn evaluate_using(
                 .iter()
                 .flat_map(|route| route.reasons.iter())
                 .map(|reason| format!("{reason:?}"))
+                .chain(
+                    batch.discovery.issues.iter().map(|issue| {
+                        format!("{}: {} ({})", issue.field, issue.message, issue.code)
+                    }),
+                )
                 .chain(batch.observations.iter().filter_map(|observation| {
                     observation["send_unavailable_reason"]
                         .as_str()
@@ -253,6 +284,7 @@ async fn evaluate_using(
     let mut response =
         EvaluateResponse::from_ranking(quote_id, &destination, &payment_intent, &selected, ranking);
     response.simulated = batch.simulated;
+    response.discovery = batch.discovery;
     response.connector_observations = batch.observations;
     response.expires_at_unix_seconds = response
         .connector_observations
@@ -340,6 +372,10 @@ struct EvaluateRequest {
     payment_intent: String,
     #[serde(default)]
     candidate_connectors: Vec<String>,
+    #[serde(default)]
+    wallet_mint_urls: Vec<String>,
+    #[serde(default)]
+    mint_urls: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -347,9 +383,47 @@ struct DestinationInput {
     #[serde(rename = "type")]
     kind: String,
     value: String,
+    mint_url: Option<String>,
 }
 
 impl EvaluateRequest {
+    fn discovery_hints(&self) -> Result<Vec<ecashmesh_cashu::discovery::MintHint>, ApiError> {
+        use ecashmesh_cashu::discovery::{DiscoverySource, MintHint};
+        if self.wallet_mint_urls.len()
+            + self.mint_urls.len()
+            + usize::from(self.destination.mint_url.is_some())
+            > 64
+        {
+            return Err(ApiError::validation(
+                "At most 64 mint URL hints are supported",
+                vec!["mint_urls".into()],
+            ));
+        }
+        let hints = self
+            .wallet_mint_urls
+            .iter()
+            .map(|url| (url, DiscoverySource::Wallet))
+            .chain(
+                self.mint_urls
+                    .iter()
+                    .map(|url| (url, DiscoverySource::PaymentRequest)),
+            )
+            .chain(
+                self.destination
+                    .mint_url
+                    .iter()
+                    .map(|url| (url, DiscoverySource::Destination)),
+            )
+            .map(|(url, source)| MintHint {
+                url: url.clone(),
+                alias: None,
+                source,
+                observed_at: connectors::unix_now(),
+                stale: false,
+            })
+            .collect();
+        Ok(hints)
+    }
     fn validate(&self) -> Result<(), ApiError> {
         if self.amount == 0 {
             return Err(ApiError::validation(
@@ -764,6 +838,7 @@ impl RankResponse {
 
 #[derive(Serialize)]
 struct EvaluateResponse {
+    discovery: ecashmesh_cashu::discovery::DiscoveryReport,
     simulated: bool,
     connector_observations: Vec<serde_json::Value>,
     quote_id: String,
@@ -802,6 +877,7 @@ impl EvaluateResponse {
         );
         Self {
             simulated: true,
+            discovery: ecashmesh_cashu::discovery::DiscoveryReport::default(),
             connector_observations: Vec::new(),
             quote_id,
             recommended_route,

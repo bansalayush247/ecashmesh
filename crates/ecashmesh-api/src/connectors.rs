@@ -5,7 +5,10 @@ use std::{
     sync::Arc,
 };
 
-use ecashmesh_cashu::{CashuAdapter, CashuObservation, MintConfig};
+use ecashmesh_cashu::{
+    CashuObservation,
+    discovery::{DiscoveryReport, DiscoveryService, DiscoverySource, MintHint},
+};
 use ecashmesh_core::{
     Amount, ConnectorId, ConnectorSnapshot, DEMO_EVALUATED_AT, EvidenceTimestamp,
 };
@@ -17,7 +20,7 @@ use super::{ApiError, EvidenceStateResponse, connector_health_code};
 #[derive(Clone)]
 pub(super) enum Provider {
     Simulator,
-    Cashu(Vec<Arc<CashuAdapter>>),
+    Cashu(Arc<DiscoveryService>),
 }
 
 pub(super) struct ConnectorBatch {
@@ -26,12 +29,29 @@ pub(super) struct ConnectorBatch {
     pub evaluated_at: EvidenceTimestamp,
     pub expires_at_unix_seconds: u64,
     pub simulated: bool,
+    pub discovery: DiscoveryReport,
 }
 
 #[derive(Deserialize)]
 struct ConfigInput {
-    id: String,
+    id: Option<String>,
     url: String,
+}
+
+pub(super) fn resolve_ids(ids: Vec<String>, discovery: &DiscoveryReport) -> Vec<String> {
+    ids.into_iter()
+        .map(|id| {
+            if let Some(mint) = discovery
+                .mints
+                .iter()
+                .find(|mint| mint.canonical_id == id || mint.aliases.contains(&id))
+            {
+                mint.connector_id().to_string()
+            } else {
+                id
+            }
+        })
+        .collect()
 }
 
 pub(super) fn select(
@@ -80,36 +100,47 @@ impl Provider {
         {
             "simulator" => Ok(Self::Simulator),
             "cashu" => {
-                let config = std::env::var("ECASHMESH_CASHU_MINTS")
-                    .map_err(|_| "Cashu mode requires ECASHMESH_CASHU_MINTS JSON")?;
+                let config = std::env::var("ECASHMESH_CASHU_MINTS").unwrap_or_else(|_| "[]".into());
                 let config: Vec<ConfigInput> =
                     serde_json::from_str(&config).map_err(|error| error.to_string())?;
-                if config.is_empty() || config.len() > 16 {
-                    return Err("Configure between 1 and 16 Cashu mints".into());
-                }
                 let ttl = std::env::var("ECASHMESH_CASHU_MAX_AGE_SECONDS")
                     .unwrap_or_else(|_| "300".into())
                     .parse::<u64>()
                     .map_err(|error| error.to_string())?;
-                let mut seen = std::collections::BTreeSet::new();
-                let mut adapters = Vec::new();
-                for mint in config {
-                    let id = ConnectorId::new(mint.id).map_err(|error| error.to_string())?;
-                    if !seen.insert(id.clone()) {
-                        return Err(format!("Duplicate connector: {id}"));
-                    }
-                    adapters.push(Arc::new(
-                        CashuAdapter::new(MintConfig::new(id, &mint.url, ttl)?)
-                            .map_err(|error| error.to_string())?,
-                    ));
-                }
-                Ok(Self::Cashu(adapters))
+                let seeds = config
+                    .into_iter()
+                    .map(|mint| MintHint {
+                        url: mint.url,
+                        alias: mint.id,
+                        source: DiscoverySource::Seed,
+                        observed_at: unix_now(),
+                        stale: false,
+                    })
+                    .collect();
+                let directories = env_urls("ECASHMESH_CASHU_DIRECTORIES")?;
+                let allowed = env_urls("ECASHMESH_CASHU_ALLOWED_MINTS")?;
+                Ok(Self::Cashu(Arc::new(DiscoveryService::new(
+                    seeds,
+                    directories,
+                    allowed,
+                    ttl,
+                )?)))
             }
             other => Err(format!("Unsupported ECASHMESH_CONNECTOR_MODE: {other}")),
         }
     }
 
-    pub async fn collect(&self, amount: Amount) -> Result<ConnectorBatch, ApiError> {
+    pub async fn collect(
+        &self,
+        amount: Amount,
+        hints: Vec<MintHint>,
+    ) -> Result<ConnectorBatch, ApiError> {
+        if matches!(self, Self::Simulator) && !hints.is_empty() {
+            return Err(ApiError::validation(
+                "Mint discovery requires cashu mode",
+                vec!["ECASHMESH_CONNECTOR_MODE".into()],
+            ));
+        }
         match self {
             Self::Simulator => Ok(ConnectorBatch {
                 connectors: ecashmesh_core::demo_connectors()
@@ -121,27 +152,19 @@ impl Provider {
                 evaluated_at: DEMO_EVALUATED_AT,
                 simulated: true,
                 expires_at_unix_seconds: DEMO_EVALUATED_AT.unix_seconds() + 300,
+                discovery: DiscoveryReport::default(),
             }),
-            Self::Cashu(adapters) => {
-                let mut pending = tokio::task::JoinSet::new();
-                for adapter in adapters {
-                    let adapter = Arc::clone(adapter);
-                    pending.spawn(async move { adapter.observe().await });
-                }
-                let mut observations = Vec::new();
-                while let Some(result) = pending.join_next().await {
-                    observations.push(
-                        result.map_err(|error| {
-                            ApiError::internal("adapter_error", error.to_string())
-                        })?,
-                    );
-                }
-                observations.sort_by(|a, b| a.id.cmp(&b.id));
+            Self::Cashu(service) => {
+                let state = service
+                    .collect(hints)
+                    .await
+                    .map_err(|error| ApiError::validation("Mint discovery failed", vec![error]))?;
+                let observations = state.observations;
                 let evaluated_at = observations
                     .iter()
                     .map(|observation| observation.evaluated_at)
                     .max()
-                    .unwrap_or(DEMO_EVALUATED_AT);
+                    .unwrap_or_else(|| EvidenceTimestamp::from_unix_seconds(unix_now()));
                 Ok(ConnectorBatch {
                     expires_at_unix_seconds: observations
                         .iter()
@@ -158,10 +181,23 @@ impl Provider {
                         .collect(),
                     evaluated_at,
                     simulated: false,
+                    discovery: state.report,
                 })
             }
         }
     }
+}
+
+fn env_urls(name: &str) -> Result<Vec<String>, String> {
+    serde_json::from_str(&std::env::var(name).unwrap_or_else(|_| "[]".into()))
+        .map_err(|error| format!("{name}: {error}"))
+}
+
+pub(super) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn observation_json(observation: &CashuObservation, amount: Amount) -> Value {
@@ -172,10 +208,19 @@ fn observation_json(observation: &CashuObservation, amount: Amount) -> Value {
         "endpoints": {
             "metadata_capabilities_limits": format!("{}v1/info", observation.mint_url),
             "input_fees": format!("{}v1/keysets", observation.mint_url),
+            "denominations": format!("{}v1/keys", observation.mint_url),
         },
         "evaluated_at_unix_seconds": observation.evaluated_at.unix_seconds(),
         "expires_at_unix_seconds": observation.expires_at_unix_seconds,
         "metadata": EvidenceStateResponse::from_core(&observation.metadata, |value| json!(value)),
+        "public_key": EvidenceStateResponse::from_core(&observation.public_key, |value| json!(value)),
+        "supported_nuts": EvidenceStateResponse::from_core(&observation.nuts, |value| json!(value)),
+        "supported_units": EvidenceStateResponse::from_core(&observation.supported_units, |value| json!(value)),
+        "public_keysets": EvidenceStateResponse::from_core(&observation.public_keysets, |value| json!(value)),
+        "denominations": EvidenceStateResponse::from_core(&observation.public_keysets, |keysets|
+            json!(keysets.iter().map(|keyset| json!({"id":keyset.id,"unit":keyset.unit,"amounts":keyset.keys.keys().collect::<Vec<_>>()})).collect::<Vec<_>>())),
+        "data_status": if observation.issues.is_empty() && !observation.public_key.is_unknown()
+            && !observation.public_keysets.is_unknown() && !observation.nuts.is_unknown() { "complete" } else { "partial" },
         "minting": EvidenceStateResponse::from_core(&observation.minting, |value| json!(value)),
         "melting": EvidenceStateResponse::from_core(&observation.melting, |value| json!(value)),
         "input_fees": EvidenceStateResponse::from_core(&observation.input_fees, |value| json!(value)),

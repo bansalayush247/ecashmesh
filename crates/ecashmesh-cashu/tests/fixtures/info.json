@@ -1,5 +1,6 @@
 {
   "name": "Fixture Cashu Mint",
+  "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
   "version": "Fixture/1.0",
   "description": "Offline protocol fixture; no funds",
   "motd": "Read-only demonstration",

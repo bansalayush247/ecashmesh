@@ -3,7 +3,11 @@
 //! Transaction limits are not liquidity. Input fees are not a melt fee quote.
 //! HTTP reachability is not payment reliability or proof of reserves.
 
+pub mod discovery;
+mod metadata;
+mod strict_json;
 mod transport;
+pub use metadata::PublicKeyset;
 pub use transport::{CashuAdapter, MintConfig};
 
 use ecashmesh_core::{
@@ -37,6 +41,9 @@ pub struct MintCapture {
     pub info: EndpointCapture,
     /// GET /v1/keysets; only keyset descriptors, not keys or proofs.
     pub keysets: EndpointCapture,
+    /// GET /v1/keys; optional for replaying older captures.
+    #[serde(default)]
+    pub keys: Option<EndpointCapture>,
 }
 
 /// Optional, self-reported mint display information.
@@ -121,6 +128,14 @@ pub struct CashuObservation {
     pub expires_at_unix_seconds: u64,
     /// Display information reported by /v1/info.
     pub metadata: Evidence<MintMetadata>,
+    /// NUT-06 mint identity public key, not a custody key.
+    pub public_key: Evidence<String>,
+    /// All advertised NUT settings, including optional and future NUTs.
+    pub nuts: Evidence<std::collections::BTreeMap<u16, Value>>,
+    /// Public denomination keys, grouped by keyset and unit.
+    pub public_keysets: Evidence<Vec<PublicKeyset>>,
+    /// Union of reported method/keyset units. Partial when any underlying list is absent.
+    pub supported_units: Evidence<Vec<String>>,
     /// Receive capabilities reported in NUT-04.
     pub minting: Evidence<MethodSettings>,
     /// Send capabilities and liquidity-related transaction limits from NUT-05.
@@ -192,9 +207,7 @@ impl MintCapture {
         } else {
             Evidence::Unknown
         };
-        issues
-            .sort_by(|a, b| (&a.field, &a.code, &a.message).cmp(&(&b.field, &b.code, &b.message)));
-        CashuObservation {
+        let mut observation = CashuObservation {
             id,
             mint_url: mint_url.into(),
             evaluated_at: EvidenceTimestamp::from_unix_seconds(now),
@@ -210,6 +223,10 @@ impl MintCapture {
                 max_age_seconds,
                 EvidenceSource::Connector,
             ),
+            public_key: Evidence::Unknown,
+            nuts: Evidence::Unknown,
+            public_keysets: Evidence::Unknown,
+            supported_units: Evidence::Unknown,
             minting: observe(
                 minting,
                 &self.info,
@@ -240,7 +257,9 @@ impl MintCapture {
                 EvidenceSource::Observer,
             ),
             issues,
-        }
+        };
+        metadata::extend(&mut observation, self, info.as_ref(), now, max_age_seconds);
+        observation
     }
 }
 
@@ -348,7 +367,7 @@ fn parse_endpoint(
         );
         return None;
     }
-    if let Ok(value @ Value::Object(_)) = serde_json::from_str::<Value>(body) {
+    if let Ok(value @ Value::Object(_)) = strict_json::parse(body) {
         Some(value)
     } else {
         issue(
@@ -423,7 +442,10 @@ fn parse_fees(value: &Value, issues: &mut Vec<AdapterIssue>) -> Option<Vec<Keyse
     let mut fees = Vec::new();
     for entry in entries {
         match serde_json::from_value::<KeysetFee>(entry.clone()) {
-            Ok(fee) if valid_keyset_id(&fee.id) && !fee.unit.is_empty() => fees.push(fee),
+            Ok(mut fee) if valid_keyset_id(&fee.id) && !fee.unit.is_empty() => {
+                fee.id.make_ascii_lowercase();
+                fees.push(fee);
+            }
             _ => issue(
                 issues,
                 "keysets",

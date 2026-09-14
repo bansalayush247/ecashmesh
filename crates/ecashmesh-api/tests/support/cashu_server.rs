@@ -18,6 +18,14 @@ pub struct ApiServer {
 
 impl ApiServer {
     pub fn start(mint_url: &str) -> Self {
+        Self::start_with_sources(
+            &json!([{"id":"cashu:fixture","url":mint_url}]),
+            &json!([]),
+            &json!([]),
+        )
+    }
+
+    pub fn start_with_sources(seeds: &Value, directories: &Value, allowed: &Value) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
         drop(listener);
@@ -25,10 +33,9 @@ impl ApiServer {
             .env("ECASHMESH_API_ADDRESS", &address)
             .env("ECASHMESH_CONNECTOR_MODE", "cashu")
             .env("ECASHMESH_CASHU_MAX_AGE_SECONDS", "300")
-            .env(
-                "ECASHMESH_CASHU_MINTS",
-                json!([{"id": "cashu:fixture", "url": mint_url}]).to_string(),
-            )
+            .env("ECASHMESH_CASHU_MINTS", seeds.to_string())
+            .env("ECASHMESH_CASHU_DIRECTORIES", directories.to_string())
+            .env("ECASHMESH_CASHU_ALLOWED_MINTS", allowed.to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -87,6 +94,7 @@ impl MockMint {
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
+        let directory_url = url.clone();
         let task = thread::spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 let (mut stream, _) = match listener.accept() {
@@ -97,6 +105,7 @@ impl MockMint {
                     }
                     Err(error) => panic!("accept: {error}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -116,9 +125,16 @@ impl MockMint {
                     "GET /v1/keysets HTTP/1.1" => {
                         include_str!("../../../ecashmesh-cashu/tests/fixtures/keysets.json")
                     }
+                    "GET /v1/keys HTTP/1.1" => {
+                        include_str!("../../../ecashmesh-cashu/tests/fixtures/keys.json")
+                    }
+                    "GET /directory HTTP/1.1" => "[]",
                     other => panic!("Unexpected protocol operation: {other}"),
                 }
                 .to_owned();
+                if first.contains("/directory ") {
+                    body = json!([{"url":directory_url}]).to_string();
+                }
                 if mode == "malformed" {
                     body = "{".into();
                 }

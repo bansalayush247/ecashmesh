@@ -109,3 +109,100 @@ fn stale_malformed_and_unavailable_mints_remain_inspectable() {
         }
     }
 }
+
+#[test]
+fn all_discovery_sources_merge_and_expose_complete_public_metadata() {
+    let mint = MockMint::start("healthy");
+    let server = ApiServer::start_with_sources(
+        &json!([{"id":"cashu:fixture","url":mint.url}]),
+        &json!([format!("{}directory", mint.url)]),
+        &json!([]),
+    );
+    let mut payment = request(100_000);
+    payment["wallet_mint_urls"] = json!([mint.url.trim_end_matches('/')]);
+    payment["mint_urls"] = json!([mint.url]);
+    payment["destination"]["mint_url"] = json!(mint.url);
+    let (status, decision) = server.post("/v1/routes/evaluate", &payment);
+    assert_eq!(status, 200, "{decision}");
+    assert_eq!(decision["discovery"]["mints"].as_array().unwrap().len(), 1);
+    let identity = &decision["discovery"]["mints"][0];
+    assert_eq!(identity["canonical_url"], mint.url);
+    assert_eq!(identity["provenance"].as_array().unwrap().len(), 5);
+    let observation = &decision["connector_observations"][0];
+    assert_eq!(observation["public_key"]["state"], "known");
+    assert_eq!(
+        observation["denominations"]["value"][0]["amounts"],
+        json!([1, 2])
+    );
+    assert_eq!(
+        observation["supported_units"]["value"],
+        json!(["sat", "usd"])
+    );
+    assert_eq!(
+        observation["supported_nuts"]["value"]["999"]["supported"],
+        true
+    );
+    payment["candidate_connectors"] = json!([identity["canonical_id"]]);
+    let (status, alias_decision) = server.post("/v1/routes/evaluate", &payment);
+    assert_eq!(status, 200);
+    assert_eq!(
+        alias_decision["recommended_route"]["connector"],
+        "cashu:fixture"
+    );
+}
+
+#[test]
+fn wallet_and_directory_can_discover_mints_without_seeds() {
+    let mint = MockMint::start("healthy");
+    let server = ApiServer::start_with_sources(&json!([]), &json!([]), &json!([mint.url]));
+    let mut payment = request(100_000);
+    payment["wallet_mint_urls"] = json!([mint.url]);
+    let (status, decision) = server.post("/v1/routes/evaluate", &payment);
+    assert_eq!(status, 200, "{decision}");
+    assert!(
+        decision["discovery"]["mints"][0]["aliases"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let (status, empty) = server.get("/v1/connectors");
+    assert_eq!(status, 200);
+    assert!(empty["observations"].as_array().unwrap().is_empty());
+    let directory_server = ApiServer::start_with_sources(
+        &json!([]),
+        &json!([format!("{}directory", mint.url)]),
+        &json!([mint.url]),
+    );
+    let (status, catalog) = directory_server.get("/v1/connectors");
+    assert_eq!(status, 200);
+    assert_eq!(catalog["observations"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        catalog["discovery"]["mints"][0]["provenance"][0]["source"]["type"],
+        "directory"
+    );
+}
+
+#[test]
+fn discovery_errors_are_inspectable_and_untrusted_private_targets_are_blocked() {
+    let mint = MockMint::start("healthy");
+    let server = ApiServer::start_with_sources(&json!([]), &json!([]), &json!([]));
+    let mut payment = request(100_000);
+    payment["wallet_mint_urls"] = json!(["file:///etc/passwd", mint.url]);
+    let (status, catalog) = server.post("/v1/connectors/discover", &payment);
+    assert_eq!(status, 200);
+    assert!(
+        catalog["discovery"]["issues"]
+            .to_string()
+            .contains("INVALID_MINT_URL")
+    );
+    assert!(
+        catalog["observations"][0]["issues"]
+            .to_string()
+            .contains("non-public")
+    );
+    let (status, error) = server.post("/v1/routes/evaluate", &payment);
+    assert_eq!(status, 422);
+    assert_eq!(error["error"]["code"], "NO_VIABLE_ROUTE");
+    payment["wallet_mint_urls"] = json!(vec![mint.url.clone(); 65]);
+    assert_eq!(server.post("/v1/connectors/discover", &payment).0, 400);
+}

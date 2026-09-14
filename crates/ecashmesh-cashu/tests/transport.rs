@@ -22,6 +22,7 @@ async fn mint(statuses: Vec<(u16, &'static str)>) -> (CashuAdapter, JoinHandle<(
             let body = match first {
                 "GET /mint/v1/info HTTP/1.1" => include_str!("fixtures/info.json"),
                 "GET /mint/v1/keysets HTTP/1.1" => include_str!("fixtures/keysets.json"),
+                "GET /mint/v1/keys HTTP/1.1" => include_str!("fixtures/keys.json"),
                 other => panic!("Unexpected protocol operation: {other}"),
             };
             let length = if headers.contains("Content-Length:") {
@@ -41,7 +42,13 @@ async fn mint(statuses: Vec<(u16, &'static str)>) -> (CashuAdapter, JoinHandle<(
 
 #[tokio::test]
 async fn only_public_gets_are_used_and_refresh_failures_retain_stale_evidence() {
-    let (adapter, server) = mint(vec![(200, ""), (200, ""), (503, ""), (503, "")]).await;
+    let (adapter, server) = mint(
+        vec![(200, ""); 3]
+            .into_iter()
+            .chain(vec![(503, ""); 3])
+            .collect(),
+    )
+    .await;
     let first = adapter.observe().await;
     assert!(first.metadata.is_known());
     assert!(
@@ -68,7 +75,7 @@ async fn only_public_gets_are_used_and_refresh_failures_retain_stale_evidence() 
 
 #[tokio::test]
 async fn cached_http_age_cannot_refresh_stale_capabilities() {
-    let (adapter, server) = mint(vec![(200, "Age: 301\r\n"), (200, "Age: 301\r\n")]).await;
+    let (adapter, server) = mint(vec![(200, "Age: 301\r\n"); 3]).await;
     let observed = adapter.observe().await;
     assert!(observed.metadata.is_stale());
     assert!(observed.input_fees.is_stale());
@@ -84,7 +91,7 @@ async fn cached_http_age_cannot_refresh_stale_capabilities() {
 #[tokio::test]
 async fn redirects_are_not_followed() {
     let (adapter, server) =
-        mint(vec![(302, "Location: http://127.0.0.1:1/forbidden\r\n"); 2]).await;
+        mint(vec![(302, "Location: http://127.0.0.1:1/forbidden\r\n"); 3]).await;
     let observed = adapter.observe().await;
     assert!(observed.metadata.is_unknown());
     assert!(
@@ -98,7 +105,7 @@ async fn redirects_are_not_followed() {
 
 #[tokio::test]
 async fn oversized_http_responses_are_explicit_failures() {
-    let (adapter, server) = mint(vec![(200, "Content-Length: 2000000\r\n"); 2]).await;
+    let (adapter, server) = mint(vec![(200, "Content-Length: 2000000\r\n"); 3]).await;
     let observed = adapter.observe().await;
     assert!(observed.metadata.is_unknown());
     assert_eq!(observed.availability.value(), Some(&false));
