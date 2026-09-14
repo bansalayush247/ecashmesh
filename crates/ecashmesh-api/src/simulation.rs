@@ -1,9 +1,12 @@
 //! Reference-host confirmation transport. No payment is executed or persisted.
 
-use axum::{Json, extract::rejection::JsonRejection};
+use axum::{
+    Json,
+    extract::{State, rejection::JsonRejection},
+};
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, EvaluateRequest, FeeResponse, deterministic_id, evaluate};
+use super::{ApiError, EvaluateRequest, FeeResponse, Provider, deterministic_id, evaluate_using};
 
 #[derive(Deserialize)]
 pub(super) struct SimulationRequest {
@@ -27,15 +30,22 @@ pub(super) struct SimulationReceipt {
 }
 
 pub(super) async fn confirm(
+    State(provider): State<Provider>,
     request: Result<Json<SimulationRequest>, JsonRejection>,
 ) -> Result<Json<SimulationReceipt>, ApiError> {
+    if !matches!(provider, Provider::Simulator) {
+        return Err(ApiError::validation(
+            "Simulator confirmation is available only in simulator mode",
+            vec!["Cashu is read-only".into()],
+        ));
+    }
     let Json(request) = request.map_err(|error| {
         ApiError::validation("Invalid simulator confirmation", vec![error.to_string()])
     })?;
     let amount = request.payment.amount;
     // Reuse the same engine/fixture inputs. The host cannot supply a fabricated
     // route, fee, score, or success result. Alternative selections are allowed.
-    let Json(decision) = evaluate(Ok(Json(request.payment))).await?;
+    let Json(decision) = evaluate_using(&provider, Ok(Json(request.payment))).await?;
     if request.quote_id != decision.quote_id {
         return Err(ApiError::validation(
             "Quote does not match this simulated payment; evaluate again.",

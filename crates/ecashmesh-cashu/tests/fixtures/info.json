@@ -1,0 +1,12 @@
+{
+  "name": "Fixture Cashu Mint",
+  "version": "Fixture/1.0",
+  "description": "Offline protocol fixture; no funds",
+  "motd": "Read-only demonstration",
+  "time": 9999999999,
+  "nuts": {
+    "4": {"disabled": false, "methods": [{"method": "bolt11", "unit": "sat", "min_amount": 1, "max_amount": 1000000}]},
+    "5": {"disabled": false, "methods": [{"method": "bolt11", "unit": "sat", "min_amount": 100, "max_amount": 200000}]},
+    "999": {"supported": true, "extension": "ignored"}
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "Partial Mint",
+  "version": 42,
+  "nuts": {
+    "5": {"disabled": false, "methods": [{"method": "bolt11", "unit": "sat"}]}
+  }
+}

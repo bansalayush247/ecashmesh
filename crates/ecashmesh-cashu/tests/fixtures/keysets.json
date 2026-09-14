@@ -1,0 +1,7 @@
+{
+  "keysets": [
+    {"id": "009a1f293253e41e", "unit": "sat", "active": true, "input_fee_ppk": 100},
+    {"id": "0011223344556677", "unit": "sat", "active": false},
+    {"id": "0011223344556688", "unit": "usd", "active": true, "input_fee_ppk": null}
+  ]
+}

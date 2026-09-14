@@ -1,12 +1,12 @@
 //! Protocol-agnostic domain types for describing `EcashMesh` routing inputs and
 //! outputs.
 //!
-//! This crate deliberately contains no connector implementations, networking,
-//! scoring, or pathfinding. Protocol adapters translate external data into
-//! these types before it reaches the routing layer.
+//! Protocol adapters translate external data into these types before it reaches
+//! the deterministic routing layer. No protocol clients or networking live here.
 
 #![forbid(unsafe_code)]
 
+pub mod connector;
 pub mod evidence;
 pub mod explain;
 mod model;
@@ -14,6 +14,7 @@ pub mod risk;
 pub mod routing;
 pub mod simulator;
 
+pub use connector::ConnectorSnapshot;
 pub use evidence::{
     ConfidenceLevel, ConnectorEvidence, ConnectorHealth, Evidence, EvidenceAggregate,
     EvidenceFreshness, EvidenceObservation, EvidenceSource, EvidenceTimestamp, SolvencyStatus,

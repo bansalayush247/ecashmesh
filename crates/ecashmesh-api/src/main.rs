@@ -1,10 +1,11 @@
 //! Local HTTP surface for manually exercising deterministic route ranking.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use axum::{
     Json, Router,
     extract::rejection::JsonRejection,
+    extract::{Query, State},
     http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -14,18 +15,22 @@ use ecashmesh_core::{
     ConnectorId, ConnectorType, DEMO_EVALUATED_AT, DecisionReason, Evidence, EvidenceFreshness,
     EvidenceSource, EvidenceTimestamp, ExplainedRoute, FeeQuote, LiquidityInfo, PaymentRequest,
     ReliabilityInfo, RouteCandidate, RouteDecisionExplanation, RouteHop, RouteRankingConfig,
-    SolvencyStatus, demo_connectors, explain_ranking, rank_routes,
+    SolvencyStatus, explain_ranking, rank_routes,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::cors::CorsLayer;
 
+mod connectors;
 mod simulation;
+use connectors::Provider;
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:5000";
 
 #[tokio::main]
 async fn main() {
+    let provider = Provider::from_env()
+        .unwrap_or_else(|error| panic!("invalid connector configuration: {error}"));
     let listener = tokio::net::TcpListener::bind(api_address())
         .await
         .unwrap_or_else(|error| panic!("failed to bind API address: {error}"));
@@ -35,12 +40,12 @@ async fn main() {
             .local_addr()
             .expect("bound listener has an address")
     );
-    axum::serve(listener, app())
+    axum::serve(listener, app(provider))
         .await
         .expect("HTTP server terminated unexpectedly");
 }
 
-fn app() -> Router {
+fn app(provider: Provider) -> Router {
     // Expo's local browser preview; native clients do not use browser CORS.
     let origins = std::env::var("ECASHMESH_WEB_ORIGIN").map_or_else(
         |_| {
@@ -62,7 +67,9 @@ fn app() -> Router {
         .route("/health", get(health))
         .route("/v1/routes/rank", post(rank))
         .route("/v1/routes/evaluate", post(evaluate))
+        .route("/v1/connectors", get(connector_observations))
         .route("/v1/simulator/confirm", post(simulation::confirm))
+        .with_state(provider)
         .layer(
             CorsLayer::new()
                 .allow_origin(origins)
@@ -136,6 +143,43 @@ async fn rank(Json(request): Json<RankRequest>) -> Result<Json<RankResponse>, Ap
 }
 
 async fn evaluate(
+    State(provider): State<Provider>,
+    request: Result<Json<EvaluateRequest>, JsonRejection>,
+) -> Result<Json<EvaluateResponse>, ApiError> {
+    evaluate_using(&provider, request).await
+}
+
+#[derive(Deserialize)]
+struct ConnectorQuery {
+    amount: Option<u64>,
+}
+
+async fn connector_observations(
+    State(provider): State<Provider>,
+    query: Result<Query<ConnectorQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Query(query) = query.map_err(|error| {
+        ApiError::validation("Invalid connector query", vec![error.to_string()])
+    })?;
+    let amount = query.amount.unwrap_or(100_000);
+    if amount == 0 {
+        return Err(ApiError::validation(
+            "amount must be greater than zero",
+            vec!["amount".into()],
+        ));
+    }
+    let batch = provider.collect(Amount::from_sats(amount)).await?;
+    Ok(Json(json!({
+        "evaluated_amount_sats": amount,
+        "mode": if batch.simulated { "simulator" } else { "cashu" },
+        "read_only": true,
+        "evidence": batch.connectors.iter().map(EvidenceResponse::from_connector).collect::<Vec<_>>(),
+        "observations": batch.observations,
+    })))
+}
+
+async fn evaluate_using(
+    provider: &Provider,
     request: Result<Json<EvaluateRequest>, JsonRejection>,
 ) -> Result<Json<EvaluateResponse>, ApiError> {
     let Json(request) = request
@@ -149,38 +193,13 @@ async fn evaluate(
         candidate_connectors,
     } = request;
 
-    let available = demo_connectors()
-        .map_err(|error| ApiError::internal("simulator_error", error.to_string()))?
-        .into_iter()
-        .map(|connector| (connector.id.clone(), connector))
-        .collect::<BTreeMap<_, _>>();
-    let mut selected = Vec::with_capacity(candidate_connectors.len().max(available.len()));
-    let mut seen = BTreeSet::new();
-    if candidate_connectors.is_empty() {
-        selected.extend(available.values().cloned());
-    } else {
-        for raw_id in candidate_connectors {
-            let id = ConnectorId::new(&raw_id).map_err(|error| {
-                ApiError::validation(
-                    "candidate_connectors contains an invalid connector identifier",
-                    vec![error.to_string()],
-                )
-            })?;
-            if !seen.insert(id.clone()) {
-                return Err(ApiError::validation(
-                    "candidate_connectors contains a duplicate connector",
-                    vec![id.to_string()],
-                ));
-            }
-            let connector = available.get(&id).ok_or_else(|| {
-                ApiError::validation(
-                    "candidate_connectors contains an unavailable connector",
-                    vec![id.to_string()],
-                )
-            })?;
-            selected.push(connector.clone());
-        }
-    }
+    let mut batch = provider.collect(Amount::from_sats(amount)).await?;
+    let selected = connectors::select(batch.connectors, candidate_connectors)?;
+    batch.observations.retain(|observation| {
+        selected
+            .iter()
+            .any(|connector| Some(connector.id.as_str()) == observation["connector"].as_str())
+    });
 
     let amount = Amount::from_sats(amount);
     let candidates = selected
@@ -196,7 +215,7 @@ async fn evaluate(
         PaymentRequest::new(amount),
         candidates,
         &connector_evidence,
-        DEMO_EVALUATED_AT,
+        batch.evaluated_at,
         RouteRankingConfig::default(),
     );
 
@@ -208,17 +227,49 @@ async fn evaluate(
                 .iter()
                 .flat_map(|route| route.reasons.iter())
                 .map(|reason| format!("{reason:?}"))
+                .chain(batch.observations.iter().filter_map(|observation| {
+                    observation["send_unavailable_reason"]
+                        .as_str()
+                        .map(|reason| {
+                            format!(
+                                "{}: {reason}",
+                                observation["connector"].as_str().unwrap_or_default()
+                            )
+                        })
+                }))
                 .collect(),
         ));
     }
 
-    Ok(Json(EvaluateResponse::from_ranking(
-        deterministic_quote_id(amount, &destination, &payment_intent, &selected),
-        &destination,
-        &payment_intent,
-        &selected,
-        ranking,
-    )))
+    let quote_id = deterministic_quote_id(amount, &destination, &payment_intent, &selected);
+    let quote_id = if batch.simulated {
+        quote_id
+    } else {
+        deterministic_id(
+            "cashu_quote",
+            &[quote_id, json!(batch.observations).to_string()],
+        )
+    };
+    let mut response =
+        EvaluateResponse::from_ranking(quote_id, &destination, &payment_intent, &selected, ranking);
+    response.simulated = batch.simulated;
+    response.connector_observations = batch.observations;
+    response.expires_at_unix_seconds = response
+        .connector_observations
+        .iter()
+        .filter(|observation| observation["send_unavailable_reason"].is_null())
+        .filter_map(|observation| observation["expires_at_unix_seconds"].as_u64())
+        .min()
+        .unwrap_or(batch.expires_at_unix_seconds);
+    response.expires_at = format!("unix:{}", response.expires_at_unix_seconds);
+    if !batch.simulated {
+        for route in
+            std::iter::once(&mut response.recommended_route).chain(&mut response.alternatives)
+        {
+            route.estimated_time_seconds = None;
+        }
+    }
+    Ok(Json(response))
 }
 
 #[derive(Debug)]
@@ -713,6 +764,8 @@ impl RankResponse {
 
 #[derive(Serialize)]
 struct EvaluateResponse {
+    simulated: bool,
+    connector_observations: Vec<serde_json::Value>,
     quote_id: String,
     recommended_route: EvaluatedRouteResponse,
     alternatives: Vec<EvaluatedRouteResponse>,
@@ -729,7 +782,7 @@ impl EvaluateResponse {
         quote_id: String,
         destination: &DestinationInput,
         payment_intent: &str,
-        connectors: &[ecashmesh_core::SimulatedConnector],
+        connectors: &[ecashmesh_core::ConnectorSnapshot],
         ranking: ecashmesh_core::RouteRanking,
     ) -> Self {
         let decision = explain_ranking(&ranking);
@@ -748,6 +801,8 @@ impl EvaluateResponse {
             payment_intent,
         );
         Self {
+            simulated: true,
+            connector_observations: Vec::new(),
             quote_id,
             recommended_route,
             alternatives: routes,
@@ -772,7 +827,7 @@ struct EvaluatedRouteResponse {
     score: u8,
     score_basis_points: u16,
     fee: FeeResponse,
-    estimated_time_seconds: u64,
+    estimated_time_seconds: Option<u64>,
     liquidity_confidence: u8,
     reliability_confidence: u8,
     evidence_freshness: u8,
@@ -805,9 +860,11 @@ impl EvaluatedRouteResponse {
                 asset: "sats",
                 freshness: freshness_code(route.quality.total_fee.freshness()),
             },
-            estimated_time_seconds: u64::try_from(route.candidate.hop_count())
-                .unwrap_or(u64::MAX)
-                .saturating_mul(3),
+            estimated_time_seconds: Some(
+                u64::try_from(route.candidate.hop_count())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(3),
+            ),
             liquidity_confidence: as_percent(route.signals.liquidity_confidence),
             reliability_confidence: as_percent(route.signals.reliability),
             evidence_freshness: as_percent(route.signals.freshness),
@@ -868,7 +925,7 @@ struct EvidenceResponse {
 }
 
 impl EvidenceResponse {
-    fn from_connector(connector: &ecashmesh_core::SimulatedConnector) -> Self {
+    fn from_connector(connector: &ecashmesh_core::ConnectorSnapshot) -> Self {
         Self {
             connector: connector.id.to_string(),
             connector_type: connector_type_code(connector.connector_type),
@@ -1208,7 +1265,7 @@ fn deterministic_quote_id(
     amount: Amount,
     destination: &DestinationInput,
     payment_intent: &str,
-    connectors: &[ecashmesh_core::SimulatedConnector],
+    connectors: &[ecashmesh_core::ConnectorSnapshot],
 ) -> String {
     let mut connector_ids = connectors
         .iter()

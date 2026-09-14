@@ -445,6 +445,7 @@ ecashmesh/
 │   ├── ecashmesh-core/
 │   │   └── src/
 │   │       ├── lib.rs
+│   │       ├── connector.rs
 │   │       ├── evidence.rs
 │   │       ├── model.rs
 │   │       ├── risk.rs
@@ -455,8 +456,12 @@ ecashmesh/
 │   ├── ecashmesh-api/
 │   │   └── src/
 │   │       ├── main.rs
-│   │       ├── dto.rs
+│   │       ├── connectors.rs
 │   │       └── simulation.rs
+│   │
+│   ├── ecashmesh-cashu/
+│   │   ├── src/                 # Read-only HTTP transport and normalization
+│   │   └── tests/fixtures/      # Offline Cashu response fixtures
 │   │
 │   └── ecashmesh-simulator/
 │       └── src/
@@ -467,7 +472,7 @@ ecashmesh/
 
 ## Development Status
 
-**Current status: Early development / deterministic demo complete through Phase 7**
+**Current status: Phase 8 complete — deterministic demo plus read-only Cashu adapter**
 
 Development is being done incrementally.
 
@@ -493,13 +498,13 @@ HTTP API
 Reference wallet integration
      │
      ▼
-Future protocol adapters
+Read-only Cashu adapter
 ```
 
-The current implementation works with deterministic simulated data before relying
-on live network infrastructure. Cashu, Fedimint, and Lightning exist in the core
-domain model, but real protocol adapters and real payment execution are not
-implemented yet.
+The reference wallet demo defaults to deterministic simulated data. An opt-in
+Cashu adapter now reads public mint metadata and normalizes it for the same core
+ranker. Fedimint and Lightning are represented in the core model and simulator;
+their live adapters and all real payment execution remain unimplemented.
 
 ## Completed Phases
 
@@ -646,6 +651,89 @@ account management, portfolio management, transaction history, or real payment
 execution. It collects payment input, calls the EcashMesh API through a thin SDK
 adapter, renders the returned decision, and confirms through a simulator-only
 receipt endpoint.
+
+### Phase 8 — Read-only Cashu adapter
+
+Implemented in `crates/ecashmesh-cashu`, connected through the protocol-independent
+`ConnectorSnapshot` boundary and the API's connector provider. No protocol logic
+or HTTP dependencies were added to the core or reference wallet.
+
+The adapter only sends `GET /v1/info` and `GET /v1/keysets`. It exposes mint display
+metadata, advertised mint/melt capabilities, method/unit transaction limits,
+keyset input fee schedules, public endpoint health and availability, source URLs,
+confidence, timestamps, and structured diagnostics. These follow
+[NUT-06](https://github.com/cashubtc/nuts/blob/main/06.md),
+[NUT-04](https://github.com/cashubtc/nuts/blob/main/04.md),
+[NUT-05](https://github.com/cashubtc/nuts/blob/main/05.md), and
+[NUT-02](https://github.com/cashubtc/nuts/blob/main/02.md).
+
+Advertised transaction limits are liquidity-related observations, not evidence of
+available funds. Keyset fees are per-input schedules, not a total payment fee or
+Lightning fee reserve. NUT-02 defines omitted/null `input_fee_ppk` as zero for that
+keyset only. Liquidity, payment fees, payment reliability, and solvency therefore
+remain explicitly unknown. The core applies its existing evidence risk penalties.
+Live execution time is also unknown (`null`). Recommendations are informational;
+they do not establish that a payment is funded or executable.
+
+Malformed fields and missing settings have inspectable diagnostic codes; valid
+independent fields are retained. Failed refreshes retain previous responses as
+stale while recording the current HTTP failure. Freshness uses local observation
+timestamps and HTTP `Age`, never the mint's self-reported clock. Stale or missing
+send settings, unavailable endpoints, missing active sat keysets, disabled melting,
+and unsupported method/unit/amount combinations cannot advertise send capability.
+The core rejects those candidates before scoring. `/v1/connectors` still exposes
+their observations when `/v1/routes/evaluate` returns `NO_VIABLE_ROUTE`.
+
+There are no mint/melt quote POSTs, token operations, keys, custody, or execution.
+The adapter reads public keyset identifiers only; it does not retrieve public keys.
+HTTP requests have a five-second timeout, a 1 MiB response limit, and no redirects.
+Mint URLs are configured by the API operator, never accepted from payment requests.
+
+Run the offline adapter tests and the API tests with local fixture servers:
+
+```bash
+nix develop -c cargo test -p ecashmesh-cashu
+nix develop -c cargo test -p ecashmesh-api --test cashu
+```
+
+Fixtures cover fresh, stale, missing, malformed, partial, conflicting, and
+unavailable data; advertised limits; read-only HTTP behavior; and deterministic
+core ranking. Tests do not contact public mints. Live reads naturally acquire new
+timestamps; replaying a capture with the same evaluation time produces the same
+evidence and ranking.
+
+To inspect a configured mint, replace the example URL with your mint's base URL:
+
+```bash
+ECASHMESH_CONNECTOR_MODE=cashu \
+ECASHMESH_CASHU_MINTS='[{"id":"cashu:my-mint","url":"https://mint.example"}]' \
+nix develop -c cargo run -p ecashmesh-api
+```
+
+`ECASHMESH_CASHU_MAX_AGE_SECONDS` defaults to `300`. Configure 1–16 mints with unique
+IDs; HTTP(S) URLs can include a deployment subpath. Each API observation/evaluation
+refreshes both public endpoints, retaining an in-memory stale fallback on failure.
+
+```bash
+curl http://127.0.0.1:5000/v1/connectors
+curl -X POST http://127.0.0.1:5000/v1/routes/evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{"amount":100000,"asset":"BTC","destination":{"type":"lightning","value":"inspection-only-target"},"payment_intent":"send","candidate_connectors":[]}'
+```
+
+The connector catalog evaluates advertised amount limits for 100,000 sats by
+default; use `/v1/connectors?amount=5000` to inspect a different amount.
+
+Evaluation preserves the Phase 6 fields and adds `simulated: false` and
+`connector_observations` with the Cashu metadata, capabilities, schedules, and
+diagnostics. Destination validation remains the existing non-empty Lightning
+target validation; this phase does not validate invoices or request payment
+quotes. Cashu-mode `/v1/simulator/confirm` returns a structured validation error.
+Use default simulator mode for the reference wallet's complete confirmation flow:
+
+```bash
+ECASHMESH_CONNECTOR_MODE=simulator nix develop -c cargo run -p ecashmesh-api
+```
 
 ## Run Locally
 
@@ -832,13 +920,14 @@ It exits non-zero if any expected ordering changes.
 * [x] Phase 5: deterministic simulator
 * [x] Phase 6: HTTP API
 * [x] Phase 7: React Native reference wallet integration
+* [x] Phase 8: read-only Cashu protocol adapter
 
 ### Next: protocol integrations
 
-* [ ] Cashu adapter
+* [x] Read-only Cashu adapter
 * [ ] Mint discovery
-* [ ] Keyset and fee information
-* [ ] Capability detection
+* [x] Public keyset and input fee information
+* [x] Cashu capability detection
 * [ ] Proof/state information
 * [ ] Reliability observations
 * [ ] Small-value payment experiment when safe
