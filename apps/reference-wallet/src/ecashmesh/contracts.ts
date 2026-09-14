@@ -33,7 +33,7 @@ export const routeSchema = z
     score: percentage,
     score_basis_points: z.number().int().min(0).max(10000),
     fee: feeSchema,
-    estimated_time_seconds: unsigned,
+    estimated_time_seconds: unsigned.nullable(),
     liquidity_confidence: percentage,
     reliability_confidence: percentage,
     evidence_freshness: percentage,
@@ -107,7 +107,7 @@ export type Reason = z.infer<typeof reasonSchema>;
 export type PaymentInput = {
   amount: number;
   asset: "BTC";
-  destination: { type: "lightning"; value: string };
+  destination: { type: "lightning"; value: string; mint_url?: string };
   paymentIntent: "send";
   candidateConnectors?: string[];
 };

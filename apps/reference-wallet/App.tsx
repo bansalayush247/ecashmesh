@@ -18,6 +18,7 @@ import { usePaymentFlow } from "./src/host/usePaymentFlow";
 import {
   Button,
   colors,
+  estimatedTime,
   ErrorNotice,
   Heading,
   Loading,
@@ -443,7 +444,9 @@ function ReferenceWallet() {
                     />
                     <Row
                       label="Estimated time"
-                      value={`~ ${flow.selected.estimated_time_seconds} seconds`}
+                      value={estimatedTime(
+                        flow.selected.estimated_time_seconds,
+                      )}
                     />
                     <Row
                       label="Destination"

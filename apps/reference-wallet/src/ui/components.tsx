@@ -31,6 +31,8 @@ export const colors = {
 export const humanize = (value: string) => value.replace(/_/g, " ");
 export const sats = (amount: number | null) =>
   amount === null ? "Unknown fee" : `${amount.toLocaleString("en-US")} sats`;
+export const estimatedTime = (seconds: number | null) =>
+  seconds === null ? "Not available" : `~ ${seconds} seconds`;
 
 export function Button({
   children,

@@ -89,6 +89,21 @@ test("explicit connector selection passes through without choosing connectors", 
   await client.evaluateRoute({ ...payment, candidateConnectors: candidates });
 });
 
+test("cashu read-only routes may omit execution time", async () => {
+  const payload = {
+    ...decision,
+    recommended_route: { ...route, estimated_time_seconds: null },
+    alternatives: [
+      { ...route, route_id: "cashu_alt", estimated_time_seconds: null },
+    ],
+  };
+  const client = createEcashMeshClient({
+    baseUrl: "http://local",
+    fetch: async () => json(payload),
+  });
+  assert.deepEqual(await client.evaluateRoute(payment), payload);
+});
+
 test("missing, stale and negative observations retain their distinct states and values", async () => {
   const unknown = {
     state: "unknown",

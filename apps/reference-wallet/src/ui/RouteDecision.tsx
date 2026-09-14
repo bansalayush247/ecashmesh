@@ -9,6 +9,7 @@ import type {
 import {
   Button,
   colors,
+  estimatedTime,
   humanize,
   Row,
   sats,
@@ -58,8 +59,8 @@ export function Risks({ flags }: { flags: string[] }) {
   return (
     <View style={local.risks}>
       <Text style={local.riskTitle}>⚠ Important risks</Text>
-      {flags.map((flag) => (
-        <Text key={flag} style={local.riskText}>
+      {flags.map((flag, index) => (
+        <Text key={`${flag}-${index}`} style={local.riskText}>
           • {humanize(flag)} ({flag})
         </Text>
       ))}
@@ -70,8 +71,11 @@ export function Risks({ flags }: { flags: string[] }) {
 function Reasons({ reasons }: { reasons: Reason[] }) {
   return (
     <View style={local.reasonList}>
-      {reasons.map((reason) => (
-        <View key={`${reason.code}-${reason.message}`} style={local.reason}>
+      {reasons.map((reason, index) => (
+        <View
+          key={`${reason.code}-${reason.message}-${index}`}
+          style={local.reason}
+        >
           <Text style={local.check}>✓</Text>
           <View style={{ flex: 1 }}>
             <Text style={styles.body}>{reason.message}</Text>
@@ -146,7 +150,8 @@ function RouteCard({
           <View style={{ flex: 1, gap: 3 }}>
             <Text style={local.routeName}>{route.connector}</Text>
             <Text style={styles.small}>
-              {sats(route.fee.amount)} · ~{route.estimated_time_seconds}s
+              {sats(route.fee.amount)} ·{" "}
+              {estimatedTime(route.estimated_time_seconds)}
             </Text>
           </View>
         </View>
@@ -401,7 +406,7 @@ export function RouteDetails({
         <Row label="Estimated fee" value={sats(route.fee.amount)} />
         <Row
           label="Estimated time"
-          value={`${route.estimated_time_seconds} seconds`}
+          value={estimatedTime(route.estimated_time_seconds)}
         />
         <Button secondary onPress={() => setShowRaw(!showRaw)}>
           {showRaw ? "Hide response JSON" : "Inspect response JSON"}
