@@ -6,7 +6,7 @@ use axum::{
     Json, Router,
     extract::rejection::JsonRejection,
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use ecashmesh_core::{
@@ -49,15 +49,8 @@ fn api_address() -> String {
     std::env::var("ECASHMESH_API_ADDRESS").unwrap_or_else(|_| DEFAULT_ADDRESS.to_owned())
 }
 
-async fn index() -> Json<serde_json::Value> {
-    Json(json!({
-        "service": "ecashmesh-api",
-        "endpoints": {
-            "health": "GET /health",
-            "rank_routes": "POST /v1/routes/rank",
-            "evaluate_routes": "POST /v1/routes/evaluate"
-        }
-    }))
+async fn index() -> Html<&'static str> {
+    Html(include_str!("../web/index.html"))
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -819,6 +812,8 @@ impl ScoreBreakdownResponse {
 #[derive(Serialize)]
 struct EvidenceResponse {
     connector: String,
+    connector_type: &'static str,
+    capabilities: ConnectorCapabilitiesResponse,
     first_observed_at_unix_seconds: Option<u64>,
     liquidity: EvidenceStateResponse,
     fee: EvidenceStateResponse,
@@ -832,6 +827,8 @@ impl EvidenceResponse {
     fn from_connector(connector: &ecashmesh_core::SimulatedConnector) -> Self {
         Self {
             connector: connector.id.to_string(),
+            connector_type: connector_type_code(connector.connector_type),
+            capabilities: connector.capabilities.into(),
             first_observed_at_unix_seconds: connector
                 .evidence
                 .first_observed_at
@@ -860,6 +857,26 @@ impl EvidenceResponse {
                 &connector.evidence.reliability,
                 reliability_value,
             ),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ConnectorCapabilitiesResponse {
+    can_send: bool,
+    can_receive: bool,
+    supports_cross_connector_transfer: bool,
+    supports_lightning: bool,
+}
+
+impl From<ConnectorCapabilities> for ConnectorCapabilitiesResponse {
+    fn from(capabilities: ConnectorCapabilities) -> Self {
+        Self {
+            can_send: capabilities.can_send,
+            can_receive: capabilities.can_receive,
+            supports_cross_connector_transfer: capabilities.supports_cross_connector_transfer,
+            supports_lightning: capabilities.supports_lightning,
         }
     }
 }
@@ -1227,6 +1244,14 @@ const fn solvency_status_code(solvency: SolvencyStatus) -> &'static str {
     match solvency {
         SolvencyStatus::Supported => "supported",
         SolvencyStatus::Concerning => "concerning",
+    }
+}
+
+const fn connector_type_code(connector_type: ConnectorType) -> &'static str {
+    match connector_type {
+        ConnectorType::Cashu => "cashu",
+        ConnectorType::Fedimint => "fedimint",
+        ConnectorType::Lightning => "lightning",
     }
 }
 

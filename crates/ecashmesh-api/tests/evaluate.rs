@@ -73,6 +73,36 @@ impl ApiServer {
             serde_json::from_str(body).expect("response body is JSON"),
         )
     }
+
+    fn get_text(&self, path: &str) -> (u16, String) {
+        let mut stream = TcpStream::connect(&self.address).expect("connect to API");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        stream
+            .write_all(
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                    self.address
+                )
+                .as_bytes(),
+            )
+            .expect("send GET request");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read GET response");
+        let (head, body) = response
+            .split_once("\r\n\r\n")
+            .expect("HTTP response contains a body");
+        let status = head
+            .split_whitespace()
+            .nth(1)
+            .expect("HTTP response contains a status")
+            .parse()
+            .expect("HTTP status is numeric");
+        (status, body.to_owned())
+    }
 }
 
 impl Drop for ApiServer {
@@ -93,6 +123,19 @@ fn valid_request(amount: u64, candidate_connectors: &Value) -> Value {
         "payment_intent": "send",
         "candidate_connectors": candidate_connectors
     })
+}
+
+#[test]
+fn wallet_demo_is_served_from_the_local_api() {
+    let server = ApiServer::start();
+    let (status, page) = server.get_text("/");
+
+    assert_eq!(status, 200);
+    assert!(page.contains("EcashMesh Wallet Demo"));
+    assert!(page.contains("Find Best Route"));
+    assert!(page.contains("Why this route?"));
+    assert!(page.contains("Confirm &amp; Pay"));
+    assert!(page.contains("/v1/routes/evaluate"));
 }
 
 #[test]
@@ -132,6 +175,8 @@ fn evaluate_demo_payment_end_to_end_with_simulated_connectors() {
         .expect("healthy connector evidence is present");
     assert_eq!(healthy_evidence["liquidity"]["state"], "known");
     assert!(healthy_evidence["liquidity"]["value"]["available_sats"].is_u64());
+    assert_eq!(healthy_evidence["connector_type"], "cashu");
+    assert_eq!(healthy_evidence["capabilities"]["supports_lightning"], true);
     assert!(response["explanation"]["reasons"].is_array());
     assert!(response["expires_at"].is_string());
 }

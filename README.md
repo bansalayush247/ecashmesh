@@ -500,32 +500,38 @@ In a second terminal, confirm that it is running:
 curl http://127.0.0.1:5000/health
 ```
 
-For the dashboard/demo flow, use `POST /v1/routes/evaluate`. It validates the
-payment metadata and generates deterministic quotes and evidence for the named
-simulator connectors. The available connector IDs are `cashu:healthy`,
-`cashu:low-liquidity`, `cashu:cheap-stale`, `cashu:reliable-expensive`, and
-`cashu:new`.
+Open [http://127.0.0.1:5000](http://127.0.0.1:5000) for the wallet-style demo.
+It guides a simulated payment through **Enter payment → Find best route →
+Understand decision → Confirm payment**. The client is a presentation layer
+only: it calls `POST /v1/routes/evaluate` and renders its response; routing,
+scoring, risks, and evidence evaluation remain in `ecashmesh-core`.
+
+The endpoint validates payment metadata and generates deterministic quotes and
+evidence for the built-in simulator connectors. The available connector IDs are
+`cashu:healthy`, `cashu:low-liquidity`, `cashu:cheap-stale`,
+`cashu:reliable-expensive`, and `cashu:new`.
 
 ```bash
 curl -X POST http://127.0.0.1:5000/v1/routes/evaluate \
   -H 'content-type: application/json' \
   --data '{
-    "amount": 10000,
-    "currency": "sat",
-    "asset": "bitcoin",
-    "payment_intent": "demo-lightning-invoice",
-    "candidate_connectors": [
-      "cashu:cheap-stale",
-      "cashu:low-liquidity",
-      "cashu:healthy"
-    ]
+    "amount": 100000,
+    "asset": "BTC",
+    "destination": {
+      "type": "lightning",
+      "value": "lnbc1simulateddestination"
+    },
+    "payment_intent": "send",
+    "candidate_connectors": []
   }'
 ```
 
-The response contains `recommended_route`, `ranked_alternatives`,
-`rejected_routes`, and `explanation`. Every ranked route includes its score,
-fee estimate, evidence freshness, and risk codes. Validation failures return
-a `400` JSON error with a stable `error.code`.
+The response has stable `quote_id` and route IDs, a recommended route, ordered
+alternatives, score breakdown, evidence, risk flags, explanation, and quote
+expiry. The demo renders those returned values directly, including evidence
+state, source, freshness, confidence, and connector capabilities. Validation
+failures return `{ "error": { "code", "message", "details" } }`; a request
+with no feasible simulated route returns `NO_VIABLE_ROUTE`.
 
 Submit candidate routes to `POST /v1/routes/rank`. Evidence is explicitly
 `known`, `stale`, or `unknown`; known and stale evidence require a value and
@@ -614,32 +620,6 @@ selected route, score, estimated fee, confidence signals, evidence freshness,
 and risk codes. `decision.reasons_selected` answers “why this route?”, while
 each `decision.alternatives[*].reasons_not_selected` answers “why not this
 alternative?”.
-
-### Payment-Intent Evaluation
-
-`POST /v1/routes/evaluate` is the wallet-facing deterministic demo endpoint.
-It uses the built-in simulated connectors when `candidate_connectors` is empty.
-
-```bash
-curl -X POST http://127.0.0.1:5000/v1/routes/evaluate \
-  -H 'content-type: application/json' \
-  --data '{
-    "amount": 100000,
-    "asset": "BTC",
-    "destination": {
-      "type": "lightning",
-      "value": "lnbc1simulateddestination"
-    },
-    "payment_intent": "send",
-    "candidate_connectors": []
-  }'
-```
-
-The response has stable `quote_id` and route IDs, `recommended_route`, ordered
-`alternatives`, evidence and risk flags, score breakdown, selected-route and
-alternative explanations, and an explicit quote expiry. Validation failures
-return `{ "error": { "code", "message", "details" } }`; a request with no
-feasible simulated route returns `NO_VIABLE_ROUTE`.
 
 ## Deterministic Simulator
 

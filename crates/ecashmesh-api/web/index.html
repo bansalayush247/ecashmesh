@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="EcashMesh wallet route evaluation demo">
+    <title>EcashMesh Wallet Demo</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #17231f;
+        --muted: #64716c;
+        --canvas: #f4f6f2;
+        --paper: #ffffff;
+        --line: #dfe6de;
+        --mint: #43d19b;
+        --mint-dark: #087555;
+        --mint-pale: #e4f9ef;
+        --amber: #d7861d;
+        --amber-pale: #fff4df;
+        --red: #b94242;
+        --red-pale: #fff0f0;
+        --shadow: 0 18px 50px rgb(16 41 29 / 8%);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--canvas); color: var(--ink); }
+      button, input, select { font: inherit; }
+      button { cursor: pointer; }
+      button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+        outline: 3px solid rgb(67 209 155 / 38%); outline-offset: 3px;
+      }
+      .shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+      header { border-bottom: 1px solid var(--line); background: rgb(255 255 255 / 82%); backdrop-filter: blur(10px); }
+      .topbar { min-height: 72px; display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+      .brand { display: flex; align-items: center; gap: 12px; font-weight: 800; letter-spacing: -0.03em; font-size: 1.14rem; }
+      .brand-mark { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 10px; background: var(--ink); color: var(--mint); font-size: 1.25rem; }
+      .demo-pill, .badge { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; font-size: .76rem; font-weight: 750; line-height: 1; }
+      .demo-pill { padding: 8px 11px; background: var(--mint-pale); color: var(--mint-dark); }
+      .demo-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--mint); }
+      main { padding: 48px 0 76px; }
+      .eyebrow { margin: 0 0 10px; color: var(--mint-dark); font-size: .76rem; font-weight: 800; letter-spacing: .11em; text-transform: uppercase; }
+      h1, h2, h3, p { margin-top: 0; }
+      h1 { max-width: 690px; margin-bottom: 14px; letter-spacing: -.055em; font-size: clamp(2.25rem, 6vw, 4.4rem); line-height: .98; }
+      h2 { margin-bottom: 8px; letter-spacing: -.035em; font-size: 1.36rem; }
+      h3 { margin-bottom: 5px; font-size: 1rem; }
+      .lede { max-width: 650px; margin-bottom: 32px; color: var(--muted); font-size: 1.07rem; line-height: 1.55; }
+      .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; align-items: start; gap: 24px; }
+      .card { border: 1px solid var(--line); border-radius: 20px; background: var(--paper); box-shadow: var(--shadow); }
+      .payment-card { padding: 28px; }
+      .section-intro { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 23px; }
+      .section-intro p, .card-subtitle { color: var(--muted); margin-bottom: 0; font-size: .91rem; line-height: 1.45; }
+      .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 17px; }
+      .form-grid .wide { grid-column: 1 / -1; }
+      label { display: grid; gap: 7px; color: #47544e; font-size: .84rem; font-weight: 700; }
+      input, select { width: 100%; min-height: 49px; padding: 12px 13px; border: 1px solid #cfd9d0; border-radius: 12px; background: #fff; color: var(--ink); }
+      input:hover, select:hover { border-color: #aebcb2; }
+      .amount-wrap { position: relative; }
+      .amount-wrap input { padding-right: 58px; font-size: 1.2rem; font-weight: 800; }
+      .amount-wrap span { position: absolute; right: 14px; top: 15px; color: var(--muted); font-size: .84rem; font-weight: 750; }
+      .form-note { margin: 16px 0 20px; color: var(--muted); font-size: .82rem; line-height: 1.45; }
+      .primary, .secondary, .text-button { min-height: 48px; border: 0; border-radius: 12px; font-weight: 800; transition: transform .15s ease, background .15s ease; }
+      .primary { width: 100%; background: var(--ink); color: #fff; }
+      .primary:hover { background: #273a32; transform: translateY(-1px); }
+      .primary:disabled { cursor: wait; background: #7b8982; transform: none; }
+      .secondary { padding: 0 15px; border: 1px solid #bfcbc2; background: #fff; color: var(--ink); }
+      .secondary:hover { background: #f7faf7; }
+      .text-button { min-height: auto; padding: 4px 0; background: transparent; color: var(--mint-dark); }
+      .side-card { padding: 24px; }
+      .step-list { display: grid; gap: 16px; padding: 0; margin: 22px 0 0; list-style: none; }
+      .step { display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; }
+      .step-num { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 50%; background: var(--mint-pale); color: var(--mint-dark); font-size: .76rem; font-weight: 800; }
+      .step strong { display: block; margin-bottom: 3px; font-size: .9rem; }
+      .step span { color: var(--muted); font-size: .8rem; line-height: 1.4; }
+      .privacy-note { margin: 25px 0 0; padding-top: 19px; border-top: 1px solid var(--line); color: var(--muted); font-size: .78rem; line-height: 1.45; }
+      .state { margin-top: 24px; }
+      .empty { display: grid; place-items: center; min-height: 180px; padding: 28px; border: 1px dashed #c6d2c8; border-radius: 18px; color: var(--muted); text-align: center; }
+      .empty-icon { display: grid; width: 42px; height: 42px; place-items: center; margin-bottom: 12px; border-radius: 14px; background: var(--mint-pale); color: var(--mint-dark); font-weight: 900; }
+      .notice { display: flex; align-items: flex-start; gap: 12px; padding: 16px; border-radius: 14px; }
+      .notice h2 { margin-bottom: 4px; font-size: 1rem; }
+      .notice p { margin: 0; font-size: .86rem; line-height: 1.45; }
+      .notice.error { background: var(--red-pale); color: #792d2d; }
+      .notice.warning { background: var(--amber-pale); color: #775016; }
+      .notice.success { background: var(--mint-pale); color: #166044; }
+      .spinner { width: 18px; height: 18px; flex: 0 0 auto; border: 2px solid rgb(8 117 85 / 25%); border-top-color: var(--mint-dark); border-radius: 50%; animation: spin .8s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .decision { margin-top: 24px; }
+      .decision-header { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 15px; }
+      .decision-header p { margin: 0; color: var(--muted); font-size: .86rem; }
+      .route-card { padding: 24px; border: 1px solid var(--line); border-radius: 18px; background: var(--paper); box-shadow: var(--shadow); }
+      .route-card.recommended { border: 2px solid var(--mint); background: linear-gradient(135deg, #fff 0%, #f2fff9 100%); }
+      .route-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+      .route-name { margin-bottom: 5px; font-size: 1.28rem; letter-spacing: -.03em; }
+      .route-path { color: var(--muted); font-size: .84rem; line-height: 1.45; word-break: break-word; }
+      .badge { padding: 7px 9px; white-space: nowrap; }
+      .badge.recommended, .badge.good { background: var(--mint-pale); color: var(--mint-dark); }
+      .badge.warn { background: var(--amber-pale); color: #855811; }
+      .badge.muted { background: #edf1ed; color: #5d6962; }
+      .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; margin: 21px 0; }
+      .metric { min-width: 0; padding: 12px; border-radius: 13px; background: rgb(244 247 243 / 88%); }
+      .metric-label { display: block; margin-bottom: 4px; color: var(--muted); font-size: .7rem; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+      .metric-value { display: block; overflow: hidden; font-size: 1rem; font-weight: 850; text-overflow: ellipsis; white-space: nowrap; }
+      .confidence-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+      .confidence-label { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 6px; color: var(--muted); font-size: .76rem; font-weight: 700; }
+      .progress { height: 7px; overflow: hidden; border-radius: 999px; background: #dce7de; }
+      .progress span { display: block; height: 100%; border-radius: inherit; background: var(--mint); }
+      .risk-line { display: flex; align-items: center; gap: 7px; margin: 18px 0 0; color: var(--muted); font-size: .82rem; }
+      .risk-line.warn { color: #875719; }
+      .route-actions { display: flex; justify-content: flex-end; margin-top: 21px; }
+      .alternative-section { margin-top: 26px; }
+      .alternative-list { display: grid; gap: 12px; }
+      .alternative-list .route-card { box-shadow: none; }
+      .alternative-list .metrics { margin: 17px 0; }
+      details { border: 1px solid var(--line); border-radius: 16px; background: var(--paper); }
+      details + details { margin-top: 14px; }
+      summary { padding: 17px 19px; cursor: pointer; font-weight: 800; list-style: none; }
+      summary::-webkit-details-marker { display: none; }
+      summary::after { content: "+"; float: right; color: var(--mint-dark); font-size: 1.25rem; line-height: .75; }
+      details[open] summary::after { content: "–"; }
+      .details-content { padding: 0 19px 19px; }
+      .reason-list { display: grid; gap: 10px; padding: 0; margin: 0; list-style: none; }
+      .reason { display: grid; grid-template-columns: 21px 1fr; gap: 9px; align-items: start; color: #405048; font-size: .88rem; line-height: 1.45; }
+      .reason::before { content: "✓"; display: grid; width: 20px; height: 20px; place-items: center; border-radius: 50%; background: var(--mint-pale); color: var(--mint-dark); font-size: .7rem; font-weight: 900; }
+      .alternative-reasons { display: grid; gap: 14px; margin-top: 19px; padding-top: 17px; border-top: 1px solid var(--line); }
+      .alternative-reasons h3 { margin: 0; }
+      .alternative-reasons p { margin: 0; color: var(--muted); font-size: .83rem; line-height: 1.45; }
+      .score-grid { display: grid; gap: 12px; }
+      .score-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(90px, 2fr) 48px; gap: 10px; align-items: center; font-size: .83rem; }
+      .score-row span:last-child { text-align: right; font-weight: 800; }
+      .detail-split { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+      .detail-block { padding: 15px; border-radius: 14px; background: #f7f9f6; }
+      .detail-block h3 { margin-bottom: 11px; }
+      .path { margin: 0; color: #405048; font-size: .85rem; line-height: 1.5; word-break: break-word; }
+      .key-values { display: grid; gap: 8px; margin: 0; }
+      .key-value { display: flex; justify-content: space-between; gap: 12px; color: #536058; font-size: .8rem; }
+      .key-value dt { font-weight: 750; }
+      .key-value dd { margin: 0; text-align: right; }
+      .evidence-list { display: grid; gap: 9px; padding: 0; margin: 0; list-style: none; }
+      .evidence-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 11px; border-radius: 12px; background: #f7f9f6; }
+      .evidence-item strong { display: block; margin-bottom: 3px; font-size: .83rem; }
+      .evidence-item span { color: var(--muted); font-size: .76rem; line-height: 1.4; }
+      .risk-list { display: flex; flex-wrap: wrap; gap: 7px; padding: 0; margin: 0; list-style: none; }
+      .confirmation { margin-top: 25px; padding: 25px; border: 2px solid var(--ink); border-radius: 20px; background: var(--ink); color: #fff; }
+      .confirmation .eyebrow { color: var(--mint); }
+      .confirmation h2 { color: #fff; }
+      .confirmation p { color: #bed0c5; }
+      .confirmation-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 11px; margin: 19px 0; }
+      .confirmation-grid .metric { background: rgb(255 255 255 / 9%); }
+      .confirmation-grid .metric-label { color: #abc1b4; }
+      .confirmation .primary { background: var(--mint); color: #073929; }
+      .confirmation .primary:hover { background: #76e0b9; }
+      .confirmation-actions { display: flex; align-items: center; gap: 16px; }
+      .confirmation .text-button { color: #bdeed9; }
+      .success-state { margin-top: 16px; }
+      [hidden] { display: none !important; }
+      @media (max-width: 850px) { .layout { grid-template-columns: 1fr; } .side-card { display: none; } .confirmation-grid { grid-template-columns: repeat(2, 1fr); } }
+      @media (max-width: 600px) { main { padding-top: 30px; } .form-grid, .detail-split, .metrics, .confidence-grid { grid-template-columns: 1fr; } .payment-card, .route-card { padding: 19px; } .topbar { min-height: 62px; } .demo-pill { font-size: .68rem; } .route-head, .decision-header { align-items: flex-start; flex-direction: column; } .route-actions { justify-content: stretch; } .route-actions .secondary { width: 100%; } .score-row { grid-template-columns: 1fr 1.6fr 42px; } }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="shell topbar">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">↗</span> EcashMesh</div>
+        <span class="demo-pill">Deterministic demo</span>
+      </div>
+    </header>
+
+    <main class="shell">
+      <p class="eyebrow">Pay with confidence</p>
+      <h1>Find the best way to send your ecash.</h1>
+      <p class="lede">EcashMesh compares available payment routes inside your wallet and explains its recommendation before you confirm.</p>
+
+      <div class="layout">
+        <section class="card payment-card" aria-labelledby="payment-title">
+          <div class="section-intro">
+            <div>
+              <h2 id="payment-title">New payment</h2>
+              <p>Enter a simulated Lightning payment to see the safest available route.</p>
+            </div>
+            <span class="badge muted">BTC / sats</span>
+          </div>
+
+          <form id="payment-form" novalidate>
+            <div class="form-grid">
+              <label for="amount">Amount
+                <span class="amount-wrap"><input id="amount" name="amount" type="number" min="1" step="1" inputmode="numeric" value="100000" required><span>sats</span></span>
+              </label>
+              <label for="payment-method">Payment method
+                <select id="payment-method" name="payment-method">
+                  <option value="lightning">Lightning invoice (simulated)</option>
+                </select>
+              </label>
+              <label class="wide" for="destination">Destination
+                <input id="destination" name="destination" type="text" value="lnbc1simulateddestination" autocomplete="off" required>
+              </label>
+              <label for="destination-preset">Simulated destination
+                <select id="destination-preset" name="destination-preset">
+                  <option value="lnbc1simulateddestination">Demo Lightning invoice</option>
+                  <option value="lnbc1merchantcoffee">Coffee shop invoice</option>
+                  <option value="lnbc1friendsettlement">Friend settlement invoice</option>
+                </select>
+              </label>
+              <label for="payment-intent">Payment intent
+                <select id="payment-intent" name="payment-intent">
+                  <option value="send">Send payment</option>
+                </select>
+              </label>
+            </div>
+            <p class="form-note">Demo mode uses fixed simulated connectors. No payment information is sent beyond this local EcashMesh instance.</p>
+            <button class="primary" id="evaluate-button" type="submit">Find Best Route</button>
+          </form>
+
+          <div id="feedback" class="state" aria-live="polite"></div>
+
+          <section id="empty-state" class="state empty" aria-label="Route evaluation ready">
+            <div>
+              <div class="empty-icon" aria-hidden="true">✦</div>
+              <strong>Your route decision will appear here.</strong>
+              <p>We will show the recommendation, its reasoning, and alternatives before any simulated payment is confirmed.</p>
+            </div>
+          </section>
+
+          <section id="decision" class="decision" hidden aria-live="polite">
+            <div class="decision-header">
+              <div><p class="eyebrow">Route decision</p><h2>Best route found</h2></div>
+              <p id="route-count"></p>
+            </div>
+            <div id="recommended-route"></div>
+
+            <details id="why-route" open>
+              <summary>Why this route?</summary>
+              <div id="why-content" class="details-content"></div>
+            </details>
+
+            <section id="alternative-section" class="alternative-section" aria-labelledby="alternatives-title">
+              <h2 id="alternatives-title">Other available routes</h2>
+              <p class="card-subtitle">Each route remains available, but EcashMesh returned a lower score or an explicit risk for it.</p>
+              <div id="alternatives" class="alternative-list"></div>
+            </section>
+
+            <details id="route-details" open>
+              <summary>Route details</summary>
+              <div id="details-content" class="details-content"></div>
+            </details>
+
+            <section id="confirmation" class="confirmation" hidden aria-labelledby="confirmation-title">
+              <p class="eyebrow">Ready to confirm</p>
+              <h2 id="confirmation-title">Review your selected route</h2>
+              <p>This confirms against the deterministic simulator only. It does not send a real payment.</p>
+              <div id="confirmation-metrics" class="confirmation-grid"></div>
+              <div class="confirmation-actions">
+                <button class="primary" id="confirm-button" type="button">Confirm &amp; Pay</button>
+                <button class="text-button" id="back-to-routes" type="button">Choose another route</button>
+              </div>
+              <div id="success-state" class="success-state" hidden aria-live="polite"></div>
+            </section>
+          </section>
+        </section>
+
+        <aside class="card side-card" aria-label="How the demo works">
+          <p class="eyebrow">Inside your wallet</p>
+          <h2>One clear decision</h2>
+          <ol class="step-list">
+            <li class="step"><span class="step-num">1</span><div><strong>Enter payment</strong><span>Choose an amount and simulated destination.</span></div></li>
+            <li class="step"><span class="step-num">2</span><div><strong>Find best route</strong><span>EcashMesh evaluates deterministic connector evidence.</span></div></li>
+            <li class="step"><span class="step-num">3</span><div><strong>Understand why</strong><span>Compare fees, confidence, freshness, and risks.</span></div></li>
+            <li class="step"><span class="step-num">4</span><div><strong>Confirm safely</strong><span>Complete a simulator-backed demo payment.</span></div></li>
+          </ol>
+          <p class="privacy-note">This screen only presents the decision returned by EcashMesh. Route scoring and risk evaluation stay in the routing engine.</p>
+        </aside>
+      </div>
+    </main>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const $ = (selector) => document.querySelector(selector);
+        const form = $("#payment-form");
+        const amountInput = $("#amount");
+        const destinationInput = $("#destination");
+        const destinationPreset = $("#destination-preset");
+        const paymentIntent = $("#payment-intent");
+        const evaluateButton = $("#evaluate-button");
+        const feedback = $("#feedback");
+        const emptyState = $("#empty-state");
+        const decision = $("#decision");
+        const recommendedTarget = $("#recommended-route");
+        const alternativesTarget = $("#alternatives");
+        const alternativeSection = $("#alternative-section");
+        const whyContent = $("#why-content");
+        const detailsContent = $("#details-content");
+        const confirmation = $("#confirmation");
+        const confirmationMetrics = $("#confirmation-metrics");
+        const successState = $("#success-state");
+        const state = { evaluation: null, selectedRoute: null, amount: null };
+
+        const evidenceLabels = [
+          ["liquidity", "Liquidity"],
+          ["fee", "Fee quote"],
+          ["hop_reliability", "Route reliability"],
+          ["health", "Connector health"],
+          ["solvency", "Solvency"],
+          ["connector_reliability", "Recent history"],
+        ];
+
+        const clear = (node) => node.replaceChildren();
+        const el = (tag, className, text) => {
+          const node = document.createElement(tag);
+          if (className) node.className = className;
+          if (text !== undefined) node.textContent = text;
+          return node;
+        };
+        const formatSats = (value) => `${new Intl.NumberFormat("en-US").format(Number(value || 0))} sats`;
+        const formatCode = (value) => String(value || "").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+        const connectorName = (value) => String(value || "Unknown connector").replace(":", " · ");
+        const routePath = (route) => (route.path || []).join("  →  ");
+        const freshnessClass = (value) => value === "fresh" || value === "known" ? "good" : value === "stale" ? "warn" : "muted";
+
+        function metric(label, value) {
+          const item = el("div", "metric");
+          item.append(el("span", "metric-label", label), el("strong", "metric-value", value));
+          return item;
+        }
+
+        function progress(label, value) {
+          const item = el("div");
+          const top = el("div", "confidence-label");
+          top.append(el("span", "", label), el("span", "", `${value}%`));
+          const line = el("div", "progress");
+          const fill = el("span");
+          fill.style.width = `${Math.max(0, Math.min(100, Number(value || 0)))}%`;
+          line.append(fill);
+          item.append(top, line);
+          return item;
+        }
+
+        function badge(label, tone) {
+          return el("span", `badge ${tone}`, label);
+        }
+
+        function setFeedback(kind, title, message, loading = false) {
+          clear(feedback);
+          if (!title) return;
+          const note = el("div", `notice ${kind}`);
+          if (loading) note.append(el("span", "spinner"));
+          const copy = el("div");
+          copy.append(el("h2", "", title), el("p", "", message));
+          note.append(copy);
+          feedback.append(note);
+        }
+
+        function clearResults() {
+          decision.hidden = true;
+          confirmation.hidden = true;
+          successState.hidden = true;
+          clear(successState);
+          emptyState.hidden = false;
+        }
+
+        function renderRouteCard(route, recommended) {
+          const card = el("article", `route-card${recommended ? " recommended" : ""}`);
+          const head = el("div", "route-head");
+          const title = el("div");
+          title.append(el("h3", "route-name", connectorName(route.connector)), el("p", "route-path", routePath(route)));
+          head.append(title, badge(recommended ? "Recommended" : "Available", recommended ? "recommended" : "muted"));
+
+          const metrics = el("div", "metrics");
+          metrics.append(
+            metric("Route score", `${route.score} / 100`),
+            metric("Estimated fee", route.fee && route.fee.amount !== null ? formatSats(route.fee.amount) : "Unavailable"),
+            metric("Est. time", `${route.estimated_time_seconds} sec`),
+          );
+          const confidence = el("div", "confidence-grid");
+          confidence.append(
+            progress("Liquidity", route.liquidity_confidence),
+            progress("Reliability", route.reliability_confidence),
+            progress("Evidence freshness", route.evidence_freshness),
+          );
+          const risks = Array.isArray(route.risk_flags) ? route.risk_flags : [];
+          const risk = el("p", `risk-line${risks.length ? " warn" : ""}`, risks.length ? `⚠ ${formatCode(risks[0])}` : "✓ No material risk flags returned");
+          const actions = el("div", "route-actions");
+          const useButton = el("button", "secondary", recommended ? "Review & confirm" : "Use this route");
+          useButton.type = "button";
+          useButton.addEventListener("click", () => selectRoute(route));
+          actions.append(useButton);
+          card.append(head, metrics, confidence, risk, actions);
+          return card;
+        }
+
+        function renderWhy(explanation) {
+          clear(whyContent);
+          const reasons = Array.isArray(explanation.reasons) ? explanation.reasons : [];
+          const list = el("ul", "reason-list");
+          if (reasons.length) {
+            for (const reason of reasons) list.append(el("li", "reason", reason.message));
+          } else {
+            list.append(el("li", "reason", "EcashMesh returned this route as the strongest available option."));
+          }
+          whyContent.append(list);
+
+          const alternatives = Array.isArray(explanation.alternative_weaknesses) ? explanation.alternative_weaknesses : [];
+          if (alternatives.length) {
+            const section = el("div", "alternative-reasons");
+            section.append(el("h3", "", "Why the alternatives lost"));
+            for (const alternative of alternatives) {
+              const copy = el("p", "");
+              const messages = (alternative.reasons || []).map((reason) => reason.message).join(" ");
+              copy.textContent = `${connectorName(alternative.connector)}: ${messages || "Lower returned route score."}`;
+              section.append(copy);
+            }
+            whyContent.append(section);
+          }
+        }
+
+        function evidenceValue(label, evidence) {
+          if (!evidence || evidence.value === null || evidence.value === undefined) return "No observation returned";
+          const value = evidence.value;
+          if (label === "Liquidity") return `${formatSats(value.available_sats)} available`;
+          if (label === "Fee quote") return formatSats(value.amount_sats);
+          if (label === "Route reliability" || label === "Recent history") return `${Number(value.success_rate_basis_points || 0) / 100}% across ${value.observations} observations`;
+          return formatCode(value);
+        }
+
+        function detailKeyValue(label, value) {
+          const row = el("div", "key-value");
+          row.append(el("dt", "", label), el("dd", "", value));
+          return row;
+        }
+
+        function renderDetails(route) {
+          clear(detailsContent);
+          const response = state.evaluation;
+          const score = response.score_breakdown || {};
+          const scoreSection = el("section", "");
+          scoreSection.append(el("h3", "", "Score breakdown"));
+          const scoreGrid = el("div", "score-grid");
+          const scoreRows = [
+            ["Liquidity confidence", score.liquidity, "%"],
+            ["Reliability", score.reliability, "%"],
+            ["Evidence freshness", score.evidence_freshness, "%"],
+            ["Fee reasonableness", score.fees, "%"],
+            ["Route complexity", score.route_complexity, " hop"],
+            ["Risk penalty", score.risk_penalty, "%"],
+          ];
+          for (const [label, value, suffix] of scoreRows) {
+            const row = el("div", "score-row");
+            row.append(el("span", "", label), progress("", value), el("span", "", `${value}${suffix}`));
+            scoreGrid.append(row);
+          }
+          scoreSection.append(scoreGrid);
+
+          const detailSplit = el("div", "detail-split");
+          const routeBlock = el("section", "detail-block");
+          routeBlock.append(el("h3", "", "Route & fee"), el("p", "path", routePath(route)));
+          const values = el("dl", "key-values");
+          values.append(
+            detailKeyValue("Connector", connectorName(route.connector)),
+            detailKeyValue("Fee", route.fee && route.fee.amount !== null ? formatSats(route.fee.amount) : "Unavailable"),
+            detailKeyValue("Fee evidence", formatCode(route.fee && route.fee.freshness)),
+            detailKeyValue("Estimated time", `${route.estimated_time_seconds} seconds`),
+            detailKeyValue("Route ID", route.route_id),
+          );
+          routeBlock.append(values);
+
+          const selectedEvidence = (response.evidence || []).find((item) => item.connector === route.connector);
+          const connectorBlock = el("section", "detail-block");
+          connectorBlock.append(el("h3", "", "Connector capabilities"));
+          const caps = selectedEvidence && selectedEvidence.capabilities;
+          const capabilityValues = el("dl", "key-values");
+          capabilityValues.append(
+            detailKeyValue("Connector type", formatCode(selectedEvidence && selectedEvidence.connector_type)),
+            detailKeyValue("Can send", caps && caps.can_send ? "Yes" : "No"),
+            detailKeyValue("Can receive", caps && caps.can_receive ? "Yes" : "No"),
+            detailKeyValue("Cross-connector", caps && caps.supports_cross_connector_transfer ? "Supported" : "Not reported"),
+            detailKeyValue("Lightning", caps && caps.supports_lightning ? "Supported" : "Not reported"),
+          );
+          connectorBlock.append(capabilityValues);
+          detailSplit.append(routeBlock, connectorBlock);
+
+          const evidenceSection = el("section", "");
+          evidenceSection.style.marginTop = "19px";
+          evidenceSection.append(el("h3", "", "Evidence returned for this connector"));
+          const evidenceList = el("ul", "evidence-list");
+          for (const [key, label] of evidenceLabels) {
+            const fact = selectedEvidence && selectedEvidence[key];
+            const item = el("li", "evidence-item");
+            const copy = el("div");
+            const observed = fact && fact.observed_at_unix_seconds ? ` · observed ${fact.observed_at_unix_seconds}` : "";
+            copy.append(el("strong", "", label), el("span", "", `${evidenceValue(label, fact)}${observed}`));
+            item.append(copy, badge(formatCode(fact && fact.state), freshnessClass(fact && fact.freshness)));
+            evidenceList.append(item);
+          }
+          evidenceSection.append(evidenceList);
+
+          const risks = Array.isArray(route.risk_flags) ? route.risk_flags : [];
+          const riskSection = el("section", "");
+          riskSection.style.marginTop = "19px";
+          riskSection.append(el("h3", "", "Risk flags"));
+          const riskList = el("ul", "risk-list");
+          if (risks.length) {
+            for (const risk of risks) riskList.append(badge(formatCode(risk), "warn"));
+          } else {
+            riskList.append(badge("No material risk flags returned", "good"));
+          }
+          riskSection.append(riskList);
+          detailsContent.append(scoreSection, detailSplit, evidenceSection, riskSection);
+        }
+
+        function selectRoute(route) {
+          state.selectedRoute = route;
+          successState.hidden = true;
+          clear(successState);
+          $("#confirm-button").disabled = false;
+          $("#confirm-button").textContent = "Confirm & Pay";
+          clear(confirmationMetrics);
+          confirmationMetrics.append(
+            metric("Payment", formatSats(state.amount)),
+            metric("Connector", connectorName(route.connector)),
+            metric("Fee", route.fee && route.fee.amount !== null ? formatSats(route.fee.amount) : "Unavailable"),
+            metric("Route score", `${route.score} / 100`),
+          );
+          confirmation.hidden = false;
+          $("#confirmation-title").textContent = `Confirm with ${connectorName(route.connector)}`;
+          confirmation.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+
+        function renderDecision(response) {
+          state.evaluation = response;
+          state.selectedRoute = null;
+          clear(recommendedTarget);
+          clear(alternativesTarget);
+          clear(confirmationMetrics);
+          emptyState.hidden = true;
+          decision.hidden = false;
+          confirmation.hidden = true;
+          successState.hidden = true;
+          const alternatives = Array.isArray(response.alternatives) ? response.alternatives : [];
+          $("#route-count").textContent = `${alternatives.length + 1} viable route${alternatives.length ? "s" : ""} returned`;
+          recommendedTarget.append(renderRouteCard(response.recommended_route, true));
+          renderWhy(response.explanation || {});
+          alternativeSection.hidden = alternatives.length === 0;
+          for (const route of alternatives) alternativesTarget.append(renderRouteCard(route, false));
+          renderDetails(response.recommended_route);
+        }
+
+        function errorFromResponse(response, status) {
+          const error = response && response.error;
+          if (error && error.code === "NO_VIABLE_ROUTE") {
+            setFeedback("warning", "No viable route for this payment", error.message || "No simulated connector can satisfy this amount.");
+            return;
+          }
+          if (error && error.code === "VALIDATION_ERROR") {
+            setFeedback("error", "Check your payment details", error.message || "Please correct the highlighted payment information.");
+            return;
+          }
+          setFeedback("error", "EcashMesh could not evaluate this payment", (error && error.message) || `The local API returned HTTP ${status}.`);
+        }
+
+        destinationPreset.addEventListener("change", () => { destinationInput.value = destinationPreset.value; });
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const amount = Number(amountInput.value);
+          const destination = destinationInput.value.trim();
+          if (!Number.isSafeInteger(amount) || amount <= 0) {
+            clearResults();
+            setFeedback("error", "Enter a valid amount", "Amount must be a positive whole number of sats.");
+            amountInput.focus();
+            return;
+          }
+          if (!destination) {
+            clearResults();
+            setFeedback("error", "Enter a destination", "A simulated Lightning destination is required.");
+            destinationInput.focus();
+            return;
+          }
+
+          evaluateButton.disabled = true;
+          evaluateButton.textContent = "Finding the best route…";
+          clearResults();
+          setFeedback("warning", "Evaluating available routes", "Checking simulated liquidity, fees, reliability, and evidence.", true);
+          try {
+            const result = await fetch("/v1/routes/evaluate", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                amount,
+                asset: "BTC",
+                destination: { type: "lightning", value: destination },
+                payment_intent: paymentIntent.value,
+                candidate_connectors: [],
+              }),
+            });
+            const payload = await result.json().catch(() => null);
+            if (!result.ok) {
+              errorFromResponse(payload, result.status);
+              return;
+            }
+            state.amount = amount;
+            setFeedback("", "", "");
+            renderDecision(payload);
+          } catch (_) {
+            setFeedback("error", "EcashMesh is unavailable", "Start the local API and try finding a route again.");
+          } finally {
+            evaluateButton.disabled = false;
+            evaluateButton.textContent = "Find Best Route";
+          }
+        });
+
+        $("#back-to-routes").addEventListener("click", () => {
+          confirmation.hidden = true;
+          $("#recommended-route").scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+        $("#confirm-button").addEventListener("click", () => {
+          if (!state.selectedRoute) return;
+          clear(successState);
+          const message = el("div", "notice success");
+          const copy = el("div");
+          copy.append(
+            el("h2", "", "Simulated payment confirmed"),
+            el("p", "", `Your ${formatSats(state.amount)} payment was confirmed with ${connectorName(state.selectedRoute.connector)}. No real payment was sent.`),
+          );
+          message.append(copy);
+          successState.append(message);
+          successState.hidden = false;
+          $("#confirm-button").disabled = true;
+          $("#confirm-button").textContent = "Payment simulated";
+        });
+      })();
+    </script>
+  </body>
+</html>
