@@ -10,3 +10,4 @@ description = "Protocol-agnostic routing domain model for EcashMesh"
 workspace = true
 
 [dependencies]
+arc-swap = "1"

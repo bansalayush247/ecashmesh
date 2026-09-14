@@ -450,6 +450,7 @@ ecashmesh/
 │   │       ├── model.rs
 │   │       ├── risk.rs
 │   │       ├── routing.rs
+│   │       ├── scalable.rs       # Snapshot-based large-scale routing foundation
 │   │       ├── explain.rs
 │   │       └── simulator.rs
 │   │
@@ -472,7 +473,7 @@ ecashmesh/
 
 ## Development Status
 
-**Current status: Phase 8 complete — deterministic demo, read-only Cashu adapter, and mint discovery**
+**Current status: Phase 9 complete — snapshot-based production-scale routing foundation**
 
 Development is being done incrementally.
 
@@ -499,6 +500,9 @@ Reference wallet integration
      │
      ▼
 Read-only Cashu adapter
+     │
+     ▼
+Snapshot-based scalable routing foundation
 ```
 
 The reference wallet demo defaults to deterministic simulated data. An opt-in
@@ -808,6 +812,61 @@ Use default simulator mode for the reference wallet's complete confirmation flow
 ECASHMESH_CONNECTOR_MODE=simulator nix develop -c cargo run -p ecashmesh-api
 ```
 
+### Phase 9 — Production-scale discovery and routing foundation
+
+Implemented in `ecashmesh-core/src/scalable.rs`. This is an in-process routing
+foundation for high-cardinality connector graphs; it does not change the existing
+Phase 6 API transport mode or add a distributed service.
+
+The slow control plane has a bounded `DiscoveryQueue`, incremental
+`ConnectorRegistry`, and `DiscoveryCoordinator`. Protocol adapters submit
+normalized updates asynchronously; a `GraphSnapshotCompiler` rebuilds an
+immutable snapshot outside route queries. `GraphSnapshotPublisher` atomically
+publishes the completed snapshot using an atomic `Arc` swap, so discovery and
+rebuilds never block a query on the graph write path.
+
+The hot graph path uses dense `u32` `CompactConnectorId` and `EdgeId` values,
+compact CSR adjacency, and precomputed capability indexes. It stores only
+adapter-declared `ExecutableEdge`s with a known transfer mechanism; sharing a
+protocol type never creates a mint-to-mint edge.
+
+`ScalableRouter` separates feasibility from scoring:
+
+1. Capability indexes resolve source and destination candidates without a full
+   connector scan. Each broad capability lookup is deterministically bounded
+   (256 nodes by default).
+2. A bounded Dijkstra-style traversal applies maximum hops, node/edge budgets,
+   amount-aware feasibility checks, and bounded Pareto labels.
+3. Only the small cheap-search survivor set receives the existing detailed
+   evidence/risk evaluation, deterministic ranking, and explanation work.
+
+Amount and health observations explicitly preserve `Known`, `Unknown`, `Stale`,
+and `Conflicting` states. Known or stale bounds below the requested amount are
+infeasible; unknown and conflicting values are not interpreted as liquidity or
+solvency and carry explicit uncertainty into the candidate set.
+
+The router includes a graph-versioned bounded cache, local concurrent-search and
+rate admission limits, sparse immutable dynamic overlays, and counters for cache
+hits, generated candidates, explored nodes/edges, feasibility pruning, Pareto
+pruning, QPS, and approximate p50/p95/p99 latency. Snapshot memory reports the
+exact structural allocation estimate (not registry-string or allocator overhead),
+and benchmark output reports CPU-bound work time for the single-threaded runner.
+
+Run deterministic large-scale topology benchmarks without network access:
+
+```bash
+# Builds 100,000 connectors and 200,000 declared edges, then runs 10 searches.
+nix develop -c cargo run -p ecashmesh-simulator -- benchmark 100k 10
+
+# Available fixed scales: 100k, 500k, 1m, 5m.
+nix develop -c cargo run -p ecashmesh-simulator -- benchmark 5m 10
+```
+
+The fixed scale generator has 2 edges per connector: 100k/200k edges,
+500k/1M edges, 1M/2M edges, and 5M/10M edges. It does not generate external
+connector strings, protocol metadata, or arbitrary transfer relationships, so
+the benchmark remains focused on compact graph construction and bounded search.
+
 ## Run Locally
 
 The local API is for manual testing only. It has no authentication and binds only
@@ -994,6 +1053,7 @@ It exits non-zero if any expected ordering changes.
 * [x] Phase 6: HTTP API
 * [x] Phase 7: React Native reference wallet integration
 * [x] Phase 8: read-only Cashu protocol adapter and mint discovery
+* [x] Phase 9: production-scale discovery and routing foundation
 
 ### Next: protocol integrations
 

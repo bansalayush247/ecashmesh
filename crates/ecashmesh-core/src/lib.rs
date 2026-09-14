@@ -12,6 +12,7 @@ pub mod explain;
 mod model;
 pub mod risk;
 pub mod routing;
+pub mod scalable;
 pub mod simulator;
 
 pub use connector::ConnectorSnapshot;
@@ -32,6 +33,17 @@ pub use risk::{EvidenceField, EvidenceRiskPolicy, RiskFactor, evaluate_connector
 pub use routing::{
     PaymentRequest, RankedRoute, RejectedRoute, RiskPenaltyPolicy, RouteRanking,
     RouteRankingConfig, RouteRejectionReason, RouteSignalWeights, RouteSignals, rank_routes,
+};
+pub use scalable::{
+    AmountAwareEvidence, BenchmarkError, BenchmarkReport, BenchmarkScale, Capability,
+    CompactConnectorId, ConnectorRegistry, ConnectorRegistrySnapshot, DiscoveredConnector,
+    DiscoveryCoordinator, DiscoveryQueue, DiscoveryQueueError, DiscoveryWorkerError, EdgeId,
+    EdgeOverlay, EvidenceState, ExecutableEdge, GraphBuildError, GraphBuilder, GraphNode,
+    GraphOverlay, GraphSnapshot, GraphSnapshotCompiler, GraphSnapshotPublisher, HealthObservation,
+    HealthState, LargeGraphGenerator, RegisteredConnector, RegistryError, RegistryUpdateReport,
+    RouteCache, RouteSearchConfig, RouteSearchError, RouteSearchMetrics, RouteSearchRequest,
+    RouteSearchResult, ScalableRouter, SearchEndpoint, SearchObservability,
+    SearchObservabilityReport, TransferMechanism,
 };
 pub use simulator::{
     DEMO_EVALUATED_AT, RoutingScenario, ScenarioError, ScenarioName, ScenarioResult,
