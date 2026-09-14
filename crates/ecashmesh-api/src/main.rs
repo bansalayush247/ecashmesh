@@ -76,7 +76,25 @@ fn api_address() -> String {
 }
 
 async fn index() -> Html<&'static str> {
-    Html(include_str!("../web/index.html"))
+    Html(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>EcashMesh local API</title>
+  </head>
+  <body>
+    <h1>EcashMesh local API</h1>
+    <p>The deterministic routing API is running.</p>
+    <p>The reference wallet integration is a separate React Native client.</p>
+    <p>Run <code>npm run web</code> from <code>apps/reference-wallet</code>.</p>
+    <p>Open <a href="http://localhost:8081">http://localhost:8081</a>.</p>
+    <p>Route evaluation: <code>POST /v1/routes/evaluate</code></p>
+    <p>Simulator confirmation: <code>POST /v1/simulator/confirm</code></p>
+  </body>
+</html>"#,
+    )
 }
 
 async fn health() -> Json<serde_json::Value> {

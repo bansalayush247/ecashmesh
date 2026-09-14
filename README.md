@@ -289,7 +289,7 @@ Cashu / simulated sources
                 HTTP API
                     │
                     ▼
-              Web Dashboard
+        Reference Wallet Integration
 ```
 
 The core routing engine should remain fully testable without network access.
@@ -387,7 +387,6 @@ The BOSS Battle MVP is intentionally scoped for a solo four-week build.
 
 ### Core
 
-* Cashu-first integration
 * connector abstraction
 * deterministic evidence/risk scoring
 * route discovery
@@ -398,13 +397,13 @@ The BOSS Battle MVP is intentionally scoped for a solo four-week build.
 ### API
 
 * lightweight HTTP API
-* route quote endpoint
+* route evaluation endpoint
 * candidate route comparison
 * structured route explanations
 
-### Dashboard
+### Reference wallet integration
 
-The dashboard should show:
+The reference wallet should show:
 
 * requested payment amount
 * candidate routes
@@ -423,18 +422,30 @@ A real Cashu payment flow using very small test amounts, only if the integration
 
 ---
 
-## Architecture Scope
+## Repository Layout
 
-The initial repository is intentionally small:
+The repository is intentionally small and keeps protocol-specific integration
+outside the core routing model:
 
 ```text
 ecashmesh/
 ├── Cargo.toml
 ├── README.md
+├── flake.nix
+├── apps/
+│   └── reference-wallet/
+│       ├── App.tsx
+│       ├── README.md
+│       ├── src/
+│       │   ├── ecashmesh/
+│       │   ├── host/
+│       │   └── ui/
+│       └── tests/
 ├── crates/
 │   ├── ecashmesh-core/
 │   │   └── src/
 │   │       ├── lib.rs
+│   │       ├── evidence.rs
 │   │       ├── model.rs
 │   │       ├── risk.rs
 │   │       ├── routing.rs
@@ -444,46 +455,199 @@ ecashmesh/
 │   ├── ecashmesh-api/
 │   │   └── src/
 │   │       ├── main.rs
-│   │       └── routes.rs
+│   │       ├── dto.rs
+│   │       └── simulation.rs
 │   │
-│   └── ecashmesh-cashu/
+│   └── ecashmesh-simulator/
 │       └── src/
-│           ├── lib.rs
-│           └── adapter.rs
-│
-└── web/
+│           └── main.rs
 ```
 
 ---
 
 ## Development Status
 
-**Current status: Early development / experimental**
+**Current status: Early development / deterministic demo complete through Phase 7**
 
 Development is being done incrementally.
 
 ```text
-Core routing
+Core domain model
      │
      ▼
 Evidence / risk engine
      │
      ▼
+Deterministic route ranking
+     │
+     ▼
+Explainable decisions
+     │
+     ▼
+Deterministic simulator
+     │
+     ▼
 HTTP API
      │
      ▼
-Dashboard
+Reference wallet integration
      │
      ▼
-Cashu integration
-     │
-     ▼
-Future Fedimint / Lightning adapters
+Future protocol adapters
 ```
 
-The initial implementation is designed to work with deterministic simulated data before relying on live network infrastructure.
+The current implementation works with deterministic simulated data before relying
+on live network infrastructure. Cashu, Fedimint, and Lightning exist in the core
+domain model, but real protocol adapters and real payment execution are not
+implemented yet.
 
-## Local Ranking API
+## Completed Phases
+
+### Phase 1 — Core domain model
+
+Implemented in `ecashmesh-core`.
+
+* `Amount`
+* `ConnectorId`
+* `ConnectorType`
+* `ConnectorCapabilities`
+* `LiquidityInfo`
+* `FeeQuote`
+* `ReliabilityInfo`
+* `Evidence`
+* `RiskFactor`
+* `RouteHop`
+* `RouteCandidate`
+* `Route`
+* `RouteQuality`
+* `RouteExplanation`
+
+The core model supports Cashu, Fedimint, and Lightning while keeping
+protocol-specific dependencies out of `ecashmesh-core`.
+
+### Phase 2 — Evidence and risk engine
+
+Implemented in `evidence.rs` and `risk.rs`.
+
+Evidence explicitly distinguishes:
+
+* known evidence
+* unknown evidence
+* stale evidence
+
+Risk evaluation produces inspectable reasons for missing, stale, or weak
+evidence. Unknown evidence is kept distinct from negative evidence.
+
+Implemented risk flags include:
+
+* `UnknownSolvency`
+* `StaleEvidence`
+* `PoorRecentReliability`
+* `NewOrUnobservedConnector`
+
+### Phase 3 — Deterministic route ranking
+
+Implemented in `routing.rs`.
+
+The routing engine evaluates candidate routes for a payment amount, rejects
+impossible routes before scoring, applies explicit risk penalties, and returns a
+deterministic ordering with stable tie-breaking.
+
+The MVP scoring weights are configurable:
+
+| Signal                             | Default Weight |
+| ---------------------------------- | -------------: |
+| Liquidity confidence               |            25% |
+| Reliability / uptime               |            20% |
+| Fee reasonableness                 |            15% |
+| Proof freshness / state confidence |            15% |
+| Solvency / reserve confidence      |            15% |
+| Historical behavior / reputation   |            10% |
+
+### Phase 4 — Explainable route decisions
+
+Implemented in `explain.rs`.
+
+Every ranked recommendation includes machine-readable and human-readable
+explanation data:
+
+* selected route
+* overall score
+* estimated fee
+* liquidity confidence
+* reliability confidence
+* evidence freshness
+* major risks
+* reasons the route beat alternatives
+* reasons alternatives were weaker
+
+Reason ordering is deterministic.
+
+### Phase 5 — Deterministic simulator
+
+Implemented in `simulator.rs` and the `ecashmesh-simulator` binary.
+
+The simulator provides offline, reproducible connector fixtures:
+
+* healthy high-liquidity connector
+* low-liquidity connector
+* cheap but stale connector
+* reliable but expensive connector
+* new unobserved connector
+* equal-score connectors
+* mixed regression scenario
+
+Run all simulator scenarios:
+
+```bash
+nix develop -c cargo run -p ecashmesh-simulator
+```
+
+### Phase 6 — HTTP API
+
+Implemented in `ecashmesh-api`.
+
+Available endpoints:
+
+* `GET /health`
+* `POST /v1/routes/rank`
+* `POST /v1/routes/evaluate`
+* `POST /v1/simulator/confirm`
+
+The API validates requests, calls the deterministic core routing engine, returns
+structured errors, preserves evidence and risk information, and does not contain
+routing logic itself.
+
+### Phase 7 — Reference wallet integration
+
+Implemented in `apps/reference-wallet`.
+
+This is a minimal host wallet reference client that demonstrates EcashMesh as an
+embedded smart-routing capability:
+
+```text
+Existing Wallet
+      │
+      ▼
+Smart Route
+      │
+      ▼
+Powered by EcashMesh
+      │
+      ▼
+Best available route + explanation
+      │
+      ▼
+Host Wallet Confirmation
+```
+
+The reference wallet does not implement custody, private keys, token storage,
+account management, portfolio management, transaction history, or real payment
+execution. It collects payment input, calls the EcashMesh API through a thin SDK
+adapter, renders the returned decision, and confirms through a simulator-only
+receipt endpoint.
+
+## Run Locally
 
 The local API is for manual testing only. It has no authentication and binds only
 to `127.0.0.1:5000`.
@@ -659,28 +823,17 @@ It exits non-zero if any expected ordering changes.
 
 ## Roadmap
 
-### Phase 1 — Core
+### Completed
 
-* [x] Project initialization
-* [ ] Core domain models
-* [ ] Evidence model
-* [ ] Risk scoring engine
-* [ ] Route quality scoring
-* [ ] Route ranking
-* [ ] Explanation engine
-* [ ] Deterministic simulator
-* [ ] Comprehensive tests
+* [x] Phase 1: core routing domain model
+* [x] Phase 2: evidence and risk engine
+* [x] Phase 3: deterministic route ranking
+* [x] Phase 4: explainable route decisions
+* [x] Phase 5: deterministic simulator
+* [x] Phase 6: HTTP API
+* [x] Phase 7: React Native reference wallet integration
 
-### Phase 2 — API & Dashboard
-
-* [ ] HTTP API
-* [ ] Route quote endpoint
-* [ ] Candidate comparison
-* [ ] Evidence visualization
-* [ ] Risk visualization
-* [ ] Route explanations
-
-### Phase 3 — Cashu
+### Next: protocol integrations
 
 * [ ] Cashu adapter
 * [ ] Mint discovery
@@ -688,9 +841,9 @@ It exits non-zero if any expected ordering changes.
 * [ ] Capability detection
 * [ ] Proof/state information
 * [ ] Reliability observations
-* [ ] Small-value payment experiment
+* [ ] Small-value payment experiment when safe
 
-### Phase 4 — Ecosystem
+### Later: ecosystem
 
 * [ ] Fedimint adapter
 * [ ] Lightning connector
@@ -715,7 +868,7 @@ The hackathon implementation will not attempt to build:
 * a decentralized reputation network
 * complex analytics infrastructure
 * multi-user accounts or authentication
-* a mobile application
+* a production wallet or custodial mobile application
 * machine-learning-based route scoring
 
 These may become future areas of exploration.
@@ -754,17 +907,30 @@ If using `direnv`:
 direnv allow
 ```
 
-The development environment provides the required Rust tooling and supporting dependencies.
+The development environment provides Rust, Node.js, npm, and supporting
+dependencies.
 
-Once the core workspace is implemented:
+Rust workspace checks:
 
 ```bash
-cargo fmt
+cargo fmt --check
 cargo test
-cargo clippy
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-The core routing engine should remain runnable without network access.
+Reference wallet checks:
+
+```bash
+cd apps/reference-wallet
+npm ci
+npm run typecheck
+npm test
+npm run test:e2e
+```
+
+The core routing engine and simulator should remain runnable without live
+network services. Installing npm packages and Playwright browsers may require
+internet access the first time.
 
 ---
 
