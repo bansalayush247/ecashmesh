@@ -500,11 +500,25 @@ In a second terminal, confirm that it is running:
 curl http://127.0.0.1:5000/health
 ```
 
-Open [http://127.0.0.1:5000](http://127.0.0.1:5000) for the wallet-style demo.
-It guides a simulated payment through **Enter payment → Find best route →
-Understand decision → Confirm payment**. The client is a presentation layer
-only: it calls `POST /v1/routes/evaluate` and renders its response; routing,
-scoring, risks, and evidence evaluation remain in `ecashmesh-core`.
+The API root at [http://127.0.0.1:5000](http://127.0.0.1:5000) links to the
+separate [React Native reference wallet integration](apps/reference-wallet/README.md).
+The previous standalone HTML wallet prototype has been replaced by this integration.
+Pocket is a minimal host client: **Send → EcashMesh Smart Route → Inspect decision
+and alternatives → Pocket confirmation → Simulator result**. Routing, scoring,
+risks, and evidence evaluation remain in `ecashmesh-core`.
+
+In a second terminal, start the React Native browser preview:
+
+```bash
+nix develop
+cd apps/reference-wallet
+npm ci
+npm run web
+```
+
+Open [http://localhost:8081](http://localhost:8081). The backend stays on port 5000.
+For iOS/Android simulator instructions, SDK usage, and tests, see the
+[reference client README](apps/reference-wallet/README.md).
 
 The endpoint validates payment metadata and generates deterministic quotes and
 evidence for the built-in simulator connectors. The available connector IDs are
@@ -532,6 +546,13 @@ expiry. The demo renders those returned values directly, including evidence
 state, source, freshness, confidence, and connector capabilities. Validation
 failures return `{ "error": { "code", "message", "details" } }`; a request
 with no feasible simulated route returns `NO_VIABLE_ROUTE`.
+
+The host confirms via `POST /v1/simulator/confirm`, submitting the original
+`payment` request, `quote_id`, and selected `route_id`. The server reevaluates
+the deterministic fixture and checks that the selection belongs to that quote.
+It returns a deterministic `simulated_success` receipt with `simulated: true`;
+it never executes or persists a payment. Quote expiry uses the fixed simulator
+clock, not wall-clock time.
 
 Submit candidate routes to `POST /v1/routes/rank`. Evidence is explicitly
 `known`, `stale`, or `unknown`; known and stale evidence require a value and

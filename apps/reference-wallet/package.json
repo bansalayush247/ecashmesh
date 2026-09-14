@@ -1,0 +1,35 @@
+{
+  "name": "@ecashmesh/reference-wallet",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web --port 8081",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write App.tsx index.ts src tests package.json app.json tsconfig.json playwright.config.ts README.md",
+    "format:check": "prettier --check App.tsx index.ts src tests package.json app.json tsconfig.json playwright.config.ts README.md",
+    "test": "tsx --test tests/client.test.ts",
+    "test:e2e": "playwright test",
+    "export:web": "expo export --platform web"
+  },
+  "dependencies": {
+    "expo": "~57.0.22",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-web": "^0.21.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "~19.2.2",
+    "prettier": "^3.9.6",
+    "tsx": "^4.21.0",
+    "typescript": "~6.0.3"
+  }
+}

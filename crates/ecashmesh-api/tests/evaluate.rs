@@ -39,6 +39,10 @@ impl ApiServer {
     }
 
     fn request(&self, body: &Value) -> (u16, Value) {
+        self.post("/v1/routes/evaluate", body)
+    }
+
+    fn post(&self, path: &str, body: &Value) -> (u16, Value) {
         let encoded = body.to_string();
         let mut stream = TcpStream::connect(&self.address).expect("connect to API");
         stream
@@ -47,7 +51,7 @@ impl ApiServer {
         stream
             .write_all(
                 format!(
-                    "POST /v1/routes/evaluate HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     self.address,
                     encoded.len(),
                     encoded
@@ -126,16 +130,104 @@ fn valid_request(amount: u64, candidate_connectors: &Value) -> Value {
 }
 
 #[test]
-fn wallet_demo_is_served_from_the_local_api() {
+fn api_root_points_to_the_react_native_reference_integration() {
     let server = ApiServer::start();
     let (status, page) = server.get_text("/");
 
     assert_eq!(status, 200);
-    assert!(page.contains("EcashMesh Wallet Demo"));
-    assert!(page.contains("Find Best Route"));
-    assert!(page.contains("Why this route?"));
-    assert!(page.contains("Confirm &amp; Pay"));
+    assert!(page.contains("React Native client"));
+    assert!(page.contains("http://localhost:8081"));
     assert!(page.contains("/v1/routes/evaluate"));
+}
+
+#[test]
+fn simulator_confirms_the_selected_recommendation_or_alternative_deterministically() {
+    let server = ApiServer::start();
+    let payment = valid_request(10_000, &json!([]));
+    let (_, decision) = server.request(&payment);
+    for route in [&decision["recommended_route"], &decision["alternatives"][0]] {
+        let request = json!({
+            "payment": payment,
+            "quote_id": decision["quote_id"],
+            "route_id": route["route_id"],
+        });
+        let (status, receipt) = server.post("/v1/simulator/confirm", &request);
+        let (_, repeated) = server.post("/v1/simulator/confirm", &request);
+        assert_eq!(status, 200);
+        assert_eq!(receipt, repeated);
+        assert_eq!(receipt["status"], "simulated_success");
+        assert_eq!(receipt["simulated"], true);
+        assert_eq!(receipt["route_id"], route["route_id"]);
+        assert_eq!(receipt["fee"], route["fee"]);
+        assert_eq!(receipt["path"], route["path"]);
+        assert_eq!(receipt["amount"], 10_000);
+    }
+}
+
+#[test]
+fn simulator_rejects_changed_payment_fabricated_route_and_impossible_payment() {
+    let server = ApiServer::start();
+    let payment = valid_request(10_000, &json!([]));
+    let (_, decision) = server.request(&payment);
+    let original = json!({
+        "payment": payment,
+        "quote_id": decision["quote_id"],
+        "route_id": decision["recommended_route"]["route_id"],
+    });
+    for field in ["amount", "destination", "route_id", "quote_id"] {
+        let mut request = original.clone();
+        match field {
+            "amount" => request["payment"]["amount"] = json!(20_000),
+            "destination" => request["payment"]["destination"]["value"] = json!("changed"),
+            key => request[key] = json!("fabricated"),
+        }
+        let (status, error) = server.post("/v1/simulator/confirm", &request);
+        assert_eq!(status, 400, "{field}");
+        assert_eq!(error["error"]["code"], "VALIDATION_ERROR");
+    }
+    let mut request = original;
+    request["payment"]["amount"] = json!(500_000);
+    let (status, error) = server.post("/v1/simulator/confirm", &request);
+    assert_eq!(status, 422);
+    assert_eq!(error["error"]["code"], "NO_VIABLE_ROUTE");
+}
+
+#[test]
+fn simulator_quote_binds_payment_fields_without_conflating_their_values() {
+    let server = ApiServer::start();
+    let mut payment = valid_request(10_000, &json!([]));
+    payment["destination"]["value"] = json!("20000");
+    let (_, decision) = server.request(&payment);
+    payment["amount"] = json!(20_000);
+    payment["destination"]["value"] = json!("10000");
+    let (status, error) = server.post(
+        "/v1/simulator/confirm",
+        &json!({
+            "payment": payment,
+            "quote_id": decision["quote_id"],
+            "route_id": decision["recommended_route"]["route_id"],
+        }),
+    );
+    assert_eq!(status, 400);
+    assert_eq!(error["error"]["code"], "VALIDATION_ERROR");
+}
+
+#[test]
+fn expo_browser_preflight_allows_only_configured_origins() {
+    let server = ApiServer::start();
+    for origin in ["http://localhost:8081", "https://unrelated.example"] {
+        let mut stream = TcpStream::connect(&server.address).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write!(stream, "OPTIONS /v1/routes/evaluate HTTP/1.1\r\nHost: {}\r\nOrigin: {origin}\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: content-type\r\nConnection: close\r\n\r\n", server.address).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let allowed = response
+            .to_ascii_lowercase()
+            .contains("access-control-allow-origin: http://localhost:8081");
+        assert_eq!(allowed, origin == "http://localhost:8081");
+    }
 }
 
 #[test]

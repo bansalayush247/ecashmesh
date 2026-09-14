@@ -1,0 +1,11 @@
+{
+  "expo": {
+    "name": "Pocket · Reference Wallet",
+    "slug": "ecashmesh-reference-wallet",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": { "supportsTablet": true },
+    "web": { "bundler": "metro" }
+  }
+}

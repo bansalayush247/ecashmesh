@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use axum::{
     Json, Router,
     extract::rejection::JsonRejection,
-    http::StatusCode,
+    http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
@@ -18,6 +18,9 @@ use ecashmesh_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tower_http::cors::CorsLayer;
+
+mod simulation;
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:5000";
 
@@ -38,11 +41,34 @@ async fn main() {
 }
 
 fn app() -> Router {
+    // Expo's local browser preview; native clients do not use browser CORS.
+    let origins = std::env::var("ECASHMESH_WEB_ORIGIN").map_or_else(
+        |_| {
+            vec![
+                HeaderValue::from_static("http://localhost:8081"),
+                HeaderValue::from_static("http://127.0.0.1:8081"),
+            ]
+        },
+        |origin| {
+            vec![
+                origin
+                    .parse()
+                    .expect("ECASHMESH_WEB_ORIGIN must be a valid header"),
+            ]
+        },
+    );
     Router::new()
         .route("/", get(index))
         .route("/health", get(health))
         .route("/v1/routes/rank", post(rank))
         .route("/v1/routes/evaluate", post(evaluate))
+        .route("/v1/simulator/confirm", post(simulation::confirm))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods([Method::GET, Method::POST])
+                .allow_headers([CONTENT_TYPE]),
+        )
 }
 
 fn api_address() -> String {
@@ -1166,15 +1192,22 @@ fn deterministic_quote_id(
     payment_intent: &str,
     connectors: &[ecashmesh_core::SimulatedConnector],
 ) -> String {
-    let mut values = vec![
-        amount.sats().to_string(),
-        destination.kind.clone(),
-        destination.value.clone(),
-        payment_intent.to_owned(),
-    ];
-    values.extend(connectors.iter().map(|connector| connector.id.to_string()));
-    values.sort_unstable();
-    deterministic_id("quote", &values)
+    let mut connector_ids = connectors
+        .iter()
+        .map(|connector| connector.id.to_string())
+        .collect::<Vec<_>>();
+    connector_ids.sort_unstable();
+    // Keep payment fields distinct: sorting all values made a swapped amount
+    // and numeric destination share an ID. IDs bind simulator confirmation to
+    // these inputs; they are deterministic identifiers, not authorization tokens.
+    let identity = json!({
+        "amount": amount.sats(),
+        "destination_type": destination.kind,
+        "destination_value": destination.value,
+        "payment_intent": payment_intent,
+        "connectors": connector_ids,
+    });
+    deterministic_id("quote", &[identity.to_string()])
 }
 
 fn deterministic_route_id(quote_id: &str, path: &[String]) -> String {

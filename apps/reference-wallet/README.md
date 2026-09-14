@@ -1,0 +1,158 @@
+# Pocket reference integration
+
+A minimal React Native host demonstrating **Existing wallet → Smart Route →
+Powered by EcashMesh → Decision and explanation → Host confirmation**.
+Pocket contains only a home and a send flow. There is no custody, key handling,
+token storage, accounts, balances, portfolio, history, or real execution.
+Payment state is in memory and cleared when returning home. The host simulator
+does not persist receipts.
+
+## Run locally
+
+From the repository root, terminal 1:
+
+```sh
+nix develop -c cargo run -p ecashmesh-api
+```
+
+Terminal 2:
+
+```sh
+nix develop
+cd apps/reference-wallet
+npm ci
+npm run web
+```
+
+Open <http://localhost:8081>. This is the React Native client rendered through
+React Native Web; the API runs on port **5000**. No live connector services or
+Expo account are required. Initial package/browser installation needs internet;
+routing scenarios use only the local server afterward.
+
+For native preview, use `npm start` and open in a matching Expo Go SDK 57 client,
+or `npm run ios` / `npm run android` with a simulator/emulator installed. Expo SDK
+versions are pinned in the lockfile. See [Expo's environment setup](https://docs.expo.dev/get-started/set-up-your-environment/)
+for native platform prerequisites.
+
+The default API address is `http://127.0.0.1:5000` on iOS simulator and web,
+and `http://10.0.2.2:5000` on the Android emulator. A phone needs your computer's
+LAN address, since its loopback address refers to the phone itself:
+
+```sh
+# Repository root, API terminal; use a trusted local demo network.
+ECASHMESH_API_ADDRESS=0.0.0.0:5000 cargo run -p ecashmesh-api
+
+# apps/reference-wallet, client terminal (replace with your computer's LAN IP).
+EXPO_PUBLIC_ECASHMESH_API_URL=http://192.168.1.10:5000 npm start
+```
+
+Both commands run inside `nix develop`. You can also set the client URL in
+`.env.local` using `.env.example` as a guide. Restart Expo after changing it.
+The unauthenticated API defaults to loopback; LAN binding is opt-in. Browser
+CORS allows `localhost:8081` and `127.0.0.1:8081` by default. Set
+`ECASHMESH_WEB_ORIGIN` on the API to use a different browser origin. Native
+clients are not subject to browser CORS.
+
+## Try the flow
+
+1. Choose **Send payment** on the Pocket home.
+2. Keep **100000** sats and the simulated Lightning destination. Intent is Send;
+   the Phase 6 API supports only BTC and Lightning targets.
+3. Choose **EcashMesh Smart Route**. The SDK requests all simulated connectors.
+4. Inspect the recommendation, ranked alternatives, scores, fees, time estimates,
+   liquidity/reliability/freshness signals, risks, and server-authored explanations.
+5. Open a path to see connector capabilities and individual evidence states,
+   sources, confidence, observations, and raw response JSON.
+6. Choose the recommendation or an alternative. Pocket receives that route for
+   its confirmation screen; **Confirm simulated payment** requests a server receipt.
+7. Read **Simulation complete**, then return to Pocket. No funds moved.
+
+Other checks:
+
+| Input or action                            | Expected result                                                        |
+| ------------------------------------------ | ---------------------------------------------------------------------- |
+| 10000 sats, inspect `cashu:cheap-stale`    | Stale evidence and alternative weaknesses; warnings remain if selected |
+| 500000 sats                                | `NO_VIABLE_ROUTE`; edit input and retry                                |
+| 0, fractional amount, or empty destination | Validation error                                                       |
+| Stop the API, evaluate or confirm          | Recoverable connection error; no invented recommendation or success    |
+| Back during evaluation                     | Cancel; late responses cannot replace an edited payment                |
+| Repeat identical payment                   | Same server ordering, scores, explanation, IDs, and simulator receipt  |
+
+The normal API returns `NO_VIABLE_ROUTE` when nothing is feasible. The UI also
+handles an explicitly null recommendation with an empty state; automated tests
+inject that response and malformed/error responses. It never manufactures routes.
+
+Signals are normalized server outputs, not success probabilities. The Phase 6
+`score_breakdown` contains signal percentages, a hop count, and a risk penalty;
+these are not additive weighted score contributions. Unknown fees are displayed
+as unknown, never zero. Unknown evidence remains distinct from stale or negative
+observations. API expiry is expressed in **fixed simulator time** (`unix:…`),
+not current time. Confirmation reevaluates that same fixture; no wall-clock
+expiry, live quote guarantee, or real execution is implemented.
+
+## Integration boundaries
+
+```text
+Pocket input and navigation (src/host)
+    → SDK adapter (src/ecashmesh) → POST /v1/routes/evaluate → Rust core
+    ← unchanged decision DTOs ← server ranking and explanation
+EcashMesh views (src/ui) → user-selected route → Pocket confirmation
+    → host simulator bridge → POST /v1/simulator/confirm → simulated receipt
+```
+
+The portable adapter has no React Native imports and can be copied into a real
+wallet's integration package with its `zod` dependency:
+
+```ts
+import { createEcashMeshClient } from "./src/ecashmesh/client";
+
+const ecashmesh = createEcashMeshClient({ baseUrl: "http://127.0.0.1:5000" });
+const decision = await ecashmesh.evaluateRoute({
+  amount: 100000,
+  asset: "BTC",
+  destination: { type: "lightning", value: "lnbc1simulateddestination" },
+  paymentIntent: "send",
+});
+```
+
+The adapter translates camelCase input to Phase 6 DTOs, validates response shape,
+preserves additive server fields, and exposes structured errors. It accepts an
+optional fetch implementation, timeout and abort signal. It does not route,
+score, rank, aggregate evidence, evaluate liquidity or risk, or choose a route.
+Views render reasons and ordering as received; the host only chooses the route
+the user selected. A real wallet can replace `src/host` and `App.tsx`, reuse the
+adapter/views, and implement its own authorized confirmation workflow.
+
+`src/host/simulator.ts` is intentionally **not** part of the routing SDK. The
+simulator endpoint accepts `{ payment, quote_id, route_id }`, reevaluates through
+the existing engine, rejects changed inputs or fabricated route IDs, and returns
+`{ simulation_id, status: "simulated_success", simulated: true, quote_id,
+route_id, amount, asset, fee, path, message }`. Both recommended and alternative
+routes are accepted if present in the quote. It has no storage or payment side
+effects; repetition is deterministic.
+
+## Verification
+
+Inside `nix develop`, from this directory:
+
+```sh
+npm run typecheck
+npm test
+npx playwright install chromium
+npm run test:e2e
+npm run export:web
+```
+
+Playwright starts its own API and Expo server on isolated ports 15000 and 18081,
+tests the React Native browser flow against the real local
+API, and shuts both down. Error/empty/cancellation cases use explicit transport
+fault injection. Screenshots and failure traces go into ignored `test-results/`.
+Native device interaction still requires a manual iOS/Android smoke test.
+
+Rust checks from the repository root:
+
+```sh
+cargo fmt --check
+cargo test
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
