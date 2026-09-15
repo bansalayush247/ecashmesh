@@ -9,4 +9,5 @@ if [[ ! -f /tmp/cdk_regtest_env || ! -d "$cdk_dir" ]]; then
 fi
 # shellcheck disable=SC1091
 source /tmp/cdk_regtest_env
-nix develop "$cdk_dir#regtest" -c just regtest-status
+cd "$cdk_dir"
+nix develop .#regtest -c just regtest-status

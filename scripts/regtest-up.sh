@@ -21,7 +21,7 @@ git -C "$cdk_dir" fetch --depth 1 origin "$cdk_rev"
 git -C "$cdk_dir" checkout --detach "$cdk_rev"
 
 # CDK writes /tmp/cdk_regtest_env; the status script uses it for real endpoints.
-nohup nix develop "$cdk_dir#regtest" -c just regtest >"$state/regtest.log" 2>&1 &
+nohup bash -c 'cd "$1" && nix develop .#regtest -c just regtest' _ "$cdk_dir" >"$state/regtest.log" 2>&1 &
 echo $! >"$pid_file"
 for _ in $(seq 1 180); do
   if [[ -f /tmp/cdk_regtest_env ]]; then
