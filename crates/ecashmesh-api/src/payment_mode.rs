@@ -4,7 +4,7 @@
 //! It prevents accidental execution against production endpoints unless the
 //! operator explicitly opts in.
 
-use std::{env, net::IpAddr};
+use std::env;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaymentEnvironment {
@@ -101,20 +101,19 @@ impl PaymentSafetyConfig {
     }
 
     pub fn validate_endpoint(&self, endpoint: &str) -> Result<(), String> {
-        let parsed = endpoint
-            .parse::<reqwest::Url>()
-            .map_err(|_| "Endpoint must be a valid URL".to_owned())?;
+        let lower = endpoint.to_ascii_lowercase();
+        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+            return Err("Endpoint must use http:// or https://".to_owned());
+        }
 
         if self.environment == PaymentEnvironment::Regtest {
-            let host = parsed
-                .host_str()
-                .ok_or_else(|| "Regtest endpoint must include a host".to_owned())?;
-            let local = host == "localhost"
-                || host == "127.0.0.1"
-                || host == "::1"
-                || host.ends_with(".local");
+            let local = lower.contains("://localhost")
+                || lower.contains("://127.0.0.1")
+                || lower.contains("://[::1]")
+                || lower.contains(".local/")
+                || lower.ends_with(".local");
             if !local {
-                return Err("Regtest endpoints must resolve to localhost or a .local host".to_owned());
+                return Err("Regtest endpoints must use localhost, loopback, or .local".to_owned());
             }
         }
         Ok(())
