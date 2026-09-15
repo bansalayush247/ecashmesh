@@ -9,6 +9,7 @@
 pub mod connector;
 pub mod evidence;
 pub mod explain;
+pub mod intent;
 mod model;
 pub mod risk;
 pub mod routing;
@@ -24,6 +25,7 @@ pub use explain::{
     AlternativeExplanation, DecisionReason, DecisionReasonCode, ExplainedRoute,
     RejectedRouteExplanation, RouteDecisionExplanation, explain_ranking,
 };
+pub use intent::{LightningInvoice, LightningInvoiceError};
 pub use model::{
     Amount, AmountError, ConnectorCapabilities, ConnectorId, ConnectorIdError, ConnectorType,
     FeeQuote, LiquidityInfo, ReliabilityInfo, Route, RouteCandidate, RouteCandidateError,

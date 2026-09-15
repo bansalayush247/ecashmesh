@@ -19,6 +19,7 @@ export default defineConfig({
       env: {
         ECASHMESH_API_ADDRESS: "127.0.0.1:15000",
         ECASHMESH_WEB_ORIGIN: "http://localhost:18081",
+        ROUTING_MODE: "simulator",
       },
     },
     {
@@ -29,6 +30,7 @@ export default defineConfig({
         CI: "1",
         BROWSER: "none",
         EXPO_PUBLIC_ECASHMESH_API_URL: "http://127.0.0.1:15000",
+        EXPO_PUBLIC_ROUTING_MODE: "simulator",
       },
     },
   ],

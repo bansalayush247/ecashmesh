@@ -118,6 +118,20 @@ impl MockMint {
                 }
                 let request = String::from_utf8(request).unwrap();
                 let first = request.lines().next().unwrap();
+                let content_length = request
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then_some(value.trim())
+                        })
+                    })
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                if content_length > 0 {
+                    let mut request_body = vec![0_u8; content_length];
+                    stream.read_exact(&mut request_body).unwrap();
+                }
                 let mut body = match first {
                     "GET /v1/info HTTP/1.1" => {
                         include_str!("../../../ecashmesh-cashu/tests/fixtures/info.json")
@@ -127,6 +141,12 @@ impl MockMint {
                     }
                     "GET /v1/keys HTTP/1.1" => {
                         include_str!("../../../ecashmesh-cashu/tests/fixtures/keys.json")
+                    }
+                    "POST /v1/mint/quote/bolt11 HTTP/1.1" => {
+                        r#"{"quote":"mint-quote-fixture","request":"lnbc1000u1qqqqqqq9kvtew","expiry":5000300}"#
+                    }
+                    "POST /v1/melt/quote/bolt11 HTTP/1.1" => {
+                        r#"{"quote":"melt-quote-fixture","amount":100000,"fee_reserve":321,"expiry":5000200}"#
                     }
                     "GET /directory HTTP/1.1" => "[]",
                     other => panic!("Unexpected protocol operation: {other}"),
@@ -143,7 +163,13 @@ impl MockMint {
                     info["nuts"]["5"]["disabled"] = json!(true);
                     body = info.to_string();
                 }
-                let status = if mode == "unavailable" { 503 } else { 200 };
+                let status = if mode == "unavailable"
+                    || (mode == "quote_unavailable" && first.starts_with("POST /v1/"))
+                {
+                    503
+                } else {
+                    200
+                };
                 let age = if mode == "stale" { "Age: 600\r\n" } else { "" };
                 write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\n{age}Connection: close\r\n\r\n{body}", body.len()).unwrap();
             }

@@ -11,14 +11,22 @@ import type { SimulationReceipt, SimulatorClient } from "./simulator";
 
 export type Screen =
   "home" | "payment" | "decision" | "details" | "confirmation" | "success";
+export type RoutingMode = "live" | "simulator";
 
 export function usePaymentFlow(
   ecashmesh: EcashMeshClient,
   simulator: SimulatorClient,
+  mode: RoutingMode,
 ) {
   const [screen, setScreen] = useState<Screen>("home");
   const [amount, setAmount] = useState("100000");
-  const [destination, setDestination] = useState("lnbc1simulateddestination");
+  const [destination, setDestination] = useState(
+    mode === "simulator" ? "lnbc1simulateddestination" : "",
+  );
+  const [destinationType, setDestinationType] = useState<"lightning" | "cashu">(
+    "lightning",
+  );
+  const [sourceMintUrl, setSourceMintUrl] = useState("");
   const [payment, setPayment] = useState<PaymentInput | null>(null);
   const [decision, setDecision] = useState<RouteDecision | null>(null);
   const [selected, setSelected] = useState<Route | null>(null);
@@ -48,7 +56,9 @@ export function usePaymentFlow(
   function home() {
     edit();
     setAmount("100000");
-    setDestination("lnbc1simulateddestination");
+    setDestination(mode === "simulator" ? "lnbc1simulateddestination" : "");
+    setDestinationType("lightning");
+    setSourceMintUrl("");
     setScreen("home");
   }
 
@@ -56,7 +66,12 @@ export function usePaymentFlow(
     if (active.current) return;
     let input: PaymentInput;
     try {
-      input = collectPayment(amount, destination);
+      input = collectPayment(
+        amount,
+        destination,
+        destinationType,
+        sourceMintUrl,
+      );
     } catch (error) {
       setError(asError(error));
       return;
@@ -144,6 +159,11 @@ export function usePaymentFlow(
     setAmount,
     destination,
     setDestination,
+    destinationType,
+    setDestinationType,
+    sourceMintUrl,
+    setSourceMintUrl,
+    mode,
     payment,
     decision,
     selected,

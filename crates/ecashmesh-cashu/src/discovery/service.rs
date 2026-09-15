@@ -2,9 +2,11 @@ use super::{
     DiscoveryReport, DiscoverySource, MintHint, canonical_mint_url, directory_hints, discover,
 };
 use crate::{
-    CashuAdapter, CashuObservation, EndpointCapture, MintConfig, issue,
+    CashuAdapter, CashuObservation, EndpointCapture, MeltQuote, MintConfig, MintQuote,
+    QuoteObservation, issue,
     transport::{client_builder, read_url, retain, unix_now},
 };
+use ecashmesh_core::ConnectorId;
 use reqwest::{Client, Url};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -157,6 +159,47 @@ impl DiscoveryService {
         })
     }
 
+    /// Requests an unpaid destination-mint quote through the same validated
+    /// adapter boundary used for discovery. No token or payment state is read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the mint URL cannot be safely normalized or the
+    /// quote adapter cannot be initialized.
+    pub async fn mint_quote(
+        &self,
+        id: ConnectorId,
+        mint_url: &str,
+        amount: ecashmesh_core::Amount,
+    ) -> Result<QuoteObservation<MintQuote>, String> {
+        Ok(self
+            .quote_adapter(id, mint_url)
+            .await?
+            .mint_quote(amount)
+            .await)
+    }
+
+    /// Requests an unpaid source-mint melt quote for a normalized invoice.
+    /// This never invokes Cashu melt execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the mint URL cannot be safely normalized or the
+    /// quote adapter cannot be initialized.
+    pub async fn melt_quote(
+        &self,
+        id: ConnectorId,
+        mint_url: &str,
+        invoice: &ecashmesh_core::LightningInvoice,
+        amount: ecashmesh_core::Amount,
+    ) -> Result<QuoteObservation<MeltQuote>, String> {
+        Ok(self
+            .quote_adapter(id, mint_url)
+            .await?
+            .melt_quote(invoice, amount)
+            .await)
+    }
+
     async fn sources(&self, mut hints: Vec<MintHint>) -> (Vec<MintHint>, Vec<crate::AdapterIssue>) {
         let mut issues = Vec::new();
         let mut cache = self.directories_cache.lock().await;
@@ -179,5 +222,25 @@ impl DiscoveryService {
             cache.insert(endpoint.to_string(), capture);
         }
         (hints, issues)
+    }
+
+    async fn quote_adapter(
+        &self,
+        id: ConnectorId,
+        mint_url: &str,
+    ) -> Result<Arc<CashuAdapter>, String> {
+        let canonical_url = canonical_mint_url(mint_url)?;
+        if let Some(adapter) = self.adapters.lock().await.get(&canonical_url).cloned() {
+            return Ok(adapter);
+        }
+        let config = MintConfig::new(id, &canonical_url, self.ttl)?;
+        let config = if self.allowed.contains(&canonical_url) {
+            config
+        } else {
+            config.public_only()
+        };
+        CashuAdapter::new(config)
+            .map(Arc::new)
+            .map_err(|error| error.to_string())
     }
 }

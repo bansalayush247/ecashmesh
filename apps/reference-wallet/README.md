@@ -9,10 +9,11 @@ does not persist receipts.
 
 ## Run locally
 
-From the repository root, terminal 1:
+Choose an explicit backend mode. The deterministic simulator is best for offline
+development and is what the end-to-end test suite uses:
 
 ```sh
-nix develop -c cargo run -p ecashmesh-api
+ROUTING_MODE=simulator nix develop -c cargo run -p ecashmesh-api
 ```
 
 Terminal 2:
@@ -28,6 +29,27 @@ Open <http://localhost:8081>. This is the React Native client rendered through
 React Native Web; the API runs on port **5000**. No live connector services or
 Expo account are required. Initial package/browser installation needs internet;
 routing scenarios use only the local server afterward.
+
+For the live BOSS Battle flow, configure a real source mint and make the wallet
+show its live-mode form:
+
+```sh
+# terminal 1, repository root
+ROUTING_MODE=live \
+ECASHMESH_CASHU_MINTS='[{"id":"cashu:source","url":"https://your-source-mint.example"}]' \
+nix develop -c cargo run -p ecashmesh-api
+
+# terminal 2, apps/reference-wallet
+EXPO_PUBLIC_ROUTING_MODE=live npm run web
+```
+
+Live mode has no simulator fallback. Paste a real whole-satoshi BOLT11 invoice,
+or select **Cashu request** and provide
+`cashu://request?mint=https%3A%2F%2Fdestination-mint.example`. The frontend does
+not parse either target: it sends the chosen type and raw value to EcashMesh.
+The backend normalizes the target, reads real metadata, and obtains unpaid mint
+and melt quotes where supported. A failure to establish a supported quote-backed
+route is shown as `NO_VIABLE_ROUTE`, never as an invented recommendation.
 
 For native preview, use `npm start` and open in a matching Expo Go SDK 57 client,
 or `npm run ios` / `npm run android` with a simulator/emulator installed. Expo SDK
@@ -56,15 +78,16 @@ clients are not subject to browser CORS.
 ## Try the flow
 
 1. Choose **Send payment** on the Pocket home.
-2. Keep **100000** sats and the simulated Lightning destination. Intent is Send;
-   the Phase 6 API supports only BTC and Lightning targets.
+2. In simulator mode, keep **100000** sats and the simulated destination. In live
+   mode, choose a destination type and paste a real BOLT11 invoice or Cashu request.
 3. Choose **EcashMesh Smart Route**. The SDK requests all simulated connectors.
 4. Inspect the recommendation, ranked alternatives, scores, fees, time estimates,
    liquidity/reliability/freshness signals, risks, and server-authored explanations.
 5. Open a path to see connector capabilities and individual evidence states,
    sources, confidence, observations, and raw response JSON.
 6. Choose the recommendation or an alternative. Pocket receives that route for
-   its confirmation screen; **Confirm simulated payment** requests a server receipt.
+   its confirmation screen. Simulator mode shows **Confirm simulated payment**;
+   live mode shows **Confirm simulator-backed completion**.
 7. Read **Simulation complete**, then return to Pocket. No funds moved.
 
 Other checks:
@@ -88,7 +111,8 @@ these are not additive weighted score contributions. Unknown fees are displayed
 as unknown, never zero. Unknown evidence remains distinct from stale or negative
 observations. API expiry is expressed in **fixed simulator time** (`unix:…`),
 not current time. Confirmation reevaluates that same fixture; no wall-clock
-expiry, live quote guarantee, or real execution is implemented.
+expiry. Live expiry is based on available quote/metadata expiry. Neither mode
+executes a real payment.
 
 ## Integration boundaries
 
@@ -110,8 +134,9 @@ const ecashmesh = createEcashMeshClient({ baseUrl: "http://127.0.0.1:5000" });
 const decision = await ecashmesh.evaluateRoute({
   amount: 100000,
   asset: "BTC",
-  destination: { type: "lightning", value: "lnbc1simulateddestination" },
+  destination: { type: "lightning", value: "<checksummed BOLT11 invoice>" },
   paymentIntent: "send",
+  sourceMintUrl: "https://your-source-mint.example",
 });
 ```
 
@@ -124,8 +149,10 @@ the user selected. A real wallet can replace `src/host` and `App.tsx`, reuse the
 adapter/views, and implement its own authorized confirmation workflow.
 
 `src/host/simulator.ts` is intentionally **not** part of the routing SDK. The
-simulator endpoint accepts `{ payment, quote_id, route_id }`, reevaluates through
-the existing engine, rejects changed inputs or fabricated route IDs, and returns
+simulator endpoint accepts `{ payment, quote_id, route_id }`. In simulator mode
+it reevaluates through the existing engine and rejects changed inputs or fabricated
+route IDs. In live mode it returns only an explicitly simulation-backed completion
+for the selected evaluated quote; it never calls a payment execution endpoint. It returns
 `{ simulation_id, status: "simulated_success", simulated: true, quote_id,
 route_id, amount, asset, fee, path, message }`. Both recommended and alternative
 routes are accepted if present in the quote. It has no storage or payment side

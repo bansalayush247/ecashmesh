@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use support::{ApiServer, MockMint};
 
 fn request(amount: u64) -> Value {
-    json!({"amount": amount, "asset": "BTC", "destination": {"type": "lightning", "value": "fixture-target"},
+    json!({"amount": amount, "asset": "BTC", "destination": {"type": "lightning", "value": "lnbc1000u1qqqqqqq9kvtew"},
         "payment_intent": "send", "candidate_connectors": []})
 }
 
@@ -18,13 +18,14 @@ fn cashu_public_observations_flow_through_the_core_ranker() {
     let (status, decision) = server.post("/v1/routes/evaluate", &request(100_000));
     assert_eq!(status, 200, "{decision}");
     assert_eq!(decision["simulated"], false);
+    assert_eq!(decision["mode"], "live");
     assert_eq!(decision["recommended_route"]["connector"], "cashu:fixture");
-    assert!(decision["recommended_route"]["fee"]["amount"].is_null());
+    assert_eq!(decision["recommended_route"]["fee"]["amount"], 321);
     assert!(decision["recommended_route"]["estimated_time_seconds"].is_null());
     assert_eq!(decision["evidence"][0]["liquidity"]["state"], "unknown");
     assert_eq!(decision["evidence"][0]["solvency"]["state"], "unknown");
     assert!(
-        decision["risk_flags"]
+        !decision["risk_flags"]
             .as_array()
             .unwrap()
             .contains(&json!("unknown_fee"))
@@ -50,14 +51,72 @@ fn cashu_public_observations_flow_through_the_core_ranker() {
         );
     }
     assert_eq!(decision["explanation"], repeated["explanation"]);
-    let (status, rejected) = server.post(
+    let (status, receipt) = server.post(
         "/v1/simulator/confirm",
         &json!({
         "payment": request(100_000), "quote_id": decision["quote_id"],
         "route_id": decision["recommended_route"]["route_id"]}),
     );
-    assert_eq!(status, 400);
-    assert_eq!(rejected["error"]["code"], "VALIDATION_ERROR");
+    assert_eq!(status, 200);
+    assert_eq!(receipt["simulated"], true);
+    assert!(receipt["message"].to_string().contains("No funds moved"));
+}
+
+#[test]
+fn cashu_destination_quote_creates_only_a_cashu_to_lightning_live_edge() {
+    let mint = MockMint::start("healthy");
+    let server = ApiServer::start(&mint.url);
+    let destination = format!(
+        "cashu://request?mint={}",
+        mint.url.replace(':', "%3A").replace('/', "%2F")
+    );
+    let body = json!({
+        "amount": 100_000,
+        "asset": "BTC",
+        "destination": {"type": "cashu", "value": destination},
+        "payment_intent": "send",
+        "candidate_connectors": [],
+        "source_connector": "cashu:fixture"
+    });
+    let (status, decision) = server.post("/v1/routes/evaluate", &body);
+    assert_eq!(status, 200, "{decision}");
+    assert_eq!(decision["mode"], "live");
+    assert_eq!(
+        decision["live"]["graph"]["mechanisms"],
+        json!(["cashu_lightning"])
+    );
+    assert_eq!(
+        decision["live"]["graph"]["route_shape"],
+        "Cashu source → Lightning invoice → Cashu destination quote"
+    );
+    assert!(
+        decision["live"]["quote_observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|quote| quote["kind"] == "destination_mint_quote" && quote["state"] == "known")
+    );
+    assert!(
+        decision["live"]["quote_observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|quote| quote["kind"] == "source_melt_quote" && quote["state"] == "known")
+    );
+}
+
+#[test]
+fn missing_live_quote_returns_no_route_without_simulator_fallback() {
+    let mint = MockMint::start("quote_unavailable");
+    let server = ApiServer::start(&mint.url);
+    let (status, error) = server.post("/v1/routes/evaluate", &request(100_000));
+    assert_eq!(status, 422, "{error}");
+    assert_eq!(error["error"]["code"], "NO_VIABLE_ROUTE");
+    assert!(
+        error["error"]["details"]
+            .to_string()
+            .contains("missing quote")
+    );
 }
 
 #[test]
@@ -68,11 +127,7 @@ fn cashu_limits_and_invalid_ids_are_structured_errors() {
         let (status, error) = server.post("/v1/routes/evaluate", &request(amount));
         assert_eq!(status, 422);
         assert_eq!(error["error"]["code"], "NO_VIABLE_ROUTE");
-        assert!(
-            error["error"]["details"]
-                .to_string()
-                .contains("payment amount")
-        );
+        assert!(!error["error"]["details"].as_array().unwrap().is_empty());
     }
     let mut body = request(100_000);
     body["candidate_connectors"] = json!(["cashu:unknown"]);

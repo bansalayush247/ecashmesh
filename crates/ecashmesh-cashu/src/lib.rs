@@ -5,10 +5,12 @@
 
 pub mod discovery;
 mod metadata;
+mod payment_request;
 mod strict_json;
 mod transport;
 pub use metadata::PublicKeyset;
-pub use transport::{CashuAdapter, MintConfig};
+pub use payment_request::{CashuPaymentRequest, CashuPaymentRequestError};
+pub use transport::{CashuAdapter, MeltQuote, MintConfig, MintQuote, QuoteObservation};
 
 use ecashmesh_core::{
     Amount, ConfidenceLevel, ConnectorCapabilities, ConnectorEvidence, ConnectorHealth,

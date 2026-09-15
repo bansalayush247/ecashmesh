@@ -22,6 +22,7 @@ use serde_json::json;
 use tower_http::cors::CorsLayer;
 
 mod connectors;
+mod live;
 mod simulation;
 use connectors::Provider;
 
@@ -94,12 +95,12 @@ async fn index() -> Html<&'static str> {
   </head>
   <body>
     <h1>EcashMesh local API</h1>
-    <p>The deterministic routing API is running.</p>
+    <p>EcashMesh is running. Set ROUTING_MODE=live for quote-backed Cashu discovery or ROUTING_MODE=simulator for offline fixtures.</p>
     <p>The reference wallet integration is a separate React Native client.</p>
     <p>Run <code>npm run web</code> from <code>apps/reference-wallet</code>.</p>
     <p>Open <a href="http://localhost:8081">http://localhost:8081</a>.</p>
     <p>Route evaluation: <code>POST /v1/routes/evaluate</code></p>
-    <p>Simulator confirmation: <code>POST /v1/simulator/confirm</code></p>
+    <p>Simulator-backed confirmation: <code>POST /v1/simulator/confirm</code></p>
   </body>
 </html>"#,
     )
@@ -178,7 +179,7 @@ async fn connector_observations(
 fn catalog_json(batch: &connectors::ConnectorBatch, amount: u64) -> serde_json::Value {
     json!({
         "evaluated_amount_sats": amount,
-        "mode": if batch.simulated { "simulator" } else { "cashu" },
+        "mode": if batch.simulated { "simulator" } else { "live" },
         "read_only": true,
         "evidence": batch.connectors.iter().map(EvidenceResponse::from_connector).collect::<Vec<_>>(),
         "observations": batch.observations,
@@ -194,13 +195,16 @@ async fn discover_connectors(
         ApiError::validation("Invalid discovery request", vec![error.to_string()])
     })?;
     request.validate()?;
-    let hints = request.discovery_hints()?;
+    let live_destination =
+        live::LiveDestination::parse(&request.destination.kind, &request.destination.value).ok();
+    let hints = request.discovery_hints(live_destination.as_ref())?;
     let batch = provider
         .collect(Amount::from_sats(request.amount), hints)
         .await?;
     Ok(Json(catalog_json(&batch, request.amount)))
 }
 
+#[allow(clippy::too_many_lines)] // Transport orchestration retains all structured validation/no-route branches in one boundary.
 async fn evaluate_using(
     provider: &Provider,
     request: Result<Json<EvaluateRequest>, JsonRejection>,
@@ -208,26 +212,111 @@ async fn evaluate_using(
     let Json(request) = request
         .map_err(|error| ApiError::new("invalid_json", format!("invalid request body: {error}")))?;
     request.validate()?;
-    let hints = request.discovery_hints()?;
+    let live_destination = provider
+        .is_live()
+        .then(|| {
+            live::LiveDestination::parse(&request.destination.kind, &request.destination.value)
+        })
+        .transpose()
+        .map_err(|error| {
+            ApiError::validation(
+                "Unsupported live destination",
+                vec![format!("unsupported destination: {error}")],
+            )
+        })?;
+    let hints = request.discovery_hints(live_destination.as_ref())?;
     let EvaluateRequest {
         amount,
         asset: _,
         destination,
         payment_intent,
         candidate_connectors,
+        source_connector,
+        source_mint_url,
         ..
     } = request;
 
     let mut batch = provider.collect(Amount::from_sats(amount), hints).await?;
     let candidate_connectors = connectors::resolve_ids(candidate_connectors, &batch.discovery);
-    let selected = connectors::select(batch.connectors, candidate_connectors)?;
+    let selected = connectors::select(batch.connectors.clone(), candidate_connectors)?;
+    let amount = Amount::from_sats(amount);
+    if let (Some(live_destination), Some(service)) = (live_destination, provider.cashu_service()) {
+        let sources = connectors::select_live_sources(
+            &selected,
+            source_connector,
+            source_mint_url,
+            &batch.discovery,
+        )?;
+        let evaluation = match live::evaluate(service, &batch, sources, live_destination, amount)
+            .await
+        {
+            Ok(evaluation) => evaluation,
+            Err(no_route) => {
+                return Err(ApiError::no_viable(
+                    "No viable live route found.",
+                    no_route
+                        .details
+                        .into_iter()
+                        .chain(batch.discovery.issues.iter().map(|issue| {
+                            format!("{}: {} ({})", issue.field, issue.message, issue.code)
+                        }))
+                        .chain(no_route.quote_observations.iter().filter_map(|quote| {
+                            quote["issue"].as_object().map(|issue| {
+                                format!(
+                                    "{}: {} ({})",
+                                    quote["kind"].as_str().unwrap_or("quote"),
+                                    issue["message"].as_str().unwrap_or("unknown quote failure"),
+                                    issue["code"].as_str().unwrap_or("UNKNOWN")
+                                )
+                            })
+                        }))
+                        .collect(),
+                ));
+            }
+        };
+        let quote_id = deterministic_id(
+            "live_quote",
+            &[
+                deterministic_quote_id(
+                    amount,
+                    &destination,
+                    &payment_intent,
+                    &evaluation.connectors,
+                ),
+                json!(evaluation.quote_observations).to_string(),
+            ],
+        );
+        let mut response = EvaluateResponse::from_ranking(
+            quote_id,
+            &destination,
+            &payment_intent,
+            &evaluation.connectors,
+            evaluation.ranking,
+        );
+        response.simulated = false;
+        response.mode = "live";
+        response.discovery = batch.discovery;
+        response.connector_observations = batch.observations;
+        response.live = Some(json!({
+            "quote_observations": evaluation.quote_observations,
+            "graph": evaluation.graph_context,
+            "execution": "evaluation_only_no_funds_moved",
+        }));
+        response.expires_at_unix_seconds = evaluation.expires_at_unix_seconds;
+        response.expires_at = format!("unix:{}", response.expires_at_unix_seconds);
+        for route in
+            std::iter::once(&mut response.recommended_route).chain(&mut response.alternatives)
+        {
+            route.estimated_time_seconds = None;
+        }
+        return Ok(Json(response));
+    }
+
     batch.observations.retain(|observation| {
         selected
             .iter()
             .any(|connector| Some(connector.id.as_str()) == observation["connector"].as_str())
     });
-
-    let amount = Amount::from_sats(amount);
     let candidates = selected
         .iter()
         .map(|connector| connector.quote(amount))
@@ -244,7 +333,6 @@ async fn evaluate_using(
         batch.evaluated_at,
         RouteRankingConfig::default(),
     );
-
     if ranking.ranked.is_empty() {
         return Err(ApiError::no_viable(
             "No available route can satisfy this payment.",
@@ -253,54 +341,13 @@ async fn evaluate_using(
                 .iter()
                 .flat_map(|route| route.reasons.iter())
                 .map(|reason| format!("{reason:?}"))
-                .chain(
-                    batch.discovery.issues.iter().map(|issue| {
-                        format!("{}: {} ({})", issue.field, issue.message, issue.code)
-                    }),
-                )
-                .chain(batch.observations.iter().filter_map(|observation| {
-                    observation["send_unavailable_reason"]
-                        .as_str()
-                        .map(|reason| {
-                            format!(
-                                "{}: {reason}",
-                                observation["connector"].as_str().unwrap_or_default()
-                            )
-                        })
-                }))
                 .collect(),
         ));
     }
-
     let quote_id = deterministic_quote_id(amount, &destination, &payment_intent, &selected);
-    let quote_id = if batch.simulated {
-        quote_id
-    } else {
-        deterministic_id(
-            "cashu_quote",
-            &[quote_id, json!(batch.observations).to_string()],
-        )
-    };
     let mut response =
         EvaluateResponse::from_ranking(quote_id, &destination, &payment_intent, &selected, ranking);
-    response.simulated = batch.simulated;
-    response.discovery = batch.discovery;
-    response.connector_observations = batch.observations;
-    response.expires_at_unix_seconds = response
-        .connector_observations
-        .iter()
-        .filter(|observation| observation["send_unavailable_reason"].is_null())
-        .filter_map(|observation| observation["expires_at_unix_seconds"].as_u64())
-        .min()
-        .unwrap_or(batch.expires_at_unix_seconds);
-    response.expires_at = format!("unix:{}", response.expires_at_unix_seconds);
-    if !batch.simulated {
-        for route in
-            std::iter::once(&mut response.recommended_route).chain(&mut response.alternatives)
-        {
-            route.estimated_time_seconds = None;
-        }
-    }
+    response.mode = "simulator";
     Ok(Json(response))
 }
 
@@ -373,6 +420,10 @@ struct EvaluateRequest {
     #[serde(default)]
     candidate_connectors: Vec<String>,
     #[serde(default)]
+    source_connector: Option<String>,
+    #[serde(default)]
+    source_mint_url: Option<String>,
+    #[serde(default)]
     wallet_mint_urls: Vec<String>,
     #[serde(default)]
     mint_urls: Vec<String>,
@@ -387,11 +438,20 @@ struct DestinationInput {
 }
 
 impl EvaluateRequest {
-    fn discovery_hints(&self) -> Result<Vec<ecashmesh_cashu::discovery::MintHint>, ApiError> {
+    fn discovery_hints(
+        &self,
+        live_destination: Option<&live::LiveDestination>,
+    ) -> Result<Vec<ecashmesh_cashu::discovery::MintHint>, ApiError> {
         use ecashmesh_cashu::discovery::{DiscoverySource, MintHint};
         if self.wallet_mint_urls.len()
             + self.mint_urls.len()
             + usize::from(self.destination.mint_url.is_some())
+            + usize::from(self.source_mint_url.is_some())
+            + usize::from(
+                live_destination
+                    .and_then(live::LiveDestination::destination_mint_url)
+                    .is_some(),
+            )
             > 64
         {
             return Err(ApiError::validation(
@@ -402,20 +462,31 @@ impl EvaluateRequest {
         let hints = self
             .wallet_mint_urls
             .iter()
-            .map(|url| (url, DiscoverySource::Wallet))
+            .map(|url| (url.clone(), DiscoverySource::Wallet))
             .chain(
                 self.mint_urls
                     .iter()
-                    .map(|url| (url, DiscoverySource::PaymentRequest)),
+                    .map(|url| (url.clone(), DiscoverySource::PaymentRequest)),
             )
             .chain(
                 self.destination
                     .mint_url
                     .iter()
-                    .map(|url| (url, DiscoverySource::Destination)),
+                    .map(|url| (url.clone(), DiscoverySource::Destination)),
+            )
+            .chain(
+                self.source_mint_url
+                    .iter()
+                    .map(|url| (url.clone(), DiscoverySource::Wallet)),
+            )
+            .chain(
+                live_destination
+                    .and_then(live::LiveDestination::destination_mint_url)
+                    .iter()
+                    .map(|url| ((*url).to_owned(), DiscoverySource::Destination)),
             )
             .map(|(url, source)| MintHint {
-                url: url.clone(),
+                url,
                 alias: None,
                 source,
                 observed_at: connectors::unix_now(),
@@ -437,9 +508,11 @@ impl EvaluateRequest {
                 vec![self.asset.clone()],
             ));
         }
-        if self.destination.kind != "lightning" || self.destination.value.trim().is_empty() {
+        if !matches!(self.destination.kind.as_str(), "lightning" | "cashu")
+            || self.destination.value.trim().is_empty()
+        {
             return Err(ApiError::validation(
-                "destination must be a non-empty lightning target",
+                "destination must be a non-empty lightning or Cashu target",
                 vec!["destination".into()],
             ));
         }
@@ -838,8 +911,11 @@ impl RankResponse {
 
 #[derive(Serialize)]
 struct EvaluateResponse {
+    mode: &'static str,
     discovery: ecashmesh_cashu::discovery::DiscoveryReport,
     simulated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live: Option<serde_json::Value>,
     connector_observations: Vec<serde_json::Value>,
     quote_id: String,
     recommended_route: EvaluatedRouteResponse,
@@ -876,9 +952,11 @@ impl EvaluateResponse {
             payment_intent,
         );
         Self {
+            mode: "simulator",
             simulated: true,
             discovery: ecashmesh_cashu::discovery::DiscoveryReport::default(),
             connector_observations: Vec::new(),
+            live: None,
             quote_id,
             recommended_route,
             alternatives: routes,

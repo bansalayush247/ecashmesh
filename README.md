@@ -691,7 +691,9 @@ and unsupported method/unit/amount combinations cannot advertise send capability
 The core rejects those candidates before scoring. `/v1/connectors` still exposes
 their observations when `/v1/routes/evaluate` returns `NO_VIABLE_ROUTE`.
 
-There are no mint/melt quote POSTs, token operations, private keys, custody, or execution.
+Metadata discovery performs no token operations, private-key handling, custody, or
+execution. Phase 10 additionally uses unpaid NUT-04/NUT-05 quote requests for
+live route evaluation; it never invokes mint, melt, swap, or payment execution.
 Public keys are checked for valid compressed secp256k1 encoding and curve points;
 this does not authenticate the operator or prove reserves. Conflicting keyset
 units and duplicate identities are reported rather than silently merged.
@@ -728,8 +730,7 @@ At most 64 canonical mints are probed per collection, selected in stable URL ord
 truncation is explicit. There is no persistent mint graph. Seed observations and
 directory responses have bounded in-memory caches; request-only mint hints do not
 persist or change the allowlist. Directory refresh failures preserve stale URL
-claims, separately from fresh mint probes. Simulator mode is the default fallback;
-Cashu-mode failures never silently substitute simulated data.
+claims, separately from fresh mint probes.
 
 Run the offline adapter tests and the API tests with local fixture servers:
 
@@ -748,7 +749,7 @@ evidence and ranking.
 To inspect a configured mint, replace the example URL with your mint's base URL:
 
 ```bash
-ECASHMESH_CONNECTOR_MODE=cashu \
+ROUTING_MODE=live \
 ECASHMESH_CASHU_MINTS='[{"id":"cashu:my-mint","url":"https://mint.example"}]' \
 nix develop -c cargo run -p ecashmesh-api
 ```
@@ -759,7 +760,7 @@ deployment subpath. Each observation/evaluation refreshes the three public mint
 endpoints. Directory discovery is opt-in, for example:
 
 ```bash
-ECASHMESH_CONNECTOR_MODE=cashu \
+ROUTING_MODE=live \
 ECASHMESH_CASHU_DIRECTORIES='["mint-audit"]' \
 nix develop -c cargo run -p ecashmesh-api
 ```
@@ -803,13 +804,14 @@ Send this JSON to `POST /v1/routes/evaluate`, or to
 `POST /v1/connectors/discover` to inspect discovery and normalized observations
 without requiring a viable route. Request hints are scoped to that request.
 They must explicitly name mint URLs; the adapter does not decode tokens or infer
-mint URLs from an invoice string. Destination validation remains the existing non-empty Lightning
-target validation; this phase does not validate invoices or request payment
-quotes. Cashu-mode `/v1/simulator/confirm` returns a structured validation error.
-Use default simulator mode for the reference wallet's complete confirmation flow:
+mint URLs from an invoice string. The Phase 10 live evaluator validates BOLT11
+structure and exact whole-sat amounts on the backend, and supports the quote-only
+Cashu destination form documented below. Live confirmation returns an explicitly
+simulator-backed receipt; it never executes the evaluated quote. Use simulator
+mode for the deterministic reference-wallet flow:
 
 ```bash
-ECASHMESH_CONNECTOR_MODE=simulator nix develop -c cargo run -p ecashmesh-api
+ROUTING_MODE=simulator nix develop -c cargo run -p ecashmesh-api
 ```
 
 ### Phase 9 — Production-scale discovery and routing foundation
@@ -867,15 +869,64 @@ The fixed scale generator has 2 edges per connector: 100k/200k edges,
 connector strings, protocol metadata, or arbitrary transfer relationships, so
 the benchmark remains focused on compact graph construction and bounded search.
 
+### Phase 10 — Live payment route discovery demo
+
+`ROUTING_MODE` is an explicit, non-fallback boundary:
+
+| Mode | Candidate data | Result |
+| --- | --- | --- |
+| `live` | Real configured/discovered Cashu mints, current public observations, and unpaid Cashu quotes | Quote-backed route decision; no payment execution |
+| `simulator` | Fixed offline connector fixtures and deterministic destination | Stable CI/demo decision and simulator receipt |
+
+Live mode is the primary BOSS Battle flow. The API normalizes a submitted
+destination before discovery: a Lightning target must be a checksummed BOLT11
+invoice whose whole-sat amount exactly matches `amount`; a Cashu destination uses
+the request form below.
+
+```text
+cashu://request?mint=https%3A%2F%2Fdestination-mint.example
+```
+
+The request can also include `amount_sats` and an `invoice`. Without an invoice,
+EcashMesh asks the target mint for an unpaid NUT-04 quote, validates its returned
+invoice, and asks each selected source mint for an unpaid NUT-05 melt quote. The
+published graph only has the actual declared mechanism:
+
+```text
+Cashu source → Lightning invoice → Cashu destination quote
+```
+
+No URL, capability, keyset, or shared protocol family creates a mint-to-mint
+edge. Public limits and denomination data never become liquidity/solvency facts.
+Missing, stale, malformed, unavailable, or amount-mismatched quotes return
+`NO_VIABLE_ROUTE` with reasons; live mode never inserts simulator candidates or
+fabricated fees, liquidity, reliability, timestamps, destinations, or edges.
+
+Run a live API with at least one real source mint:
+
+```bash
+ROUTING_MODE=live \
+ECASHMESH_CASHU_MINTS='[{"id":"cashu:source","url":"https://your-source-mint.example"}]' \
+nix develop -c cargo run -p ecashmesh-api
+```
+
+The reference wallet shows the active mode. In live mode it collects a source
+mint URL plus raw Lightning/Cashu destination input, then sends it unchanged to
+the thin EcashMesh client. The API response includes `mode: "live"`, normalised
+destination context, quote observations, graph/search metrics, the ranked route,
+evidence, risks, and explanation. Wallet confirmation ends in a clearly labelled
+simulator-backed completion state. Actual ecash execution is deliberately out of
+scope for this phase.
+
 ## Run Locally
 
 The local API is for manual testing only. It has no authentication and binds only
 to `127.0.0.1:5000`.
 
-Start it from the repository root:
+Start the deterministic simulator from the repository root:
 
 ```bash
-nix develop -c cargo run -p ecashmesh-api
+ROUTING_MODE=simulator nix develop -c cargo run -p ecashmesh-api
 ```
 
 In a second terminal, confirm that it is running:
@@ -904,8 +955,8 @@ Open [http://localhost:8081](http://localhost:8081). The backend stays on port 5
 For iOS/Android simulator instructions, SDK usage, and tests, see the
 [reference client README](apps/reference-wallet/README.md).
 
-The endpoint validates payment metadata and generates deterministic quotes and
-evidence for the built-in simulator connectors. The available connector IDs are
+In simulator mode the endpoint validates payment metadata and generates deterministic
+quotes and evidence for the built-in connectors. The available connector IDs are
 `cashu:healthy`, `cashu:low-liquidity`, `cashu:cheap-stale`,
 `cashu:reliable-expensive`, and `cashu:new`.
 

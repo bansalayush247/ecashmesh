@@ -14,7 +14,7 @@ import {
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { createEcashMeshClient } from "./src/ecashmesh/client";
 import { createSimulatorClient } from "./src/host/simulator";
-import { usePaymentFlow } from "./src/host/usePaymentFlow";
+import { usePaymentFlow, type RoutingMode } from "./src/host/usePaymentFlow";
 import {
   Button,
   colors,
@@ -37,6 +37,8 @@ const baseUrl =
     : "http://127.0.0.1:5000");
 const ecashmesh = createEcashMeshClient({ baseUrl });
 const simulator = createSimulatorClient({ baseUrl });
+const routingMode: RoutingMode =
+  process.env.EXPO_PUBLIC_ROUTING_MODE === "simulator" ? "simulator" : "live";
 
 export default function App() {
   return (
@@ -92,14 +94,20 @@ function Choice({
   copy,
   icon,
   selected = false,
+  onPress,
 }: {
   title: string;
   copy: string;
   icon: string;
   selected?: boolean;
+  onPress?: () => void;
 }) {
   return (
-    <View style={[local.choice, selected && local.choiceSelected]}>
+    <Pressable
+      accessibilityRole={onPress ? "button" : undefined}
+      onPress={onPress}
+      style={[local.choice, selected && local.choiceSelected]}
+    >
       <Text style={[local.choiceIcon, selected && { color: colors.blue }]}>
         {icon}
       </Text>
@@ -110,7 +118,7 @@ function Choice({
       <View style={[local.radio, selected && local.radioSelected]}>
         {selected && <View style={local.radioDot} />}
       </View>
-    </View>
+    </Pressable>
   );
 }
 
@@ -137,7 +145,7 @@ function BottomNav() {
 }
 
 function ReferenceWallet() {
-  const flow = usePaymentFlow(ecashmesh, simulator);
+  const flow = usePaymentFlow(ecashmesh, simulator, routingMode);
   const scroll = useRef<ScrollView>(null);
   useEffect(() => {
     scroll.current?.scrollTo({ y: 0, animated: false });
@@ -280,6 +288,26 @@ function ReferenceWallet() {
             {flow.screen === "payment" && (
               <>
                 <ScreenHeader title="Send" onBack={flow.back} end="⌗" />
+                <View
+                  accessibilityLabel={`Routing mode: ${flow.mode}`}
+                  style={[
+                    local.modeNotice,
+                    flow.mode === "live"
+                      ? local.liveNotice
+                      : local.simulatorNotice,
+                  ]}
+                >
+                  <Text style={local.modeNoticeTitle}>
+                    {flow.mode === "live"
+                      ? "Live route discovery"
+                      : "Deterministic simulator"}
+                  </Text>
+                  <Text style={styles.small}>
+                    {flow.mode === "live"
+                      ? "Real mint metadata and unpaid quotes. No funds move."
+                      : "Fixture connectors and a simulated destination for safe testing."}
+                  </Text>
+                </View>
                 <Text style={local.fieldLabel}>Amount</Text>
                 <View style={local.amountWrap}>
                   <TextInput
@@ -293,26 +321,79 @@ function ReferenceWallet() {
                   <Text style={local.satsSuffix}>sats</Text>
                 </View>
                 <Text style={local.fiatHint}>≈ $60.09</Text>
-                <Text style={local.fieldLabel}>Destination</Text>
+                {flow.mode === "live" && (
+                  <>
+                    <Text style={local.fieldLabel}>
+                      Payment destination type
+                    </Text>
+                    <View style={local.destinationTypes}>
+                      <Choice
+                        title="Lightning invoice"
+                        copy="Paste a checksummed BOLT11 invoice"
+                        icon="ϟ"
+                        selected={flow.destinationType === "lightning"}
+                        onPress={() => flow.setDestinationType("lightning")}
+                      />
+                      <Choice
+                        title="Cashu request"
+                        copy="Quote a destination mint through Lightning"
+                        icon="◈"
+                        selected={flow.destinationType === "cashu"}
+                        onPress={() => flow.setDestinationType("cashu")}
+                      />
+                    </View>
+                    <Text style={local.fieldLabel}>Source Cashu mint URL</Text>
+                    <View style={local.destinationWrap}>
+                      <TextInput
+                        accessibilityLabel="Source Cashu mint URL"
+                        value={flow.sourceMintUrl}
+                        onChangeText={flow.setSourceMintUrl}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        style={local.destinationInput}
+                        placeholder="https://mint.example"
+                      />
+                    </View>
+                    <Text style={local.fiatHint}>
+                      Optional when your API is already configured with a source
+                      mint.
+                    </Text>
+                  </>
+                )}
+                <Text style={local.fieldLabel}>
+                  {flow.destinationType === "cashu"
+                    ? "Cashu payment request"
+                    : "Lightning invoice"}
+                </Text>
                 <View style={local.destinationWrap}>
                   <TextInput
-                    accessibilityLabel="Lightning destination"
+                    accessibilityLabel={
+                      flow.destinationType === "cashu"
+                        ? "Cashu payment request"
+                        : "Lightning destination"
+                    }
                     value={flow.destination}
                     onChangeText={flow.setDestination}
                     autoCapitalize="none"
                     autoCorrect={false}
                     style={local.destinationInput}
-                    placeholder="Lightning payment target"
+                    placeholder={
+                      flow.destinationType === "cashu"
+                        ? "cashu://request?mint=https%3A%2F%2Fmint.example"
+                        : "lnbc..."
+                    }
                   />
                   <Text style={local.destinationIcon}>⌗</Text>
                 </View>
-                <View style={local.contactCard}>
-                  <Text style={local.contactBolt}>ϟ</Text>
-                  <View>
-                    <Text style={local.contactName}>Coffee Shop</Text>
-                    <Text style={styles.small}>Online store</Text>
+                {flow.mode === "simulator" && (
+                  <View style={local.contactCard}>
+                    <Text style={local.contactBolt}>ϟ</Text>
+                    <View>
+                      <Text style={local.contactName}>Coffee Shop</Text>
+                      <Text style={styles.small}>Online store</Text>
+                    </View>
                   </View>
-                </View>
+                )}
                 {flow.error && <ErrorNotice error={flow.error} />}
                 <Section title="Payment Method">
                   <Choice
@@ -341,7 +422,7 @@ function ReferenceWallet() {
                   EcashMesh Smart Route
                 </Button>
                 <Text style={local.powered}>
-                  Powered by EcashMesh · deterministic simulator
+                  Powered by EcashMesh · {flow.mode}
                 </Text>
               </>
             )}
@@ -364,10 +445,18 @@ function ReferenceWallet() {
                   title="Route Options"
                 >
                   {flow.payment
-                    ? `${sats(flow.payment.amount)} · Lightning · Send`
+                    ? `${sats(flow.payment.amount)} · ${flow.payment.destination.type} · Send`
                     : "Your payment routes"}
                 </Heading>
-                {flow.busy && <Loading label="Evaluating simulated routes…" />}
+                {flow.busy && (
+                  <Loading
+                    label={
+                      flow.mode === "live"
+                        ? "Discovering live quote-backed routes…"
+                        : "Evaluating simulated routes…"
+                    }
+                  />
+                )}
                 {flow.error && (
                   <>
                     <ErrorNotice error={flow.error} />
@@ -459,15 +548,18 @@ function ReferenceWallet() {
                   </Surface>
                   <Risks flags={flow.selected.risk_flags} />
                   <Text style={styles.body}>
-                    This host-wallet confirmation runs only the selected route
-                    in the local simulator. It does not send a real payment.
+                    {flow.decision?.mode === "live"
+                      ? "This confirms a simulator-backed completion only. EcashMesh evaluated live mint data and unpaid quotes, but it will not send a real payment."
+                      : "This host-wallet confirmation runs only the selected route in the local simulator. It does not send a real payment."}
                   </Text>
                   {flow.error && <ErrorNotice error={flow.error} />}
                   {flow.busy ? (
                     <Loading label="Confirming with the simulator…" />
                   ) : (
                     <Button onPress={() => void flow.confirm()}>
-                      Confirm simulated payment
+                      {flow.decision?.mode === "live"
+                        ? "Confirm simulator-backed completion"
+                        : "Confirm simulated payment"}
                     </Button>
                   )}
                   {!flow.busy && (
@@ -491,9 +583,18 @@ function ReferenceWallet() {
                   </Text>
                   <Text style={styles.body}>to Coffee Shop</Text>
                 </View>
-                <Text style={local.testEyebrow}>Pocket / Simulator result</Text>
+                <Text style={local.testEyebrow}>
+                  Pocket /{" "}
+                  {flow.decision?.mode === "live"
+                    ? "Live evaluation simulation"
+                    : "Simulator result"}
+                </Text>
                 <Heading
-                  eyebrow="Simulator-backed success"
+                  eyebrow={
+                    flow.decision?.mode === "live"
+                      ? "Simulator-backed live evaluation"
+                      : "Simulator-backed success"
+                  }
                   title="Simulation complete"
                 >
                   {flow.receipt.message}
@@ -512,7 +613,7 @@ function ReferenceWallet() {
                 </Surface>
                 <Text style={styles.small}>
                   This result is returned by the simulator. Nothing is stored as
-                  a transaction.
+                  a transaction and no real payment was executed.
                 </Text>
                 <Button secondary onPress={flow.home}>
                   Return to Pocket
@@ -673,6 +774,16 @@ const local = StyleSheet.create({
   navActive: { color: colors.blue },
   navText: { color: "#97A7C1", fontSize: 9 },
   navTextActive: { color: colors.blue, fontWeight: "700" },
+  modeNotice: {
+    borderRadius: 12,
+    borderWidth: 1,
+    padding: 12,
+    gap: 3,
+  },
+  liveNotice: { backgroundColor: "#EDF8F4", borderColor: "#AEE8CD" },
+  simulatorNotice: { backgroundColor: "#EDF6FF", borderColor: "#C9DDF9" },
+  modeNoticeTitle: { color: colors.ink, fontWeight: "800", fontSize: 14 },
+  destinationTypes: { gap: 8 },
   fieldLabel: {
     color: colors.ink,
     fontSize: 13,

@@ -1,5 +1,5 @@
 use ecashmesh_cashu::{CashuAdapter, MintConfig};
-use ecashmesh_core::{Amount, ConnectorHealth, ConnectorId};
+use ecashmesh_core::{Amount, ConnectorHealth, ConnectorId, LightningInvoice};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -138,4 +138,74 @@ fn invalid_configuration_is_rejected_before_network_access() {
         )
         .is_err()
     );
+}
+
+async fn quote_adapter(body: &'static str, status: u16) -> (CashuAdapter, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(stream.read_u8().await.unwrap());
+            assert!(request.len() < 8192);
+        }
+        let request = String::from_utf8(request).unwrap();
+        assert_eq!(
+            request.lines().next(),
+            Some("POST /v1/melt/quote/bolt11 HTTP/1.1")
+        );
+        let length = request
+            .lines()
+            .filter_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length").then_some(value)
+                })
+            })
+            .find_map(|value| value.trim().parse::<usize>().ok())
+            .unwrap();
+        let mut sent = vec![0_u8; length];
+        stream.read_exact(&mut sent).await.unwrap();
+        assert!(String::from_utf8(sent).unwrap().contains("lnbc1000u"));
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let config = MintConfig::new(ConnectorId::new("cashu:quote-test").unwrap(), &url, 300).unwrap();
+    (CashuAdapter::new(config).unwrap(), server)
+}
+
+#[tokio::test]
+async fn unpaid_melt_quotes_are_normalized_or_explicitly_unknown() {
+    let invoice = LightningInvoice::parse("lnbc1000u1qqqqqqq9kvtew").unwrap();
+    let (adapter, server) = quote_adapter(
+        r#"{"quote":"quote-fixture","amount":100000,"fee_reserve":321}"#,
+        200,
+    )
+    .await;
+    let observed = adapter
+        .melt_quote(&invoice, Amount::from_sats(100_000))
+        .await;
+    assert_eq!(
+        observed.evidence.value().unwrap().fee_reserve.amount.sats(),
+        321
+    );
+    assert!(observed.endpoint.ends_with("/v1/melt/quote/bolt11"));
+    assert!(observed.issue.is_none());
+    server.await.unwrap();
+
+    let (adapter, server) = quote_adapter("{", 200).await;
+    let malformed = adapter
+        .melt_quote(&invoice, Amount::from_sats(100_000))
+        .await;
+    assert!(malformed.evidence.is_unknown());
+    assert_eq!(malformed.issue.unwrap().code, "MALFORMED_DATA");
+    server.await.unwrap();
 }

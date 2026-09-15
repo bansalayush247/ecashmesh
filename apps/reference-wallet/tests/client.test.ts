@@ -89,6 +89,33 @@ test("explicit connector selection passes through without choosing connectors", 
   await client.evaluateRoute({ ...payment, candidateConnectors: candidates });
 });
 
+test("live Cashu input is forwarded without client-side destination parsing", async () => {
+  const livePayment = collectPayment(
+    "100000",
+    "cashu://request?mint=https%3A%2F%2Fmint.example",
+    "cashu",
+    "https://source.example",
+  );
+  const client = createEcashMeshClient({
+    baseUrl: "http://local",
+    fetch: async (_, options) => {
+      assert.deepEqual(JSON.parse(String(options?.body)), {
+        amount: 100000,
+        asset: "BTC",
+        destination: {
+          type: "cashu",
+          value: "cashu://request?mint=https%3A%2F%2Fmint.example",
+        },
+        payment_intent: "send",
+        candidate_connectors: [],
+        source_mint_url: "https://source.example",
+      });
+      return json({ ...decision, mode: "live" });
+    },
+  });
+  await client.evaluateRoute(livePayment);
+});
+
 test("cashu read-only routes may omit execution time", async () => {
   const payload = {
     ...decision,

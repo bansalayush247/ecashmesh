@@ -4,6 +4,8 @@ import { EcashMeshError } from "../ecashmesh/transport";
 export function collectPayment(
   amountText: string,
   destination: string,
+  destinationType: "lightning" | "cashu" = "lightning",
+  sourceMintUrl?: string,
 ): PaymentInput {
   const amount = Number(amountText);
   if (
@@ -19,14 +21,16 @@ export function collectPayment(
   if (!destination.trim()) {
     throw new EcashMeshError(
       "VALIDATION_ERROR",
-      "Enter a Lightning destination.",
+      "Enter a payment destination.",
     );
   }
-  // Demo API accepts a non-empty Lightning target; no invoice parsing or payment execution.
+  // Destination parsing is deliberately server-side. The host only preserves
+  // the user-selected type and raw payment input for EcashMesh.
   return {
     amount,
     asset: "BTC",
-    destination: { type: "lightning", value: destination.trim() },
+    destination: { type: destinationType, value: destination.trim() },
     paymentIntent: "send",
+    ...(sourceMintUrl?.trim() ? { sourceMintUrl: sourceMintUrl.trim() } : {}),
   };
 }

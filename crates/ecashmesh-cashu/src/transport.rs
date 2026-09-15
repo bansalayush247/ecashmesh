@@ -1,10 +1,14 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ecashmesh_core::ConnectorId;
+use ecashmesh_core::{
+    Amount, ConfidenceLevel, ConnectorId, Evidence, EvidenceSource, EvidenceTimestamp, FeeQuote,
+    LightningInvoice,
+};
 use reqwest::{Client, Url, redirect::Policy};
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::{CashuObservation, EndpointCapture, MintCapture};
+use crate::{AdapterIssue, CashuObservation, EndpointCapture, MintCapture};
 
 const MAX_BODY_BYTES: usize = 1_048_576;
 
@@ -15,6 +19,39 @@ pub struct MintConfig {
     url: Url,
     max_age_seconds: u64,
     public_only: bool,
+}
+
+/// An unpaid NUT-04 Lightning mint quote from a destination mint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MintQuote {
+    /// Opaque quote identifier returned by the mint.
+    pub quote_id: String,
+    /// Destination invoice created by the mint.
+    pub invoice: LightningInvoice,
+    /// Mint-reported expiry, when supplied.
+    pub expires_at_unix_seconds: Option<u64>,
+}
+
+/// An unpaid NUT-05 Lightning melt quote from a source mint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeltQuote {
+    /// Opaque quote identifier returned by the mint.
+    pub quote_id: String,
+    /// Fee reserve reported for this exact invoice.
+    pub fee_reserve: FeeQuote,
+    /// Mint-reported expiry, when supplied.
+    pub expires_at_unix_seconds: Option<u64>,
+}
+
+/// A quote observation with explicit missing/malformed/unavailable state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuoteObservation<T> {
+    /// Current quote data, or unknown when it could not be safely normalized.
+    pub evidence: Evidence<T>,
+    /// Exact endpoint queried.
+    pub endpoint: String,
+    /// Inspectable reason a quote is unavailable or unusable.
+    pub issue: Option<AdapterIssue>,
 }
 
 impl MintConfig {
@@ -52,8 +89,9 @@ impl MintConfig {
     }
 }
 
-/// Only performs public GETs (/v1/info, /v1/keysets, /v1/keys), with bounded reads and no redirects.
-/// Failed refreshes retain previous bodies as stale and expose the current failure.
+/// Reads public metadata and requests unpaid NUT-04/NUT-05 quotes with bounded I/O and no redirects.
+/// It never invokes payment, melt, or token-management endpoints. Failed refreshes retain previous
+/// bodies as stale and expose the current failure.
 pub struct CashuAdapter {
     config: MintConfig,
     client: Client,
@@ -101,18 +139,112 @@ impl CashuAdapter {
         observation
     }
 
+    /// Requests an unpaid NUT-04 Lightning mint quote for `amount`.
+    ///
+    /// This endpoint is used only to discover a real destination invoice. It
+    /// does not send value, redeem tokens, or handle custody material.
+    #[must_use]
+    pub async fn mint_quote(&self, amount: Amount) -> QuoteObservation<MintQuote> {
+        let path = "v1/mint/quote/bolt11";
+        let endpoint = self.endpoint(path);
+        match self
+            .post(path, json!({ "amount": amount.sats(), "unit": "sat" }))
+            .await
+            .and_then(|(body, observed_at)| parse_mint_quote(&body, amount, observed_at))
+        {
+            Ok((quote, observed_at)) => QuoteObservation {
+                evidence: Evidence::reported(
+                    quote,
+                    EvidenceSource::Connector,
+                    EvidenceTimestamp::from_unix_seconds(observed_at),
+                    ConfidenceLevel::Medium,
+                ),
+                endpoint,
+                issue: None,
+            },
+            Err(error) => QuoteObservation {
+                evidence: Evidence::Unknown,
+                endpoint,
+                issue: Some(AdapterIssue {
+                    field: "mint_quote".into(),
+                    code: quote_error_code(&error).into(),
+                    message: error,
+                }),
+            },
+        }
+    }
+
+    /// Requests an unpaid NUT-05 Lightning melt quote for one exact invoice.
+    ///
+    /// The adapter never invokes the melt execution endpoint, so this cannot
+    /// move funds or access proofs, tokens, or private keys.
+    #[must_use]
+    pub async fn melt_quote(
+        &self,
+        invoice: &LightningInvoice,
+        amount: Amount,
+    ) -> QuoteObservation<MeltQuote> {
+        let path = "v1/melt/quote/bolt11";
+        let endpoint = self.endpoint(path);
+        match self
+            .post(path, json!({ "request": invoice.as_str(), "unit": "sat" }))
+            .await
+            .and_then(|(body, observed_at)| parse_melt_quote(&body, amount, observed_at))
+        {
+            Ok((quote, observed_at)) => QuoteObservation {
+                evidence: Evidence::reported(
+                    quote,
+                    EvidenceSource::Connector,
+                    EvidenceTimestamp::from_unix_seconds(observed_at),
+                    ConfidenceLevel::Medium,
+                ),
+                endpoint,
+                issue: None,
+            },
+            Err(error) => QuoteObservation {
+                evidence: Evidence::Unknown,
+                endpoint,
+                issue: Some(AdapterIssue {
+                    field: "melt_quote".into(),
+                    code: quote_error_code(&error).into(),
+                    message: error,
+                }),
+            },
+        }
+    }
+
     async fn fetch(&self, path: &str) -> Result<(String, u64), String> {
-        let url = self
-            .config
-            .url
-            .join(path)
-            .map_err(|_| "Invalid endpoint URL")?;
+        let url = self.url(path)?;
         if self.config.public_only {
             let client = public_client(&url).await?;
             read_url(&client, url).await
         } else {
             read_url(&self.client, url).await
         }
+    }
+
+    async fn post(&self, path: &str, body: Value) -> Result<(String, u64), String> {
+        let url = self.url(path)?;
+        if self.config.public_only {
+            let client = public_client(&url).await?;
+            post_url(&client, url, body).await
+        } else {
+            post_url(&self.client, url, body).await
+        }
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        self.config
+            .url
+            .join(path)
+            .map_or_else(|_| self.config.url.to_string(), |url| url.to_string())
+    }
+
+    fn url(&self, path: &str) -> Result<Url, String> {
+        self.config
+            .url
+            .join(path)
+            .map_err(|_| "Invalid endpoint URL".into())
     }
 }
 
@@ -180,14 +312,36 @@ pub(crate) fn public_ip(ip: std::net::IpAddr) -> bool {
 }
 
 pub(crate) async fn read_url(client: &Client, url: Url) -> Result<(String, u64), String> {
-    let mut response = client.get(url).send().await.map_err(|error| {
-        if error.is_timeout() {
-            "HTTP request timed out"
-        } else {
-            "HTTP connection failed"
-        }
-        .to_owned()
-    })?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| request_error(&error))?;
+    read_response(response).await
+}
+
+async fn post_url(client: &Client, url: Url, body: Value) -> Result<(String, u64), String> {
+    let response = client
+        .post(url)
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .map_err(|error| request_error(&error))?;
+    read_response(response).await
+}
+
+fn request_error(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        "HTTP request timed out"
+    } else {
+        "HTTP connection failed"
+    }
+    .to_owned()
+}
+
+async fn read_response(response: reqwest::Response) -> Result<(String, u64), String> {
+    let mut response = response;
     if !response.status().is_success() {
         return Err(format!("HTTP status {}", response.status().as_u16()));
     }
@@ -226,6 +380,83 @@ pub(crate) async fn read_url(client: &Client, url: Url) -> Result<(String, u64),
     String::from_utf8(body)
         .map(|body| (body, observed_at))
         .map_err(|_| "Response is not UTF-8".into())
+}
+
+fn parse_mint_quote(
+    body: &str,
+    expected_amount: Amount,
+    observed_at: u64,
+) -> Result<(MintQuote, u64), String> {
+    let value = crate::strict_json::parse(body).map_err(|_| "Malformed mint quote JSON")?;
+    let quote_id = quote_string(&value, "quote")?;
+    let invoice = quote_string(&value, "request")
+        .and_then(|invoice| LightningInvoice::parse(&invoice).map_err(|error| error.to_string()))?;
+    if invoice.amount() != Some(expected_amount) {
+        return Err("Mint quote invoice amount does not match payment amount".into());
+    }
+    Ok((
+        MintQuote {
+            quote_id,
+            invoice,
+            expires_at_unix_seconds: quote_expiry(&value),
+        },
+        observed_at,
+    ))
+}
+
+fn parse_melt_quote(
+    body: &str,
+    expected_amount: Amount,
+    observed_at: u64,
+) -> Result<(MeltQuote, u64), String> {
+    let value = crate::strict_json::parse(body).map_err(|_| "Malformed melt quote JSON")?;
+    let quote_id = quote_string(&value, "quote")?;
+    if quote_u64(&value, "amount")? != expected_amount.sats() {
+        return Err("Melt quote amount does not match payment amount".into());
+    }
+    let fee = value
+        .get("fee_reserve")
+        .or_else(|| value.get("fee"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "Melt quote did not include a whole-sat fee reserve".to_owned())?;
+    Ok((
+        MeltQuote {
+            quote_id,
+            fee_reserve: FeeQuote::new(Amount::from_sats(fee)),
+            expires_at_unix_seconds: quote_expiry(&value),
+        },
+        observed_at,
+    ))
+}
+
+fn quote_string(value: &Value, field: &str) -> Result<String, String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 4_096)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| format!("Quote has no valid {field}"))
+}
+
+fn quote_u64(value: &Value, field: &str) -> Result<u64, String> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("Quote has no valid whole-sat {field}"))
+}
+
+fn quote_expiry(value: &Value) -> Option<u64> {
+    value.get("expiry").and_then(Value::as_u64)
+}
+
+fn quote_error_code(error: &str) -> &'static str {
+    if error.starts_with("HTTP") {
+        "UNAVAILABLE"
+    } else if error.starts_with("Malformed") || error.starts_with("Quote has") {
+        "MALFORMED_DATA"
+    } else {
+        "UNUSABLE_QUOTE"
+    }
 }
 
 pub(crate) fn retain(

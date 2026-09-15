@@ -25,6 +25,8 @@ pub(super) enum Provider {
 
 pub(super) struct ConnectorBatch {
     pub connectors: Vec<ConnectorSnapshot>,
+    /// Protocol observations retained for live quote-backed route construction.
+    pub live_observations: Vec<CashuObservation>,
     pub observations: Vec<Value>,
     pub evaluated_at: EvidenceTimestamp,
     pub expires_at_unix_seconds: u64,
@@ -92,14 +94,82 @@ pub(super) fn select(
     Ok(selected)
 }
 
+/// Narrows live candidates to an explicitly configured source when supplied.
+/// The absence of a source selector leaves the already-selected live sources
+/// intact; it never adds simulator fixtures or undiscovered connectors.
+pub(super) fn select_live_sources(
+    selected: &[ConnectorSnapshot],
+    source_connector: Option<String>,
+    source_mint_url: Option<String>,
+    discovery: &DiscoveryReport,
+) -> Result<Vec<ConnectorSnapshot>, ApiError> {
+    let source_connector = source_connector
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| resolve_ids(vec![value], discovery).remove(0));
+    let source_mint_url = source_mint_url
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| ecashmesh_cashu::discovery::canonical_mint_url(&value))
+        .transpose()
+        .map_err(|error| ApiError::validation("source_mint_url is invalid", vec![error]))?;
+    let source_from_url = source_mint_url.as_ref().and_then(|url| {
+        discovery
+            .mints
+            .iter()
+            .find(|mint| &mint.canonical_url == url)
+            .map(ecashmesh_cashu::discovery::DiscoveredMint::connector_id)
+    });
+    if source_mint_url.is_some() && source_from_url.is_none() {
+        return Err(ApiError::validation(
+            "source_mint_url was not discovered",
+            vec!["source_mint_url".into()],
+        ));
+    }
+    if let (Some(connector), Some(from_url)) = (&source_connector, &source_from_url)
+        && connector != from_url.as_str()
+    {
+        return Err(ApiError::validation(
+            "source_connector and source_mint_url identify different mints",
+            vec![connector.clone(), from_url.to_string()],
+        ));
+    }
+    let expected = source_connector
+        .as_deref()
+        .or_else(|| source_from_url.as_ref().map(ConnectorId::as_str));
+    let narrowed = expected.map_or_else(
+        || selected.to_vec(),
+        |expected| {
+            selected
+                .iter()
+                .filter(|connector| connector.id.as_str() == expected)
+                .cloned()
+                .collect()
+        },
+    );
+    if narrowed.is_empty() {
+        return Err(ApiError::validation(
+            "Configured source connector is unavailable",
+            vec![expected.unwrap_or("source_connector").into()],
+        ));
+    }
+    Ok(narrowed)
+}
+
 impl Provider {
     pub fn from_env() -> Result<Self, String> {
-        match std::env::var("ECASHMESH_CONNECTOR_MODE")
-            .as_deref()
-            .unwrap_or("simulator")
-        {
+        // ROUTING_MODE is the explicit Phase 10 boundary. The older variable
+        // remains a compatibility shim for local Phase 8/9 scripts only.
+        let mode = std::env::var("ROUTING_MODE").unwrap_or_else(|_| {
+            std::env::var("ECASHMESH_CONNECTOR_MODE").map_or_else(
+                |_| "live".into(),
+                |legacy| match legacy.as_str() {
+                    "cashu" => "live".into(),
+                    other => other.into(),
+                },
+            )
+        });
+        match mode.as_str() {
             "simulator" => Ok(Self::Simulator),
-            "cashu" => {
+            "live" => {
                 let config = std::env::var("ECASHMESH_CASHU_MINTS").unwrap_or_else(|_| "[]".into());
                 let config: Vec<ConfigInput> =
                     serde_json::from_str(&config).map_err(|error| error.to_string())?;
@@ -126,7 +196,20 @@ impl Provider {
                     ttl,
                 )?)))
             }
-            other => Err(format!("Unsupported ECASHMESH_CONNECTOR_MODE: {other}")),
+            other => Err(format!("Unsupported ROUTING_MODE: {other}")),
+        }
+    }
+
+    #[must_use]
+    pub const fn is_live(&self) -> bool {
+        matches!(self, Self::Cashu(_))
+    }
+
+    #[must_use]
+    pub const fn cashu_service(&self) -> Option<&Arc<DiscoveryService>> {
+        match self {
+            Self::Simulator => None,
+            Self::Cashu(service) => Some(service),
         }
     }
 
@@ -148,6 +231,7 @@ impl Provider {
                     .into_iter()
                     .map(Into::into)
                     .collect(),
+                live_observations: Vec::new(),
                 observations: Vec::new(),
                 evaluated_at: DEMO_EVALUATED_AT,
                 simulated: true,
@@ -175,6 +259,7 @@ impl Provider {
                         .iter()
                         .map(|observation| observation.routing_snapshot(amount))
                         .collect(),
+                    live_observations: observations.clone(),
                     observations: observations
                         .iter()
                         .map(|observation| observation_json(observation, amount))

@@ -33,16 +33,38 @@ pub(super) async fn confirm(
     State(provider): State<Provider>,
     request: Result<Json<SimulationRequest>, JsonRejection>,
 ) -> Result<Json<SimulationReceipt>, ApiError> {
-    if !matches!(provider, Provider::Simulator) {
-        return Err(ApiError::validation(
-            "Simulator confirmation is available only in simulator mode",
-            vec!["Cashu is read-only".into()],
-        ));
-    }
     let Json(request) = request.map_err(|error| {
         ApiError::validation("Invalid simulator confirmation", vec![error.to_string()])
     })?;
     let amount = request.payment.amount;
+    if !matches!(provider, Provider::Simulator) {
+        request.payment.validate()?;
+        if request.quote_id.trim().is_empty() || request.route_id.trim().is_empty() {
+            return Err(ApiError::validation(
+                "Live simulator completion needs a quote and selected route",
+                vec!["quote_id".into(), "route_id".into()],
+            ));
+        }
+        return Ok(Json(SimulationReceipt {
+            simulation_id: deterministic_id(
+                "live_simulation",
+                &[request.quote_id.clone(), request.route_id.clone()],
+            ),
+            status: "simulated_success",
+            simulated: true,
+            quote_id: request.quote_id,
+            route_id: request.route_id,
+            amount,
+            asset: "BTC",
+            fee: FeeResponse {
+                amount: None,
+                asset: "sats",
+                freshness: "unknown",
+            },
+            path: Vec::new(),
+            message: "Live route evaluation was confirmed in the host simulator. No funds moved.",
+        }));
+    }
     // Reuse the same engine/fixture inputs. The host cannot supply a fabricated
     // route, fee, score, or success result. Alternative selections are allowed.
     let Json(decision) = evaluate_using(&provider, Ok(Json(request.payment))).await?;

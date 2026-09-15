@@ -44,6 +44,7 @@ export const routeSchema = z
   .passthrough();
 export const decisionSchema = z
   .object({
+    mode: z.enum(["live", "simulator"]).optional(),
     quote_id: z.string().min(1),
     recommended_route: routeSchema.nullable(),
     alternatives: z.array(routeSchema),
@@ -107,9 +108,15 @@ export type Reason = z.infer<typeof reasonSchema>;
 export type PaymentInput = {
   amount: number;
   asset: "BTC";
-  destination: { type: "lightning"; value: string; mint_url?: string };
+  destination: {
+    type: "lightning" | "cashu";
+    value: string;
+    mint_url?: string;
+  };
   paymentIntent: "send";
   candidateConnectors?: string[];
+  sourceConnector?: string;
+  sourceMintUrl?: string;
 };
 
 export function paymentToWire(payment: PaymentInput) {
@@ -119,5 +126,11 @@ export function paymentToWire(payment: PaymentInput) {
     destination: { ...payment.destination },
     payment_intent: payment.paymentIntent,
     candidate_connectors: [...(payment.candidateConnectors ?? [])],
+    ...(payment.sourceConnector
+      ? { source_connector: payment.sourceConnector }
+      : {}),
+    ...(payment.sourceMintUrl
+      ? { source_mint_url: payment.sourceMintUrl }
+      : {}),
   };
 }
