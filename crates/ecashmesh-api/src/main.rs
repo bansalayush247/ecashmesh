@@ -10,6 +10,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
+use ecashmesh_cashu::KeysetFee;
 use ecashmesh_core::{
     Amount, ConfidenceLevel, ConnectorCapabilities, ConnectorEvidence, ConnectorHealth,
     ConnectorId, ConnectorType, DEMO_EVALUATED_AT, DecisionReason, Evidence, EvidenceFreshness,
@@ -293,6 +294,7 @@ async fn evaluate_using(
             &evaluation.connectors,
             evaluation.ranking,
         );
+        response.apply_live_fee_terms(&evaluation.fee_terms, amount);
         response.simulated = false;
         response.mode = "live";
         response.discovery = batch.discovery;
@@ -447,11 +449,7 @@ impl EvaluateRequest {
             + self.mint_urls.len()
             + usize::from(self.destination.mint_url.is_some())
             + usize::from(self.source_mint_url.is_some())
-            + usize::from(
-                live_destination
-                    .and_then(live::LiveDestination::destination_mint_url)
-                    .is_some(),
-            )
+            + live_destination.map_or(0, |destination| destination.destination_mint_urls().len())
             > 64
         {
             return Err(ApiError::validation(
@@ -479,12 +477,12 @@ impl EvaluateRequest {
                     .iter()
                     .map(|url| (url.clone(), DiscoverySource::Wallet)),
             )
-            .chain(
-                live_destination
-                    .and_then(live::LiveDestination::destination_mint_url)
-                    .iter()
-                    .map(|url| ((*url).to_owned(), DiscoverySource::Destination)),
-            )
+            .chain(live_destination.into_iter().flat_map(|destination| {
+                destination
+                    .destination_mint_urls()
+                    .into_iter()
+                    .map(|url| (url.to_owned(), DiscoverySource::Destination))
+            }))
             .map(|(url, source)| MintHint {
                 url,
                 alias: None,
@@ -971,6 +969,21 @@ impl EvaluateResponse {
             expires_at_unix_seconds: DEMO_EVALUATED_AT.unix_seconds() + 300,
         }
     }
+
+    fn apply_live_fee_terms(&mut self, terms: &[live::LiveFeeTerms], payment_amount: Amount) {
+        for route in std::iter::once(&mut self.recommended_route).chain(&mut self.alternatives) {
+            if let Some(terms) = terms
+                .iter()
+                .find(|terms| terms.source_connector.as_str() == route.connector)
+            {
+                route.fee = FeeResponse::live_reserve(terms, payment_amount);
+                // A NUT-05 reserve gives an upper bound, not enough evidence
+                // to present a final-fee quality judgment.
+                route.fee_reasonableness = None;
+            }
+        }
+        self.score_breakdown = ScoreBreakdownResponse::from_route(&self.recommended_route);
+    }
 }
 
 #[derive(Serialize)]
@@ -986,7 +999,7 @@ struct EvaluatedRouteResponse {
     reliability_confidence: u8,
     evidence_freshness: u8,
     risk_flags: Vec<&'static str>,
-    fee_reasonableness: u8,
+    fee_reasonableness: Option<u8>,
     risk_penalty: u8,
 }
 
@@ -1005,15 +1018,11 @@ impl EvaluatedRouteResponse {
             path,
             score: as_percent(route.score),
             score_basis_points: route.score,
-            fee: FeeResponse {
-                amount: route
-                    .quality
-                    .total_fee
-                    .value()
-                    .map(|quote| quote.amount.sats()),
-                asset: "sats",
-                freshness: freshness_code(route.quality.total_fee.freshness()),
-            },
+            fee: FeeResponse::estimated(
+                route.quality.total_fee.value().map(|quote| quote.amount),
+                route.quality.total_fee.freshness(),
+                route.candidate.amount,
+            ),
             estimated_time_seconds: Some(
                 u64::try_from(route.candidate.hop_count())
                     .unwrap_or(u64::MAX)
@@ -1028,7 +1037,11 @@ impl EvaluatedRouteResponse {
                 .iter()
                 .map(ecashmesh_core::RiskFactor::reason_code)
                 .collect(),
-            fee_reasonableness: as_percent(route.signals.fee_reasonableness),
+            fee_reasonableness: route
+                .quality
+                .total_fee
+                .value()
+                .map(|_| as_percent(route.signals.fee_reasonableness)),
             risk_penalty: as_percent(route.risk_penalty),
         }
     }
@@ -1036,9 +1049,78 @@ impl EvaluatedRouteResponse {
 
 #[derive(Serialize)]
 struct FeeResponse {
+    /// Backwards-compatible route estimate field. For a live Cashu route this
+    /// is a NUT-05 reserve and is never a promised final fee.
     amount: Option<u64>,
     asset: &'static str,
     freshness: &'static str,
+    estimated_fee_sats: Option<u64>,
+    fee_reserve_sats: Option<u64>,
+    fee_rate_basis_points: Option<u64>,
+    estimate_kind: &'static str,
+    input_fee_schedule: Option<InputFeeScheduleResponse>,
+}
+
+impl FeeResponse {
+    fn estimated(
+        estimate: Option<Amount>,
+        freshness: EvidenceFreshness,
+        payment_amount: Amount,
+    ) -> Self {
+        let amount = estimate.map(Amount::sats);
+        Self {
+            amount,
+            asset: "sats",
+            freshness: freshness_code(freshness),
+            estimated_fee_sats: amount,
+            fee_reserve_sats: None,
+            fee_rate_basis_points: estimate
+                .and_then(|fee| fee_rate_basis_points(fee, payment_amount)),
+            estimate_kind: if amount.is_some() {
+                "estimated"
+            } else {
+                "unknown"
+            },
+            input_fee_schedule: None,
+        }
+    }
+
+    fn live_reserve(terms: &live::LiveFeeTerms, payment_amount: Amount) -> Self {
+        let reserve = terms.fee_reserve_sats.sats();
+        Self {
+            amount: Some(reserve),
+            asset: "sats",
+            freshness: "fresh",
+            estimated_fee_sats: Some(reserve),
+            fee_reserve_sats: Some(reserve),
+            fee_rate_basis_points: fee_rate_basis_points(terms.fee_reserve_sats, payment_amount),
+            estimate_kind: "reserve_estimate",
+            input_fee_schedule: Some(InputFeeScheduleResponse::from_evidence(&terms.input_fees)),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct InputFeeScheduleResponse {
+    state: &'static str,
+    freshness: &'static str,
+    /// Input fees depend on the actual proof set, which this read-only route
+    /// evaluator neither sees nor selects.
+    included_in_estimated_fee: bool,
+    reason: &'static str,
+    keysets: Option<Vec<KeysetFee>>,
+}
+
+impl InputFeeScheduleResponse {
+    fn from_evidence(evidence: &Evidence<Vec<KeysetFee>>) -> Self {
+        Self {
+            state: evidence_state_code(evidence),
+            freshness: freshness_code(evidence.freshness()),
+            included_in_estimated_fee: false,
+            reason: "NUT-02 input fees require the actual selected Cashu proofs and are not included in this quote reserve",
+            keysets: evidence.value().cloned(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1046,7 +1128,7 @@ struct ScoreBreakdownResponse {
     liquidity: u8,
     reliability: u8,
     evidence_freshness: u8,
-    fees: u8,
+    fees: Option<u8>,
     route_complexity: usize,
     risk_penalty: u8,
 }
@@ -1461,6 +1543,14 @@ fn as_percent(value: u16) -> u8 {
     u8::try_from(value / 100).unwrap_or(100)
 }
 
+fn fee_rate_basis_points(fee: Amount, payment_amount: Amount) -> Option<u64> {
+    if payment_amount == Amount::ZERO {
+        return None;
+    }
+    let basis_points = (u128::from(fee.sats()) * 10_000) / u128::from(payment_amount.sats());
+    u64::try_from(basis_points).ok()
+}
+
 fn reliability_value(reliability: &ReliabilityInfo) -> serde_json::Value {
     json!({
         "success_rate_basis_points": reliability.success_rate_basis_points,
@@ -1562,5 +1652,42 @@ mod tests {
                 .message,
             "fee known or stale evidence needs observed_at"
         );
+    }
+
+    #[test]
+    fn live_fee_reserve_is_an_estimate_with_a_correct_fee_rate() {
+        let terms = live::LiveFeeTerms {
+            source_connector: ConnectorId::new("cashu:source").unwrap(),
+            fee_reserve_sats: Amount::from_sats(2),
+            input_fees: Evidence::reported(
+                vec![KeysetFee {
+                    id: "00abcdef01234567".into(),
+                    unit: "sat".into(),
+                    active: true,
+                    input_fee_ppk: Some(100),
+                    final_expiry: None,
+                }],
+                EvidenceSource::Connector,
+                EvidenceTimestamp::from_unix_seconds(5_000_000),
+                ConfidenceLevel::High,
+            ),
+        };
+        let fee = FeeResponse::live_reserve(&terms, Amount::from_sats(100));
+        assert_eq!(fee.amount, Some(2));
+        assert_eq!(fee.estimated_fee_sats, Some(2));
+        assert_eq!(fee.fee_reserve_sats, Some(2));
+        assert_eq!(fee.fee_rate_basis_points, Some(200));
+        assert_eq!(fee.estimate_kind, "reserve_estimate");
+        let inputs = fee.input_fee_schedule.unwrap();
+        assert!(!inputs.included_in_estimated_fee);
+        assert_eq!(inputs.keysets.unwrap()[0].input_fee_ppk, Some(100));
+    }
+
+    #[test]
+    fn unknown_fee_evidence_never_becomes_a_zero_percent_fee_signal() {
+        let fee = FeeResponse::estimated(None, EvidenceFreshness::Unknown, Amount::from_sats(100));
+        assert_eq!(fee.amount, None);
+        assert_eq!(fee.fee_rate_basis_points, None);
+        assert_eq!(fee.estimate_kind, "unknown");
     }
 }

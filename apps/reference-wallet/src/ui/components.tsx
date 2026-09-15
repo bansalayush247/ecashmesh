@@ -8,6 +8,8 @@ import {
 } from "react-native";
 import { EcashMeshError } from "../ecashmesh/transport";
 
+export { feeEstimateLabel, feeRate, feeReasonableness } from "./fees";
+
 export const colors = {
   canvas: "#F7FAFF",
   paper: "#F8FAFE",

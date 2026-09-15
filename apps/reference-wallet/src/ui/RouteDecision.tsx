@@ -10,6 +10,9 @@ import {
   Button,
   colors,
   estimatedTime,
+  feeEstimateLabel,
+  feeRate,
+  feeReasonableness,
   humanize,
   Row,
   sats,
@@ -31,7 +34,10 @@ const compactId = (value: string, start = 18, end = 10) =>
     : `${value.slice(0, start)}...${value.slice(-end)}`;
 
 const compactDecisionText = (value: string) =>
-  value.replace(/cashu:[a-zA-Z0-9]+/g, (match) => compactId(match));
+  value
+    .replace(/cashu:[a-zA-Z0-9]+/g, (match) => compactId(match))
+    .replace(/creqA[A-Za-z0-9_-]+={0,2}/g, (match) => compactId(match, 14, 8))
+    .replace(/cashu:\/\/[^\s]+/g, (match) => compactId(match, 22, 10));
 
 type DetailsTab = "overview" | "evidence" | "risks" | "path";
 
@@ -95,7 +101,9 @@ function Reasons({ reasons }: { reasons: Reason[] }) {
         >
           <Text style={local.check}>✓</Text>
           <View style={{ flex: 1 }}>
-            <Text style={styles.body}>{reason.message}</Text>
+            <Text style={styles.body}>
+              {compactDecisionText(reason.message)}
+            </Text>
             <Text selectable style={styles.code}>
               {reason.code}
             </Text>
@@ -134,18 +142,21 @@ function Metric({
   color,
 }: {
   label: string;
-  value: number;
+  value: number | null;
   color: string;
 }) {
   return (
     <View style={local.metric}>
       <View style={local.metricHeader}>
         <Text style={local.metricLabel}>{label}</Text>
-        <Text style={local.metricValue}>{value}%</Text>
+        <Text style={local.metricValue}>{feeReasonableness(value)}</Text>
       </View>
       <View style={local.track}>
         <View
-          style={[local.fill, { width: `${value}%`, backgroundColor: color }]}
+          style={[
+            local.fill,
+            { width: `${value ?? 0}%`, backgroundColor: color },
+          ]}
         />
       </View>
     </View>
@@ -238,18 +249,21 @@ export function DecisionView({
           <Score score={recommended.score} />
         </View>
         <View style={local.feeRow}>
-          <Text style={styles.small}>Total fee</Text>
+          <Text style={styles.small}>
+            {feeEstimateLabel(recommended.fee.estimate_kind)}
+          </Text>
           <View style={{ alignItems: "flex-end" }}>
             <Text style={local.fee}>{sats(recommended.fee.amount)}</Text>
             <Text style={styles.small}>
-              {recommended.fee_reasonableness}% fee reasonableness
+              Fee rate {feeRate(recommended.fee.fee_rate_basis_points)} · Fee
+              reasonableness {feeReasonableness(recommended.fee_reasonableness)}
             </Text>
           </View>
         </View>
         <RouteMetrics route={recommended} />
         <View style={local.whyStrip}>
           <Text style={local.whyCheck}>✓</Text>
-          <Text style={local.whyText}>
+          <Text numberOfLines={3} style={local.whyText}>
             {compactDecisionText(decision.explanation.summary)}
           </Text>
         </View>
@@ -400,7 +414,7 @@ export function RouteDetails({
               color={colors.violet}
             />
             <Metric
-              label="Fees"
+              label="Fee reasonableness"
               value={route.fee_reasonableness}
               color="#FFB11B"
             />
@@ -496,7 +510,28 @@ export function RouteDetails({
           <Section title="Evaluation details">
             <Row label="Route ID" value={compactId(route.route_id)} />
             <Row label="Quote ID" value={decision.quote_id} />
-            <Row label="Estimated fee" value={sats(route.fee.amount)} />
+            <Row
+              label={feeEstimateLabel(route.fee.estimate_kind)}
+              value={sats(route.fee.amount)}
+            />
+            <Row
+              label="Fee rate"
+              value={feeRate(route.fee.fee_rate_basis_points)}
+            />
+            <Row
+              label="Fee reasonableness"
+              value={feeReasonableness(route.fee_reasonableness)}
+            />
+            {route.fee.input_fee_schedule && (
+              <Row
+                label="NUT-02 keyset input fees"
+                value={
+                  route.fee.input_fee_schedule.included_in_estimated_fee
+                    ? "Included"
+                    : "Not included — requires selected proofs"
+                }
+              />
+            )}
             <Row
               label="Estimated time"
               value={estimatedTime(route.estimated_time_seconds)}
@@ -646,8 +681,15 @@ const local = StyleSheet.create({
     borderRadius: 8,
     alignItems: "flex-start",
   },
-  whyCheck: { color: colors.green, fontWeight: "800" },
-  whyText: { flex: 1, color: "#087D49", fontSize: 12, lineHeight: 17 },
+  whyCheck: { color: colors.green, fontWeight: "800", flexShrink: 0 },
+  whyText: {
+    flex: 1,
+    minWidth: 0,
+    flexShrink: 1,
+    color: "#087D49",
+    fontSize: 12,
+    lineHeight: 17,
+  },
   riskSummary: {
     backgroundColor: colors.sand,
     borderRadius: 8,

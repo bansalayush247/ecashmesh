@@ -4,6 +4,7 @@ import { createEcashMeshClient } from "../src/ecashmesh/client";
 import { EcashMeshError } from "../src/ecashmesh/transport";
 import { collectPayment } from "../src/host/payment";
 import { createSimulatorClient } from "../src/host/simulator";
+import { feeRate, feeReasonableness } from "../src/ui/fees";
 
 const payment = collectPayment("100000", "lnbc1simulateddestination");
 const fee = { amount: null, asset: "sats", freshness: "unknown" };
@@ -72,6 +73,11 @@ test("adapter translates payment intent and preserves every returned decision fi
   });
   assert.deepEqual(await client.evaluateRoute(payment), decision);
   assert.equal(calls, 1);
+});
+
+test("fee presentation keeps a 2-sat reserve for 100 sats distinct from unknown quality", () => {
+  assert.equal(feeRate(200), "2%");
+  assert.equal(feeReasonableness(null), "Unknown");
 });
 
 test("explicit connector selection passes through without choosing connectors", async () => {

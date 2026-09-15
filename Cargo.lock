@@ -231,6 +231,7 @@ name = "ecashmesh-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "ecashmesh-cashu",
  "ecashmesh-core",
  "serde",
@@ -243,6 +244,7 @@ dependencies = [
 name = "ecashmesh-cashu"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "ecashmesh-core",
  "reqwest",
  "secp256k1",

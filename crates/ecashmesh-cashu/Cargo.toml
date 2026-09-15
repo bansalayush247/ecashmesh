@@ -10,6 +10,7 @@ description = "Read-only Cashu metadata and evidence adapter for EcashMesh"
 workspace = true
 
 [dependencies]
+base64 = "0.22"
 ecashmesh-core = { path = "../ecashmesh-core" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }

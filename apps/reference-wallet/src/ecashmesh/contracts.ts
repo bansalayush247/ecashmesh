@@ -10,6 +10,22 @@ export const feeSchema = z
     amount: unsigned.nullable(),
     asset: z.literal("sats"),
     freshness,
+    estimated_fee_sats: unsigned.nullable().optional(),
+    fee_reserve_sats: unsigned.nullable().optional(),
+    fee_rate_basis_points: unsigned.nullable().optional(),
+    estimate_kind: z
+      .enum(["estimated", "reserve_estimate", "unknown"])
+      .optional(),
+    input_fee_schedule: z
+      .object({
+        state: z.enum(["known", "stale", "unknown"]),
+        freshness,
+        included_in_estimated_fee: z.boolean(),
+        reason: z.string(),
+        keysets: z.array(z.unknown()).nullable(),
+      })
+      .nullable()
+      .optional(),
   })
   .passthrough();
 const reasonSchema = z
@@ -38,7 +54,7 @@ export const routeSchema = z
     reliability_confidence: percentage,
     evidence_freshness: percentage,
     risk_flags: z.array(z.string()),
-    fee_reasonableness: percentage,
+    fee_reasonableness: percentage.nullable(),
     risk_penalty: percentage,
   })
   .passthrough();
@@ -53,7 +69,7 @@ export const decisionSchema = z
         liquidity: percentage,
         reliability: percentage,
         evidence_freshness: percentage,
-        fees: percentage,
+        fees: percentage.nullable(),
         route_complexity: unsigned,
         risk_penalty: percentage,
       })

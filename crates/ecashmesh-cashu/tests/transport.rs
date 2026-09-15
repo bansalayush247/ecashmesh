@@ -41,7 +41,7 @@ async fn mint(statuses: Vec<(u16, &'static str)>) -> (CashuAdapter, JoinHandle<(
 }
 
 #[tokio::test]
-async fn only_public_gets_are_used_and_refresh_failures_retain_stale_evidence() {
+async fn public_metadata_reads_retain_stale_evidence_after_refresh_failure() {
     let (adapter, server) = mint(
         vec![(200, ""); 3]
             .into_iter()
@@ -194,7 +194,7 @@ async fn unpaid_melt_quotes_are_normalized_or_explicitly_unknown() {
         .melt_quote(&invoice, Amount::from_sats(100_000))
         .await;
     assert_eq!(
-        observed.evidence.value().unwrap().fee_reserve.amount.sats(),
+        observed.evidence.value().unwrap().fee_reserve_sats.sats(),
         321
     );
     assert!(observed.endpoint.ends_with("/v1/melt/quote/bolt11"));

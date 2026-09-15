@@ -20,6 +20,9 @@ import {
   colors,
   estimatedTime,
   ErrorNotice,
+  feeEstimateLabel,
+  feeRate,
+  feeReasonableness,
   Heading,
   Loading,
   Row,
@@ -336,7 +339,7 @@ function ReferenceWallet() {
                       />
                       <Choice
                         title="Cashu request"
-                        copy="Quote a destination mint through Lightning"
+                        copy="Paste a NUT-18 creq… request or destination URI"
                         icon="◈"
                         selected={flow.destinationType === "cashu"}
                         onPress={() => flow.setDestinationType("cashu")}
@@ -379,7 +382,7 @@ function ReferenceWallet() {
                     style={local.destinationInput}
                     placeholder={
                       flow.destinationType === "cashu"
-                        ? "cashu://request?mint=https%3A%2F%2Fmint.example"
+                        ? "creqA… or cashu://request?mint=https%3A%2F%2Fmint.example"
                         : "lnbc..."
                     }
                   />
@@ -528,8 +531,18 @@ function ReferenceWallet() {
                     <View style={local.divider} />
                     <Row label="Amount" value={sats(flow.payment.amount)} />
                     <Row
-                      label="Fee"
-                      value={`${sats(flow.selected.fee.amount)} (${flow.selected.fee_reasonableness}%)`}
+                      label={feeEstimateLabel(flow.selected.fee.estimate_kind)}
+                      value={sats(flow.selected.fee.amount)}
+                    />
+                    <Row
+                      label="Fee rate"
+                      value={feeRate(flow.selected.fee.fee_rate_basis_points)}
+                    />
+                    <Row
+                      label="Fee reasonableness"
+                      value={feeReasonableness(
+                        flow.selected.fee_reasonableness,
+                      )}
                     />
                     <Row
                       label="Estimated time"

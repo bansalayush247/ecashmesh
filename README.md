@@ -662,8 +662,10 @@ Implemented in `crates/ecashmesh-cashu`, connected through the protocol-independ
 `ConnectorSnapshot` boundary and the API's connector provider. No protocol logic
 or HTTP dependencies were added to the core or reference wallet.
 
-The adapter sends only public GETs: `/v1/info`, `/v1/keysets`, `/v1/keys`, and
-configured directory endpoints. It exposes canonical mint URLs, display metadata,
+For discovery the adapter reads only public GET endpoints: `/v1/info`,
+`/v1/keysets`, `/v1/keys`, and configured directory endpoints. A live route
+evaluation may additionally request unpaid NUT-04/NUT-05 quotes, but never calls
+minting, melting, token, proof, or other execution endpoints. It exposes canonical mint URLs, display metadata,
 mint identity public keys, implementation/version, all advertised NUT settings,
 method/unit transaction limits, supported units, active keyset descriptors,
 denominations and their public keys, input fee schedules, endpoint availability,
@@ -880,17 +882,24 @@ the benchmark remains focused on compact graph construction and bounded search.
 
 Live mode is the primary BOSS Battle flow. The API normalizes a submitted
 destination before discovery: a Lightning target must be a checksummed BOLT11
-invoice whose whole-sat amount exactly matches `amount`; a Cashu destination uses
-the request form below.
+invoice whose whole-sat amount exactly matches `amount`; a Cashu destination can
+use the legacy request form below or a standard NUT-18 `creqA...` request.
 
 ```text
 cashu://request?mint=https%3A%2F%2Fdestination-mint.example
+# or: creqA<base64url(CBOR(NUT-18 payment request))>
 ```
 
-The request can also include `amount_sats` and an `invoice`. Without an invoice,
-EcashMesh asks the target mint for an unpaid NUT-04 quote, validates its returned
-invoice, and asks each selected source mint for an unpaid NUT-05 melt quote. The
-published graph only has the actual declared mechanism:
+For NUT-18, EcashMesh decodes CBOR/base64url and preserves the requested amount,
+`sat` unit, accepted/preferred mints, transports, and supported methods. It
+discovers each listed mint in request order and uses the first one that returns a
+usable unpaid NUT-04 quote. The legacy URI can include `amount_sats` and an
+`invoice`. NUT-18 does not standardize an invoice field, but EcashMesh supports
+an explicit `invoice`/`bolt11` extension (or `bolt11` transport target) when a
+host provides one. Without an invoice, EcashMesh asks the target mint for an
+unpaid NUT-04 quote, validates its returned invoice, and asks each selected
+source mint for an unpaid NUT-05 melt quote. The published graph only has the
+actual declared mechanism:
 
 ```text
 Cashu source → Lightning invoice → Cashu destination quote
@@ -901,6 +910,14 @@ edge. Public limits and denomination data never become liquidity/solvency facts.
 Missing, stale, malformed, unavailable, or amount-mismatched quotes return
 `NO_VIABLE_ROUTE` with reasons; live mode never inserts simulator candidates or
 fabricated fees, liquidity, reliability, timestamps, destinations, or edges.
+
+The NUT-05 `fee_reserve` is returned as `fee_reserve_sats` and
+`estimated_fee_sats` with `estimate_kind: "reserve_estimate"`; it is an upper
+bound, not a guaranteed final Lightning fee. The response also includes an exact
+fee rate in basis points. A 100-sat payment with a 2-sat reserve therefore shows
+`Fee reserve (estimate): 2 sats` and `Fee rate: 2%`. NUT-02 per-keyset
+`input_fee_ppk` schedules are returned separately and explicitly marked as not
+included, because calculating them requires the wallet's actual selected proofs.
 
 Run a live API with at least one real source mint:
 

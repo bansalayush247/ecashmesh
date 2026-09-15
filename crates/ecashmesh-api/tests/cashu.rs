@@ -3,6 +3,7 @@
 #[path = "support/cashu_server.rs"]
 mod support;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 use support::{ApiServer, MockMint};
 
@@ -102,6 +103,87 @@ fn cashu_destination_quote_creates_only_a_cashu_to_lightning_live_edge() {
             .unwrap()
             .iter()
             .any(|quote| quote["kind"] == "source_melt_quote" && quote["state"] == "known")
+    );
+}
+
+#[test]
+fn nut18_destination_uses_its_extracted_mint_for_quote_backed_route_discovery() {
+    let mint = MockMint::start("healthy");
+    let server = ApiServer::start(&mint.url);
+    let body = json!({
+        "amount": 100_000,
+        "asset": "BTC",
+        "destination": {"type": "cashu", "value": nut18_request(&mint.url, 100_000)},
+        "payment_intent": "send",
+        "candidate_connectors": [],
+        "source_connector": "cashu:fixture"
+    });
+    let (status, decision) = server.post("/v1/routes/evaluate", &body);
+    assert_eq!(status, 200, "{decision}");
+    assert_eq!(
+        decision["live"]["graph"]["destination"]["normalization"],
+        "nut18_creq"
+    );
+    assert_eq!(
+        decision["live"]["graph"]["destination"]["mint_url"],
+        mint.url
+    );
+    assert_eq!(
+        decision["live"]["graph"]["mechanisms"],
+        json!(["cashu_lightning"])
+    );
+    assert!(
+        decision["live"]["quote_observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|quote| quote["kind"] == "destination_mint_quote")
+    );
+    assert_eq!(
+        decision["recommended_route"]["fee"]["estimate_kind"],
+        "reserve_estimate"
+    );
+    assert_eq!(
+        decision["recommended_route"]["fee"]["fee_reserve_sats"],
+        321
+    );
+    assert_eq!(
+        decision["recommended_route"]["fee"]["estimated_fee_sats"],
+        321
+    );
+    assert_eq!(
+        decision["recommended_route"]["fee_reasonableness"],
+        Value::Null
+    );
+    assert_eq!(
+        decision["recommended_route"]["fee"]["input_fee_schedule"]["included_in_estimated_fee"],
+        false
+    );
+}
+
+#[test]
+fn malformed_nut18_request_is_a_validation_error_not_a_cashu_token() {
+    let mint = MockMint::start("healthy");
+    let server = ApiServer::start(&mint.url);
+    let body = json!({
+        "amount": 100_000,
+        "asset": "BTC",
+        "destination": {"type": "cashu", "value": "creqA~not-base64"},
+        "payment_intent": "send",
+        "candidate_connectors": []
+    });
+    let (status, error) = server.post("/v1/routes/evaluate", &body);
+    assert_eq!(status, 400, "{error}");
+    assert_eq!(error["error"]["code"], "VALIDATION_ERROR");
+    assert!(
+        error["error"]["details"]
+            .to_string()
+            .contains("NUT-18 Cashu payment request")
+    );
+    assert!(
+        !error["error"]["details"]
+            .to_string()
+            .contains("bearer tokens")
     );
 }
 
@@ -260,4 +342,78 @@ fn discovery_errors_are_inspectable_and_untrusted_private_targets_are_blocked() 
     assert_eq!(error["error"]["code"], "NO_VIABLE_ROUTE");
     payment["wallet_mint_urls"] = json!(vec![mint.url.clone(); 65]);
     assert_eq!(server.post("/v1/connectors/discover", &payment).0, 400);
+}
+
+fn nut18_request(mint_url: &str, amount: u64) -> String {
+    let payload = cbor_map(vec![
+        ("a", cbor_uint(amount)),
+        ("u", cbor_text("sat")),
+        ("m", cbor_array(vec![cbor_text(mint_url)])),
+        (
+            "t",
+            cbor_array(vec![cbor_map(vec![
+                ("t", cbor_text("post")),
+                ("a", cbor_text("https://receiver.example/cashu")),
+            ])]),
+        ),
+    ]);
+    format!("creqA{}", URL_SAFE_NO_PAD.encode(payload))
+}
+
+fn cbor_map(entries: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
+    let mut value = cbor_head(5, entries.len() as u64);
+    for (key, entry) in entries {
+        value.extend(cbor_text(key));
+        value.extend(entry);
+    }
+    value
+}
+
+fn cbor_array(entries: Vec<Vec<u8>>) -> Vec<u8> {
+    let mut value = cbor_head(4, entries.len() as u64);
+    for entry in entries {
+        value.extend(entry);
+    }
+    value
+}
+
+fn cbor_text(value: &str) -> Vec<u8> {
+    let mut encoded = cbor_head(3, value.len() as u64);
+    encoded.extend(value.as_bytes());
+    encoded
+}
+
+fn cbor_uint(value: u64) -> Vec<u8> {
+    cbor_head(0, value)
+}
+
+fn cbor_head(major: u8, value: u64) -> Vec<u8> {
+    let tag = major << 5;
+    match value {
+        0..=23 => vec![tag | u8::try_from(value).expect("range is bounded")],
+        24..=255 => vec![tag | 0x18, u8::try_from(value).expect("range is bounded")],
+        256..=65_535 => {
+            let mut encoded = vec![tag | 0x19];
+            encoded.extend(
+                u16::try_from(value)
+                    .expect("range is bounded")
+                    .to_be_bytes(),
+            );
+            encoded
+        }
+        65_536..=4_294_967_295 => {
+            let mut encoded = vec![tag | 0x1a];
+            encoded.extend(
+                u32::try_from(value)
+                    .expect("range is bounded")
+                    .to_be_bytes(),
+            );
+            encoded
+        }
+        _ => {
+            let mut encoded = vec![tag | 0x1b];
+            encoded.extend(value.to_be_bytes());
+            encoded
+        }
+    }
 }

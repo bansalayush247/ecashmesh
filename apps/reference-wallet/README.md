@@ -44,12 +44,17 @@ EXPO_PUBLIC_ROUTING_MODE=live npm run web
 ```
 
 Live mode has no simulator fallback. Paste a real whole-satoshi BOLT11 invoice,
-or select **Cashu request** and provide
+or select **Cashu request** and provide a NUT-18 `creqA...` request or
 `cashu://request?mint=https%3A%2F%2Fdestination-mint.example`. The frontend does
 not parse either target: it sends the chosen type and raw value to EcashMesh.
 The backend normalizes the target, reads real metadata, and obtains unpaid mint
 and melt quotes where supported. A failure to establish a supported quote-backed
 route is shown as `NO_VIABLE_ROUTE`, never as an invented recommendation.
+
+For live Cashu routes, the wallet labels a NUT-05 result as **Fee reserve
+(estimate)** rather than a final fee, displays the server-calculated fee rate,
+and renders unknown fee reasonableness as **Unknown**. Public NUT-02 keyset input
+fees remain separate because the reference client never selects or stores proofs.
 
 For native preview, use `npm start` and open in a matching Expo Go SDK 57 client,
 or `npm run ios` / `npm run android` with a simulator/emulator installed. Expo SDK

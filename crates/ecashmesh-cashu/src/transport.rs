@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ecashmesh_core::{
-    Amount, ConfidenceLevel, ConnectorId, Evidence, EvidenceSource, EvidenceTimestamp, FeeQuote,
+    Amount, ConfidenceLevel, ConnectorId, Evidence, EvidenceSource, EvidenceTimestamp,
     LightningInvoice,
 };
 use reqwest::{Client, Url, redirect::Policy};
@@ -37,8 +37,9 @@ pub struct MintQuote {
 pub struct MeltQuote {
     /// Opaque quote identifier returned by the mint.
     pub quote_id: String,
-    /// Fee reserve reported for this exact invoice.
-    pub fee_reserve: FeeQuote,
+    /// Upper-bound fee reserve reported for this exact invoice. It is not a
+    /// guaranteed final Lightning fee; a later NUT-08 settlement could differ.
+    pub fee_reserve_sats: Amount,
     /// Mint-reported expiry, when supplied.
     pub expires_at_unix_seconds: Option<u64>,
 }
@@ -422,7 +423,7 @@ fn parse_melt_quote(
     Ok((
         MeltQuote {
             quote_id,
-            fee_reserve: FeeQuote::new(Amount::from_sats(fee)),
+            fee_reserve_sats: Amount::from_sats(fee),
             expires_at_unix_seconds: quote_expiry(&value),
         },
         observed_at,

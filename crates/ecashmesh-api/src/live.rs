@@ -7,7 +7,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use ecashmesh_cashu::{
-    CashuObservation, CashuPaymentRequest, MintQuote, QuoteObservation, discovery::DiscoveryService,
+    CashuObservation, CashuPaymentRequest, KeysetFee, MintQuote, QuoteObservation,
+    discovery::DiscoveryService,
 };
 use ecashmesh_core::{
     Amount, AmountAwareEvidence, ConnectorCapabilities, ConnectorEvidence, ConnectorHealth,
@@ -40,10 +41,10 @@ impl LiveDestination {
         }
     }
 
-    pub(super) fn destination_mint_url(&self) -> Option<&str> {
+    pub(super) fn destination_mint_urls(&self) -> Vec<&str> {
         match self {
-            Self::Lightning(_) => None,
-            Self::Cashu(request) => Some(&request.mint_url),
+            Self::Lightning(_) => Vec::new(),
+            Self::Cashu(request) => request.mint_urls.iter().map(String::as_str).collect(),
         }
     }
 
@@ -60,8 +61,21 @@ pub(super) struct LiveEvaluation {
     pub ranking: RouteRanking,
     pub connectors: Vec<ConnectorSnapshot>,
     pub quote_observations: Vec<Value>,
+    /// Fee terms retained separately from generic route quality evidence.
+    pub fee_terms: Vec<LiveFeeTerms>,
     pub expires_at_unix_seconds: u64,
     pub graph_context: Value,
+}
+
+/// Quote and keyset-fee facts for a quoted source connector.
+pub(super) struct LiveFeeTerms {
+    /// Source connector that returned the NUT-05 quote.
+    pub source_connector: ConnectorId,
+    /// NUT-05 upper-bound reserve, not a final paid fee.
+    pub fee_reserve_sats: Amount,
+    /// NUT-02 keyset schedule. It cannot be totalled until actual proofs are
+    /// selected, so it is deliberately excluded from the quote estimate.
+    pub input_fees: Evidence<Vec<KeysetFee>>,
 }
 
 /// A real-data failure that deliberately does not manufacture a candidate.
@@ -104,6 +118,20 @@ pub(super) async fn evaluate(
             )
         }
         LiveDestination::Cashu(request) => {
+            if !request.supported_methods.is_empty()
+                && !request
+                    .supported_methods
+                    .iter()
+                    .any(|method| method.method == "bolt11")
+            {
+                return Err(LiveNoRoute {
+                    details: vec![
+                        "route constraints: NUT-18 request does not permit a bolt11 payment leg"
+                            .into(),
+                    ],
+                    quote_observations,
+                });
+            }
             if request.amount.is_some_and(|claimed| claimed != amount) {
                 return Err(LiveNoRoute {
                     details: vec![
@@ -113,38 +141,34 @@ pub(super) async fn evaluate(
                     quote_observations,
                 });
             }
-            let target = batch
-                .live_observations
+            let targets = request
+                .mint_urls
                 .iter()
-                .find(|observation| observation.mint_url == request.mint_url)
-                .ok_or_else(|| LiveNoRoute {
+                .filter_map(|mint_url| {
+                    batch
+                        .live_observations
+                        .iter()
+                        .find(|observation| &observation.mint_url == mint_url)
+                })
+                .collect::<Vec<_>>();
+            if targets.is_empty() {
+                return Err(LiveNoRoute {
                     details: vec![
                         "destination mint was not discovered or has no inspectable observation"
                             .into(),
                     ],
-                    quote_observations: Vec::new(),
-                })?;
+                    quote_observations,
+                });
+            }
             let embedded_invoice = request.invoice.clone();
-            let quote = if embedded_invoice.is_some() {
+            let (target, invoice, expiry) = if let Some(invoice) = embedded_invoice {
+                let target = targets[0];
                 quote_observations.push(json!({
                     "kind": "destination_invoice",
                     "state": "known",
                     "origin": "cashu_payment_request",
                     "mint_url": target.mint_url,
                 }));
-                None
-            } else {
-                let quote = service
-                    .mint_quote(target.id.clone(), &target.mint_url, amount)
-                    .await
-                    .map_err(|error| LiveNoRoute {
-                        details: vec![format!("destination mint quote failed: {error}")],
-                        quote_observations: Vec::new(),
-                    })?;
-                quote_observations.push(mint_quote_json(target, &quote));
-                Some(quote)
-            };
-            let (invoice, expiry) = if let Some(invoice) = embedded_invoice {
                 if invoice.amount() != Some(amount) {
                     return Err(LiveNoRoute {
                         details: vec![
@@ -154,32 +178,62 @@ pub(super) async fn evaluate(
                         quote_observations,
                     });
                 }
-                (invoice, None)
+                (target, invoice, None)
             } else {
-                let Some(observation) = quote else {
-                    unreachable!("an invoice or a mint quote is always selected")
-                };
-                let Some(observed) = observation.evidence.observation() else {
-                    let detail = observation.issue.map_or_else(
-                        || "destination mint did not return a usable mint quote".into(),
-                        |issue| format!("{}: {}", issue.code, issue.message),
-                    );
+                let mut failures = Vec::new();
+                let mut usable = None;
+                for target in targets {
+                    match service
+                        .mint_quote(target.id.clone(), &target.mint_url, amount)
+                        .await
+                    {
+                        Ok(quote) => {
+                            quote_observations.push(mint_quote_json(target, &quote));
+                            if let Some(observed) = quote.evidence.observation() {
+                                usable = Some((
+                                    target,
+                                    observed.value.invoice.clone(),
+                                    observed.value.expires_at_unix_seconds,
+                                ));
+                                break;
+                            }
+                            let detail = quote.issue.map_or_else(
+                                || "destination mint did not return a usable mint quote".into(),
+                                |issue| format!("{}: {}", issue.code, issue.message),
+                            );
+                            failures.push(format!("{}: {detail}", target.mint_url));
+                        }
+                        Err(error) => failures.push(format!("{}: {error}", target.mint_url)),
+                    }
+                }
+                let Some(usable) = usable else {
                     return Err(LiveNoRoute {
-                        details: vec![format!("missing quote: {detail}")],
+                        details: failures
+                            .into_iter()
+                            .map(|failure| format!("missing quote: {failure}"))
+                            .collect(),
                         quote_observations,
                     });
                 };
-                (
-                    observed.value.invoice.clone(),
-                    observed.value.expires_at_unix_seconds,
-                )
+                usable
             };
             (
                 invoice,
                 json!({
                     "type": "cashu",
                     "mint_url": target.mint_url,
-                    "normalization": "cashu_destination_request",
+                    "mint_urls": request.mint_urls,
+                    "mints_are_preferred": request.mints_are_preferred,
+                    "unit": request.unit,
+                    "transports": request.transports.iter().map(|transport| json!({
+                        "type": transport.kind,
+                        "target": transport.target,
+                    })).collect::<Vec<_>>(),
+                    "supported_methods": request.supported_methods.iter().map(|method| json!({
+                        "method": method.method,
+                        "receiver_fee_sats": method.fee.map(Amount::sats),
+                    })).collect::<Vec<_>>(),
+                    "normalization": request.encoding.code(),
                     "transfer": "cashu_mint_quote_to_lightning_invoice",
                 }),
                 expiry,
@@ -193,6 +247,7 @@ pub(super) async fn evaluate(
         .map(|observation| (observation.id.clone(), observation))
         .collect::<BTreeMap<_, _>>();
     let mut live_sources = Vec::new();
+    let mut live_fee_terms = Vec::new();
     let mut source_health = BTreeMap::new();
     let mut expiries = Vec::new();
     let mut no_route_details = Vec::new();
@@ -235,11 +290,16 @@ pub(super) async fn evaluate(
         };
         let mut source = source;
         source.fee = Evidence::reported(
-            quote_evidence.value.fee_reserve,
+            ecashmesh_core::FeeQuote::new(quote_evidence.value.fee_reserve_sats),
             quote_evidence.source,
             quote_evidence.observed_at,
             quote_evidence.confidence,
         );
+        live_fee_terms.push(LiveFeeTerms {
+            source_connector: source.id.clone(),
+            fee_reserve_sats: quote_evidence.value.fee_reserve_sats,
+            input_fees: observation.input_fees.clone(),
+        });
         if let Some(expiry) = quote_evidence.value.expires_at_unix_seconds {
             expiries.push(expiry);
         }
@@ -401,6 +461,7 @@ pub(super) async fn evaluate(
         ranking: result.ranking,
         connectors: live_sources,
         quote_observations,
+        fee_terms: live_fee_terms,
         expires_at_unix_seconds,
         graph_context: json!({
             "destination": destination_context,
@@ -471,7 +532,8 @@ fn melt_quote_json(
         |value| {
             json!({
                 "quote_id": value.quote_id,
-                "fee_reserve_sats": value.fee_reserve.amount.sats(),
+                "fee_reserve_sats": value.fee_reserve_sats.sats(),
+                "fee_kind": "reserve_upper_bound",
                 "expiry": value.expires_at_unix_seconds,
             })
         },

@@ -9,7 +9,10 @@ mod payment_request;
 mod strict_json;
 mod transport;
 pub use metadata::PublicKeyset;
-pub use payment_request::{CashuPaymentRequest, CashuPaymentRequestError};
+pub use payment_request::{
+    CashuPaymentRequest, CashuPaymentRequestEncoding, CashuPaymentRequestError,
+    CashuSupportedMethod, CashuTransport,
+};
 pub use transport::{CashuAdapter, MeltQuote, MintConfig, MintQuote, QuoteObservation};
 
 use ecashmesh_core::{
