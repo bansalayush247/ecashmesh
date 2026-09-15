@@ -156,17 +156,7 @@ pub(super) fn select_live_sources(
 
 impl Provider {
     pub fn from_env() -> Result<Self, String> {
-        // ROUTING_MODE is the explicit Phase 10 boundary. The older variable
-        // remains a compatibility shim for local Phase 8/9 scripts only.
-        let mode = std::env::var("ROUTING_MODE").unwrap_or_else(|_| {
-            std::env::var("ECASHMESH_CONNECTOR_MODE").map_or_else(
-                |_| "live".into(),
-                |legacy| match legacy.as_str() {
-                    "cashu" => "live".into(),
-                    other => other.into(),
-                },
-            )
-        });
+        let mode = std::env::var("ROUTING_MODE").unwrap_or_else(|_| "live".into());
         match mode.as_str() {
             "simulator" => Ok(Self::Simulator),
             "live" => {
@@ -221,7 +211,7 @@ impl Provider {
         if matches!(self, Self::Simulator) && !hints.is_empty() {
             return Err(ApiError::validation(
                 "Mint discovery requires cashu mode",
-                vec!["ECASHMESH_CONNECTOR_MODE".into()],
+                vec!["ROUTING_MODE=live".into()],
             ));
         }
         match self {

@@ -31,7 +31,7 @@ impl ApiServer {
         drop(listener);
         let child = Command::new(env!("CARGO_BIN_EXE_ecashmesh-api"))
             .env("ECASHMESH_API_ADDRESS", &address)
-            .env("ECASHMESH_CONNECTOR_MODE", "cashu")
+            .env("ROUTING_MODE", "live")
             .env("ECASHMESH_CASHU_MAX_AGE_SECONDS", "300")
             .env("ECASHMESH_CASHU_MINTS", seeds.to_string())
             .env("ECASHMESH_CASHU_DIRECTORIES", directories.to_string())
