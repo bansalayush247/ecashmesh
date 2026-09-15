@@ -24,3 +24,17 @@ index 0000000..0000000 100644
  
          Ok(())
      }
+diff --git a/crates/cdk-integration-tests/src/ln_regtest/cln.rs b/crates/cdk-integration-tests/src/ln_regtest/cln.rs
+index 0000000..0000000 100644
+--- a/crates/cdk-integration-tests/src/ln_regtest/cln.rs
++++ b/crates/cdk-integration-tests/src/ln_regtest/cln.rs
+@@ -63,6 +63,8 @@ impl Clnd {
+         self.child = Some(child);
+ 
+         // Let clnd start up
+-        sleep(Duration::from_secs(5));
++        // The macOS Nix build can take longer to initialize the Unix RPC
++        // socket after bitcoind has just generated the bootstrap chain.
++        sleep(Duration::from_secs(20));
+ 
+         Ok(())
