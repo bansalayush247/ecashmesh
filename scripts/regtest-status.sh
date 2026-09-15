@@ -10,4 +10,4 @@ fi
 # shellcheck disable=SC1091
 source /tmp/cdk_regtest_env
 cd "$cdk_dir"
-nix develop .#regtest -c just regtest-status
+nix develop --accept-flake-config .#regtest -c just regtest-status

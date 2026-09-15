@@ -24,7 +24,9 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 fi
 
 # CDK writes /tmp/cdk_regtest_env; the status script uses it for real endpoints.
-nohup bash -c 'cd "$1" && nix develop .#regtest -c just regtest' _ "$cdk_dir" >"$state/regtest.log" 2>&1 &
+# CDK owns child processes through mprocs, which requires a TTY even when this
+# wrapper is detached. macOS `script` supplies a pseudo-terminal without Docker.
+nohup script -q /dev/null bash -c 'cd "$1" && nix develop --accept-flake-config .#regtest -c just regtest' _ "$cdk_dir" >"$state/regtest.log" 2>&1 &
 echo $! >"$pid_file"
 for _ in $(seq 1 180); do
   if [[ -f /tmp/cdk_regtest_env ]]; then
