@@ -99,12 +99,14 @@ Real execution is off by default and only accepts local mint endpoints in
 regtest. It never uses the simulator after a NUT-08 error.
 
 ```bash
+# Run ./scripts/regtest-up.sh first.
+source /tmp/cdk_regtest_env
 PAYMENT_ENVIRONMENT=regtest \
 ECASHMESH_ENABLE_REAL_PAYMENTS=true \
 ECASHMESH_MAX_PAYMENT_SATS=10000 \
 ECASHMESH_REQUIRE_PAYMENT_CONFIRMATION=true \
 ROUTING_MODE=live \
-ECASHMESH_CASHU_MINTS='[{"id":"cashu:mint-a","url":"http://127.0.0.1:3338"},{"id":"cashu:mint-b","url":"http://127.0.0.1:3339"}]' \
+ECASHMESH_CASHU_MINTS="[{\"id\":\"cashu:mint-a\",\"url\":\"$CDK_TEST_MINT_URL\"},{\"id\":\"cashu:mint-b\",\"url\":\"$CDK_TEST_MINT_URL_2\"}]" \
 nix develop -c cargo run -p ecashmesh-api
 ```
 
@@ -133,6 +135,23 @@ responses label observations `regtest_only`; they are not production evidence.
 The reference wallet exposes a `RegtestCustody` host interface. A production
 host must provide it from a real Cashu SDK; the UI itself never manufactures or
 stores proof secrets.
+
+### Nix regtest topology
+
+No Docker daemon is required. The pinned CDK harness used by these scripts
+starts Bitcoin Core regtest, two CLN nodes, two LND nodes, and two real CDK
+mints (one CLN-backed and one LND-backed). It does not use CDK's fake wallet.
+
+```bash
+./scripts/regtest-up.sh
+./scripts/regtest-status.sh
+./scripts/regtest-down.sh
+```
+
+`regtest-up.sh` pins CDK at `4643cb73b4a1f66cf46b170347ac768d08f198c9`, waits
+for both mint `/v1/info` endpoints, and leaves logs in `.regtest/regtest.log`.
+CDK exports the live endpoints through `/tmp/cdk_regtest_env` as
+`CDK_TEST_MINT_URL` and `CDK_TEST_MINT_URL_2`.
 
 ## Cashu destinations
 
