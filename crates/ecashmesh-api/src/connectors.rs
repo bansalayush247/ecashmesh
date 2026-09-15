@@ -17,9 +17,6 @@ use serde_json::{Value, json};
 
 use super::{ApiError, EvidenceStateResponse, connector_health_code};
 
-#[path = "payment_mode.rs"]
-mod payment_mode;
-
 #[derive(Clone)]
 pub(super) enum Provider {
     Simulator,

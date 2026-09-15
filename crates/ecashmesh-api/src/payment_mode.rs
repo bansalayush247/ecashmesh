@@ -6,6 +6,8 @@
 
 use std::env;
 
+use reqwest::Url;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaymentEnvironment {
     Simulator,
@@ -33,6 +35,7 @@ impl PaymentEnvironment {
         matches!(self, Self::Regtest | Self::Mainnet)
     }
 
+    #[allow(dead_code)] // Used by safety tests and retained as an explicit environment predicate.
     pub const fn is_mainnet(self) -> bool {
         matches!(self, Self::Mainnet)
     }
@@ -65,9 +68,7 @@ impl PaymentSafetyConfig {
             })?;
 
         if execution_enabled && !environment.allows_execution() {
-            return Err(
-                "Real payments require PAYMENT_ENVIRONMENT=regtest or mainnet".to_owned(),
-            );
+            return Err("Real payments require PAYMENT_ENVIRONMENT=regtest or mainnet".to_owned());
         }
         if max_amount_sats == 0 {
             return Err("ECASHMESH_MAX_PAYMENT_SATS must be greater than zero".to_owned());
@@ -101,20 +102,31 @@ impl PaymentSafetyConfig {
     }
 
     pub fn validate_endpoint(&self, endpoint: &str) -> Result<(), String> {
-        let lower = endpoint.to_ascii_lowercase();
-        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
-            return Err("Endpoint must use http:// or https://".to_owned());
+        let url = Url::parse(endpoint)
+            .map_err(|_| "Endpoint must be an absolute HTTP(S) URL".to_owned())?;
+        if !matches!(url.scheme(), "http" | "https")
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err("Endpoint must use HTTP(S) without credentials".to_owned());
         }
-
-        if self.environment == PaymentEnvironment::Regtest {
-            let local = lower.contains("://localhost")
-                || lower.contains("://127.0.0.1")
-                || lower.contains("://[::1]")
-                || lower.contains(".local/")
-                || lower.ends_with(".local");
-            if !local {
-                return Err("Regtest endpoints must use localhost, loopback, or .local".to_owned());
-            }
+        let host = url
+            .host_str()
+            .ok_or("Endpoint must include a host")?
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        let local = host == "localhost"
+            || host.rsplit('.').next() == Some("local")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        if self.environment == PaymentEnvironment::Regtest && !local {
+            return Err("Regtest endpoints must use localhost, loopback, or .local".to_owned());
+        }
+        if self.environment == PaymentEnvironment::Mainnet && local {
+            return Err(
+                "Mainnet execution refuses localhost, loopback, and .local endpoints".to_owned(),
+            );
         }
         Ok(())
     }
@@ -137,5 +149,20 @@ mod tests {
     #[test]
     fn mainnet_requires_confirmation() {
         assert!(PaymentEnvironment::Mainnet.is_mainnet());
+    }
+
+    #[test]
+    fn regtest_rejects_a_lookalike_host() {
+        let config = PaymentSafetyConfig {
+            environment: PaymentEnvironment::Regtest,
+            execution_enabled: true,
+            max_amount_sats: 10,
+            require_confirmation: true,
+        };
+        assert!(
+            config
+                .validate_endpoint("http://localhost.evil.test")
+                .is_err()
+        );
     }
 }

@@ -598,35 +598,34 @@ function ReferenceWallet() {
                 </View>
                 <Text style={local.testEyebrow}>
                   Pocket /{" "}
-                  {flow.decision?.mode === "live"
-                    ? "Live evaluation simulation"
-                    : "Simulator result"}
+                  {flow.receipt.simulated ? "Simulator result" : "Regtest settlement"}
                 </Text>
                 <Heading
                   eyebrow={
-                    flow.decision?.mode === "live"
-                      ? "Simulator-backed live evaluation"
-                      : "Simulator-backed success"
+                    flow.receipt.simulated
+                      ? "Simulator-backed success"
+                      : "Real regtest payment settled"
                   }
-                  title="Simulation complete"
+                  title={flow.receipt.simulated ? "Simulation complete" : "Payment complete"}
                 >
                   {flow.receipt.message}
                 </Heading>
                 <Surface>
                   <Row
-                    label="Simulated fee"
+                    label={flow.receipt.simulated ? "Simulated fee" : "Final fee"}
                     value={sats(flow.receipt.fee.amount)}
                   />
                   <Row label="Path" value={flow.receipt.path.join(" → ")} />
                   <Row label="Route ID" value={flow.receipt.route_id} />
                   <Row
-                    label="Simulation ID"
+                    label={flow.receipt.simulated ? "Simulation ID" : "Payment ID"}
                     value={flow.receipt.simulation_id}
                   />
                 </Surface>
                 <Text style={styles.small}>
-                  This result is returned by the simulator. Nothing is stored as
-                  a transaction and no real payment was executed.
+                  {flow.receipt.simulated
+                    ? "This result is returned by the simulator. No real payment was executed."
+                    : "This result was reported settled by the regtest Cashu mint."}
                 </Text>
                 <Button secondary onPress={flow.home}>
                   Return to Pocket

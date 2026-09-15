@@ -24,8 +24,16 @@ use tower_http::cors::CorsLayer;
 
 mod connectors;
 mod live;
+mod payment;
+mod payment_mode;
 mod simulation;
 use connectors::Provider;
+
+#[derive(Clone)]
+struct AppState {
+    provider: Provider,
+    payments: std::sync::Arc<payment::PaymentService>,
+}
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:5000";
 
@@ -48,6 +56,9 @@ async fn main() {
 }
 
 fn app(provider: Provider) -> Router {
+    let payments = payment::PaymentService::from_env()
+        .unwrap_or_else(|error| panic!("invalid payment safety configuration: {error}"));
+    let state = AppState { provider, payments };
     // Expo's local browser preview; native clients do not use browser CORS.
     let origins = std::env::var("ECASHMESH_WEB_ORIGIN").map_or_else(
         |_| {
@@ -72,7 +83,10 @@ fn app(provider: Provider) -> Router {
         .route("/v1/connectors", get(connector_observations))
         .route("/v1/connectors/discover", post(discover_connectors))
         .route("/v1/simulator/confirm", post(simulation::confirm))
-        .with_state(provider)
+        .route("/v1/payments/prepare", post(payment::prepare))
+        .route("/v1/payments/execute", post(payment::execute))
+        .route("/v1/payments/{payment_id}", get(payment::status))
+        .with_state(state)
         .layer(
             CorsLayer::new()
                 .allow_origin(origins)
@@ -101,7 +115,8 @@ async fn index() -> Html<&'static str> {
     <p>Run <code>npm run web</code> from <code>apps/reference-wallet</code>.</p>
     <p>Open <a href="http://localhost:8081">http://localhost:8081</a>.</p>
     <p>Route evaluation: <code>POST /v1/routes/evaluate</code></p>
-    <p>Simulator-backed confirmation: <code>POST /v1/simulator/confirm</code></p>
+    <p>Simulator confirmation: <code>POST /v1/simulator/confirm</code></p>
+    <p>Real payment lifecycle: <code>POST /v1/payments/prepare</code>, <code>POST /v1/payments/execute</code>, <code>GET /v1/payments/:id</code></p>
   </body>
 </html>"#,
     )
@@ -146,10 +161,17 @@ async fn rank(Json(request): Json<RankRequest>) -> Result<Json<RankResponse>, Ap
 }
 
 async fn evaluate(
-    State(provider): State<Provider>,
+    State(state): State<AppState>,
     request: Result<Json<EvaluateRequest>, JsonRejection>,
 ) -> Result<Json<EvaluateResponse>, ApiError> {
-    evaluate_using(&provider, request).await
+    let Json(request) = request
+        .map_err(|error| ApiError::new("invalid_json", format!("invalid request body: {error}")))?;
+    let response = evaluate_using(&state.provider, Ok(Json(request.clone()))).await?;
+    state
+        .payments
+        .record_evaluation(&request, &response.0)
+        .await;
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -158,7 +180,7 @@ struct ConnectorQuery {
 }
 
 async fn connector_observations(
-    State(provider): State<Provider>,
+    State(state): State<AppState>,
     query: Result<Query<ConnectorQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Query(query) = query.map_err(|error| {
@@ -171,7 +193,8 @@ async fn connector_observations(
             vec!["amount".into()],
         ));
     }
-    let batch = provider
+    let batch = state
+        .provider
         .collect(Amount::from_sats(amount), Vec::new())
         .await?;
     Ok(Json(catalog_json(&batch, amount)))
@@ -189,7 +212,7 @@ fn catalog_json(batch: &connectors::ConnectorBatch, amount: u64) -> serde_json::
 }
 
 async fn discover_connectors(
-    State(provider): State<Provider>,
+    State(state): State<AppState>,
     request: Result<Json<EvaluateRequest>, JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(request) = request.map_err(|error| {
@@ -199,7 +222,8 @@ async fn discover_connectors(
     let live_destination =
         live::LiveDestination::parse(&request.destination.kind, &request.destination.value).ok();
     let hints = request.discovery_hints(live_destination.as_ref())?;
-    let batch = provider
+    let batch = state
+        .provider
         .collect(Amount::from_sats(request.amount), hints)
         .await?;
     Ok(Json(catalog_json(&batch, request.amount)))
@@ -397,6 +421,24 @@ impl ApiError {
             details: Vec::new(),
         }
     }
+
+    fn payment_safety(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "PAYMENT_SAFETY",
+            message: message.into(),
+            details: Vec::new(),
+        }
+    }
+
+    fn payment_execution(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "PAYMENT_EXECUTION_FAILED",
+            message: message.into(),
+            details: Vec::new(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -413,9 +455,9 @@ impl IntoResponse for ApiError {
     }
 }
 
-#[derive(Deserialize)]
-struct EvaluateRequest {
-    amount: u64,
+#[derive(Clone, Deserialize)]
+pub(crate) struct EvaluateRequest {
+    pub(crate) amount: u64,
     asset: String,
     destination: DestinationInput,
     payment_intent: String,
@@ -431,7 +473,7 @@ struct EvaluateRequest {
     mint_urls: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct DestinationInput {
     #[serde(rename = "type")]
     kind: String,
@@ -908,22 +950,22 @@ impl RankResponse {
 }
 
 #[derive(Serialize)]
-struct EvaluateResponse {
-    mode: &'static str,
+pub(crate) struct EvaluateResponse {
+    pub(crate) mode: &'static str,
     discovery: ecashmesh_cashu::discovery::DiscoveryReport,
     simulated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    live: Option<serde_json::Value>,
-    connector_observations: Vec<serde_json::Value>,
-    quote_id: String,
-    recommended_route: EvaluatedRouteResponse,
-    alternatives: Vec<EvaluatedRouteResponse>,
+    pub(crate) live: Option<serde_json::Value>,
+    pub(crate) connector_observations: Vec<serde_json::Value>,
+    pub(crate) quote_id: String,
+    pub(crate) recommended_route: EvaluatedRouteResponse,
+    pub(crate) alternatives: Vec<EvaluatedRouteResponse>,
     score_breakdown: ScoreBreakdownResponse,
     risk_flags: Vec<&'static str>,
     evidence: Vec<EvidenceResponse>,
     explanation: EvaluationExplanationResponse,
     expires_at: String,
-    expires_at_unix_seconds: u64,
+    pub(crate) expires_at_unix_seconds: u64,
 }
 
 impl EvaluateResponse {
@@ -987,9 +1029,9 @@ impl EvaluateResponse {
 }
 
 #[derive(Serialize)]
-struct EvaluatedRouteResponse {
-    route_id: String,
-    connector: String,
+pub(crate) struct EvaluatedRouteResponse {
+    pub(crate) route_id: String,
+    pub(crate) connector: String,
     path: Vec<String>,
     score: u8,
     score_basis_points: u16,

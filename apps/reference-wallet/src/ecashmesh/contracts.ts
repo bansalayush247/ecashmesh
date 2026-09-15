@@ -135,6 +135,24 @@ export type PaymentInput = {
   sourceMintUrl?: string;
 };
 
+export const paymentStatusSchema = z
+  .object({
+    mode: z.literal("live"),
+    environment: z.enum(["regtest", "mainnet"]),
+    payment_id: z.string().min(1),
+    quote_id: z.string().min(1),
+    route_id: z.string().min(1),
+    amount_sats: unsigned,
+    fee_reserve_sats: unsigned,
+    final_fee_sats: unsigned.nullable(),
+    status: z.enum(["prepared", "pending", "settled", "failed", "recovery_required"]),
+    settled: z.boolean(),
+    source_mint_url: z.string(),
+    failure_reason: z.string().nullable(),
+  })
+  .passthrough();
+export type PaymentStatus = z.infer<typeof paymentStatusSchema>;
+
 export function paymentToWire(payment: PaymentInput) {
   return {
     amount: payment.amount,

@@ -44,6 +44,96 @@ pub struct MeltQuote {
     pub expires_at_unix_seconds: Option<u64>,
 }
 
+/// Result returned by the NUT-08 melt endpoint. `final_fee_sats` is deliberately
+/// optional: a mint can report a successful settlement without supplying enough
+/// information to calculate the final Lightning fee.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeltExecution {
+    pub state: String,
+    pub payment_preimage: Option<String>,
+    pub final_fee_sats: Option<Amount>,
+    pub change: Vec<Value>,
+    pub raw: Value,
+}
+
+/// Write-only NUT-08 client. It owns no secrets and never synthesizes proofs;
+/// a wallet custody adapter must supply selected, valid protocol proofs and
+/// blinded change outputs. This makes the HTTP call a real Cashu melt, rather
+/// than a simulator or a quote being misrepresented as settlement.
+pub struct CashuMeltExecutor {
+    url: Url,
+    client: Client,
+}
+
+impl CashuMeltExecutor {
+    /// Creates an execution client for an operator-approved mint URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid mint URL or HTTP client configuration.
+    pub fn new(mint_url: &str) -> Result<Self, String> {
+        let config = MintConfig::new(
+            ConnectorId::new("cashu:execution").map_err(|error| error.to_string())?,
+            mint_url,
+            300,
+        )?;
+        Ok(Self {
+            url: config.url,
+            client: client_builder()
+                .build()
+                .map_err(|error| error.to_string())?,
+        })
+    }
+
+    /// Submits actual NUT-07/NUT-08 input proofs to an already-created melt
+    /// quote. Inputs and outputs are protocol JSON intentionally kept opaque to
+    /// avoid an incompatible home-grown Cashu cryptography implementation.
+    ///
+    /// # Errors
+    ///
+    /// Returns protocol, transport, or malformed-response failures without retrying.
+    pub async fn melt(
+        &self,
+        quote: &str,
+        inputs: Vec<Value>,
+        outputs: Vec<Value>,
+    ) -> Result<MeltExecution, String> {
+        if quote.trim().is_empty() || quote.len() > 4_096 || inputs.is_empty() {
+            return Err("Melt requires a quote and at least one proof".into());
+        }
+        let url = self
+            .url
+            .join("v1/melt/bolt11")
+            .map_err(|_| "Invalid melt endpoint")?;
+        let (body, _) = post_url(
+            &self.client,
+            url,
+            json!({
+                "quote": quote,
+                "inputs": inputs,
+                "outputs": outputs,
+            }),
+        )
+        .await?;
+        parse_melt_execution(&body)
+    }
+
+    /// Reads the canonical quote state for recovery after a timeout or pending
+    /// response. No payment is retried by this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport or malformed-response failure.
+    pub async fn status(&self, quote: &str) -> Result<MeltExecution, String> {
+        let url = self
+            .url
+            .join(&format!("v1/melt/quote/bolt11/{quote}"))
+            .map_err(|_| "Invalid melt status endpoint")?;
+        let (body, _) = read_url(&self.client, url).await?;
+        parse_melt_execution(&body)
+    }
+}
+
 /// A quote observation with explicit missing/malformed/unavailable state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuoteObservation<T> {
@@ -428,6 +518,44 @@ fn parse_melt_quote(
         },
         observed_at,
     ))
+}
+
+fn parse_melt_execution(body: &str) -> Result<MeltExecution, String> {
+    let value = crate::strict_json::parse(body).map_err(|_| "Malformed melt execution JSON")?;
+    let state = value
+        .get("state")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("paid")
+                .and_then(Value::as_bool)
+                .map(|paid| if paid { "PAID" } else { "UNPAID" })
+        })
+        .map(str::to_ascii_uppercase)
+        .ok_or_else(|| "Melt response did not include a state".to_owned())?;
+    if !matches!(state.as_str(), "PAID" | "PENDING" | "UNPAID" | "FAILED") {
+        return Err("Melt response has an unsupported state".into());
+    }
+    let final_fee_sats = value
+        .get("fee_paid")
+        .or_else(|| value.get("fee"))
+        .and_then(Value::as_u64)
+        .map(Amount::from_sats);
+    let change = value
+        .get("change")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(MeltExecution {
+        state,
+        payment_preimage: value
+            .get("payment_preimage")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        final_fee_sats,
+        change,
+        raw: value,
+    })
 }
 
 fn quote_string(value: &Value, field: &str) -> Result<String, String> {
