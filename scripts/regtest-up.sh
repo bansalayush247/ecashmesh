@@ -18,7 +18,10 @@ if [[ ! -d "$cdk_dir/.git" ]]; then
   git clone --filter=blob:none https://github.com/cashubtc/cdk.git "$cdk_dir"
 fi
 git -C "$cdk_dir" fetch --depth 1 origin "$cdk_rev"
-git -C "$cdk_dir" checkout --detach "$cdk_rev"
+git -C "$cdk_dir" checkout --detach --force "$cdk_rev"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  git -C "$cdk_dir" apply "$root/scripts/cdk-macos-regtest.patch"
+fi
 
 # CDK writes /tmp/cdk_regtest_env; the status script uses it for real endpoints.
 nohup bash -c 'cd "$1" && nix develop .#regtest -c just regtest' _ "$cdk_dir" >"$state/regtest.log" 2>&1 &

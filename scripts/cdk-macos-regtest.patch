@@ -1,0 +1,26 @@
+diff --git a/crates/cdk-integration-tests/src/ln_regtest/bitcoin_client.rs b/crates/cdk-integration-tests/src/ln_regtest/bitcoin_client.rs
+index 0000000..0000000 100644
+--- a/crates/cdk-integration-tests/src/ln_regtest/bitcoin_client.rs
++++ b/crates/cdk-integration-tests/src/ln_regtest/bitcoin_client.rs
+@@ -65,11 +65,16 @@ impl BitcoinClient {
+     /// Generate blocks
+     pub fn generate_blocks(&self, address: &str, block_count: u64) -> Result<()> {
+         let client = &self.client;
+-
+-        client.generate_to_address(
+-            block_count,
+-            Address::from_str(address)?.assume_checked_ref(),
+-        )?;
++        let address = Address::from_str(address)?.assume_checked();
++        let mut remaining = block_count;
++        while remaining > 0 {
++            // On macOS the simple HTTP JSON-RPC transport can time out while
++            // Bitcoin Core is constructing a large regtest batch response.
++            // Batching preserves real mining while keeping each RPC bounded.
++            let batch = remaining.min(10);
++            client.generate_to_address(batch, &address)?;
++            remaining -= batch;
++        }
+ 
+         Ok(())
+     }
