@@ -148,7 +148,9 @@ fn bech32_expand(checksum: u32, value: u8, generators: &[u32; 5]) -> u32 {
 }
 
 fn parse_amount(hrp: &str) -> Result<Option<Amount>, LightningInvoiceError> {
-    let network = ["lnbc", "lntb", "lnbcrt", "lnsb"]
+    // `lnbcrt` has `lnbc` as a textual prefix, so match the more specific
+    // regtest HRP first.
+    let network = ["lnbcrt", "lnbc", "lntb", "lnsb"]
         .iter()
         .find(|prefix| hrp.starts_with(**prefix))
         .ok_or(LightningInvoiceError::InvalidFormat)?;
@@ -231,6 +233,13 @@ mod tests {
         let parsed = LightningInvoice::parse(&value.to_ascii_uppercase()).unwrap();
         assert_eq!(parsed.amount(), Some(Amount::from_sats(100_000)));
         assert_eq!(parsed.as_str(), value);
+    }
+
+    #[test]
+    fn parses_core_lightning_regtest_invoice() {
+        let invoice = "lnbcrt10u1p4255nrsp5q0j39t60cz5gkcttr0kuxd3z0784vyccgfhvrc7menf7sx5lwzpqpp5pqdlzczsy8swldt7yk27962dq6hgdhw2ktwmu3qxdkvfqwtlg5dsdqlg43kzumgf4jhx6pqg9gyjgrrdpjkx6cxqyjw5qcqp2rzjq2xklnvv0s8vzl0nym8v3fzxwas00d2x3xat6ye64dlt7ynql4du5qqq7yqqqqgqqqqqqqlgqqqqqqgq2q9qxpqysgq809aah09kj20ugtpxcldd578r9ycq48t86l9pmz6aer6szwf36uq82ayuhdwsew3pdx9n9pckmjcycjv2ncczheh95casn4eux337uqpx63st6";
+        let parsed = LightningInvoice::parse(invoice).expect("valid Core Lightning invoice");
+        assert_eq!(parsed.amount(), Some(Amount::from_sats(1_000)));
     }
 
     #[test]
