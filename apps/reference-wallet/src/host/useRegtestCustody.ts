@@ -15,6 +15,16 @@ type MintQuote = { quote: string; request: string; amount: number };
 const defaultMintUrl =
   process.env.EXPO_PUBLIC_REGTEST_MINT_URL ?? "http://127.0.0.1:8085";
 
+// Mint URLs are equal with or without a trailing slash, but IndexedDB keys are
+// not. Store proofs under one canonical key when the API returns a normalized
+// source such as `http://127.0.0.1:8085/`.
+function mintStorageKey(mintUrl: string) {
+  const parsed = new URL(mintUrl);
+  parsed.hash = "";
+  parsed.search = "";
+  return parsed.toString().replace(/\/+$/, "");
+}
+
 function asStored(proofs: Proof[]): StoredProof[] {
   return serializeProofs(proofs).map(
     (proof) => JSON.parse(proof) as StoredProof,
@@ -42,7 +52,9 @@ export function useRegtestCustody(enabled: boolean) {
   const refresh = useCallback(async () => {
     if (!enabled) return;
     const store = await RegtestStore.open();
-    const proofs = deserializeProofs(await store.proofs(mintUrl));
+    const proofs = deserializeProofs(
+      await store.proofs(mintStorageKey(mintUrl)),
+    );
     setBalance(sumProofs(proofs).toNumber());
   }, [enabled, mintUrl]);
 
@@ -82,8 +94,9 @@ export function useRegtestCustody(enabled: boolean) {
       const wallet = await walletAt(mintUrl);
       const minted = await wallet.mintProofsBolt11(quote.amount, quote.quote);
       const store = await RegtestStore.open();
-      const existing = deserializeProofs(await store.proofs(mintUrl));
-      await store.replaceProofs(mintUrl, asStored([...existing, ...minted]));
+      const storageKey = mintStorageKey(mintUrl);
+      const existing = deserializeProofs(await store.proofs(storageKey));
+      await store.replaceProofs(storageKey, asStored([...existing, ...minted]));
       setQuote(null);
       await refresh();
     } catch (reason) {
@@ -99,7 +112,8 @@ export function useRegtestCustody(enabled: boolean) {
       async meltBolt11({ mintUrl: sourceMintUrl, invoice, paymentId }) {
         const store = await RegtestStore.open();
         const wallet = await walletAt(sourceMintUrl);
-        const allProofs = deserializeProofs(await store.proofs(sourceMintUrl));
+        const storageKey = mintStorageKey(sourceMintUrl);
+        const allProofs = deserializeProofs(await store.proofs(storageKey));
         const quote = await wallet.createMeltQuoteBolt11(invoice);
         const required = quote.amount.add(quote.fee_reserve);
         const { keep, send } = await wallet.send(required, allProofs, {
@@ -111,7 +125,7 @@ export function useRegtestCustody(enabled: boolean) {
         // record is enough to recover NUT-08 change after a browser interruption.
         await store.savePending({
           paymentId,
-          mintUrl: sourceMintUrl,
+          mintUrl: storageKey,
           quote: quote.quote,
           inputs: asStored(send),
           retained: asStored(keep),
@@ -120,15 +134,12 @@ export function useRegtestCustody(enabled: boolean) {
           ),
           createdAt: Date.now(),
         });
-        await store.replaceProofs(sourceMintUrl, asStored(keep));
+        await store.replaceProofs(storageKey, asStored(keep));
 
         try {
           const result = await wallet.completeMelt(preview);
           const change = result.change;
-          await store.replaceProofs(
-            sourceMintUrl,
-            asStored([...keep, ...change]),
-          );
+          await store.replaceProofs(storageKey, asStored([...keep, ...change]));
           await store.clearPending(paymentId);
           const finalFeeSats = sumProofs(send)
             .subtract(sumProofs(change))
