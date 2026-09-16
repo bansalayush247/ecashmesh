@@ -671,6 +671,28 @@ function ReferenceWallet() {
                     }
                     value={sats(flow.receipt.fee.amount)}
                   />
+                  {!flow.receipt.simulated && (
+                    <>
+                      <Row
+                        label="Cashu input fee"
+                        value={sats(flow.receipt.inputFeeSats ?? 0)}
+                      />
+                      <Row
+                        label="NUT-05 fee reserve"
+                        value={sats(flow.receipt.feeReserveSats ?? 0)}
+                      />
+                      <Row
+                        label="Total source proofs used"
+                        value={sats(flow.receipt.totalRequiredSats ?? 0)}
+                      />
+                      {flow.receipt.destinationMintUrl && (
+                        <Row
+                          label="Destination mint"
+                          value={flow.receipt.destinationMintUrl}
+                        />
+                      )}
+                    </>
+                  )}
                   <Row label="Path" value={flow.receipt.path.join(" → ")} />
                   <Row label="Route ID" value={flow.receipt.route_id} />
                   <Row

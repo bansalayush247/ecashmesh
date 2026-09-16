@@ -10,7 +10,7 @@ use axum::{
     Json,
     extract::{State, rejection::JsonRejection},
 };
-use ecashmesh_cashu::KeysetFee;
+use ecashmesh_cashu::{CashuPaymentRequest, KeysetFee};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -30,11 +30,18 @@ struct RouteBinding {
 }
 
 #[derive(Clone)]
+enum PreparedDestination {
+    Lightning { invoice: String },
+    Cashu { mint_url: String },
+}
+
+#[derive(Clone)]
 struct EvaluationRecord {
     quote_id: String,
     amount: u64,
     expires_at: u64,
     routes: BTreeMap<String, RouteBinding>,
+    destination: PreparedDestination,
 }
 
 /// Keeps evaluated route bindings only. Proof material remains exclusively in
@@ -62,6 +69,18 @@ impl PaymentService {
         }
         let Some(live) = &response.live else {
             return;
+        };
+        let destination = match request.destination.kind.as_str() {
+            "lightning" => PreparedDestination::Lightning {
+                invoice: request.destination.value.clone(),
+            },
+            "cashu" => match CashuPaymentRequest::parse(&request.destination.value) {
+                Ok(payment_request) => PreparedDestination::Cashu {
+                    mint_url: payment_request.mint_url,
+                },
+                Err(_) => return,
+            },
+            _ => return,
         };
         let mut routes = BTreeMap::new();
         for route in std::iter::once(&response.recommended_route).chain(&response.alternatives) {
@@ -111,6 +130,7 @@ impl PaymentService {
                     amount: request.amount,
                     expires_at: response.expires_at_unix_seconds,
                     routes,
+                    destination,
                 },
             );
         }
@@ -124,6 +144,11 @@ impl PaymentService {
         }
         if !self.safety.execution_enabled {
             return Err(ApiError::payment_safety("Payment execution is disabled"));
+        }
+        if !self.safety.require_confirmation {
+            return Err(ApiError::payment_safety(
+                "Payment confirmation must be required for real payments",
+            ));
         }
         Ok(())
     }
@@ -180,6 +205,7 @@ impl PaymentService {
             status: "prepared",
             settled: false,
             source_mint_url: binding.source_mint_url.clone(),
+            destination: PaymentDestinationResponse::from(&evaluation.destination),
             failure_reason: None,
         })
     }
@@ -204,7 +230,35 @@ pub(super) struct PaymentResponse {
     status: &'static str,
     settled: bool,
     source_mint_url: String,
+    destination: PaymentDestinationResponse,
     failure_reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PaymentDestinationResponse {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invoice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mint_url: Option<String>,
+}
+
+impl From<&PreparedDestination> for PaymentDestinationResponse {
+    fn from(destination: &PreparedDestination) -> Self {
+        match destination {
+            PreparedDestination::Lightning { invoice } => Self {
+                kind: "lightning",
+                invoice: Some(invoice.clone()),
+                mint_url: None,
+            },
+            PreparedDestination::Cashu { mint_url } => Self {
+                kind: "cashu",
+                invoice: None,
+                mint_url: Some(mint_url.clone()),
+            },
+        }
+    }
 }
 
 const fn environment_code(environment: PaymentEnvironment) -> &'static str {

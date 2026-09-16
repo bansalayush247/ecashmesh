@@ -32,7 +32,7 @@ impl PaymentEnvironment {
     }
 
     pub const fn allows_execution(self) -> bool {
-        matches!(self, Self::Regtest | Self::Mainnet)
+        matches!(self, Self::Regtest)
     }
 }
 
@@ -41,6 +41,7 @@ pub struct PaymentSafetyConfig {
     pub environment: PaymentEnvironment,
     pub execution_enabled: bool,
     pub max_amount_sats: u64,
+    pub require_confirmation: bool,
 }
 
 impl PaymentSafetyConfig {
@@ -54,16 +55,26 @@ impl PaymentSafetyConfig {
             .unwrap_or_else(|_| "10000".to_owned())
             .parse::<u64>()
             .map_err(|_| "ECASHMESH_MAX_PAYMENT_SATS must be an integer".to_owned())?;
+        let require_confirmation = env::var("ECASHMESH_REQUIRE_PAYMENT_CONFIRMATION")
+            .unwrap_or_else(|_| "true".to_owned())
+            .parse::<bool>()
+            .map_err(|_| {
+                "ECASHMESH_REQUIRE_PAYMENT_CONFIRMATION must be true or false".to_owned()
+            })?;
         if execution_enabled && !environment.allows_execution() {
             return Err("Real payments require PAYMENT_ENVIRONMENT=regtest or mainnet".to_owned());
         }
         if max_amount_sats == 0 {
             return Err("ECASHMESH_MAX_PAYMENT_SATS must be greater than zero".to_owned());
         }
+        if execution_enabled && !require_confirmation {
+            return Err("Real payments require explicit confirmation".to_owned());
+        }
         Ok(Self {
             environment,
             execution_enabled,
             max_amount_sats,
+            require_confirmation,
         })
     }
 
@@ -129,11 +140,17 @@ mod tests {
     }
 
     #[test]
+    fn mainnet_cannot_use_the_regtest_executor() {
+        assert!(!PaymentEnvironment::Mainnet.allows_execution());
+    }
+
+    #[test]
     fn regtest_rejects_a_lookalike_host() {
         let config = PaymentSafetyConfig {
             environment: PaymentEnvironment::Regtest,
             execution_enabled: true,
             max_amount_sats: 10,
+            require_confirmation: true,
         };
         assert!(
             config

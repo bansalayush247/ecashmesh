@@ -19,6 +19,10 @@ type Receipt = {
   amount: number;
   asset: "BTC";
   fee: SimulationReceipt["fee"];
+  inputFeeSats?: number;
+  feeReserveSats?: number;
+  totalRequiredSats?: number;
+  destinationMintUrl?: string;
   path: string[];
   message: string;
 };
@@ -224,20 +228,22 @@ async function executeRegtestPayment(
     route.route_id,
     signal,
   );
-  if (payment.destination.type !== "lightning") {
-    throw new EcashMeshError(
-      "UNSUPPORTED_DESTINATION",
-      "Host custody can execute BOLT11 melts today. Cashu-to-Cashu settlement remains an explicit wallet transfer flow.",
-    );
-  }
   // The API binds the evaluated route to a regtest payment ID. The host then
   // executes directly against that selected mint; proof material never crosses
   // the EcashMesh API boundary.
-  const result = await custody.meltBolt11({
-    mintUrl: prepared.source_mint_url,
-    invoice: payment.destination.value,
-    paymentId: prepared.payment_id,
-  });
+  const result =
+    prepared.destination.type === "lightning"
+      ? await custody.meltBolt11({
+          mintUrl: prepared.source_mint_url,
+          invoice: prepared.destination.invoice,
+          paymentId: prepared.payment_id,
+        })
+      : await custody.meltToCashu({
+          sourceMintUrl: prepared.source_mint_url,
+          destinationMintUrl: prepared.destination.mint_url,
+          amountSats: prepared.amount_sats,
+          paymentId: prepared.payment_id,
+        });
   if (result.status !== "settled") {
     throw new EcashMeshError(
       "PAYMENT_PENDING",
@@ -260,8 +266,18 @@ async function executeRegtestPayment(
       fee_reserve_sats: prepared.fee_reserve_sats,
       estimate_kind: "reserve_estimate",
     },
+    inputFeeSats: result.inputFeeSats,
+    feeReserveSats: result.feeReserveSats,
+    totalRequiredSats: result.totalRequiredSats,
+    destinationMintUrl:
+      prepared.destination.type === "cashu"
+        ? prepared.destination.mint_url
+        : undefined,
     path: route.path,
-    message: "Real regtest Cashu melt settled by host-held proofs.",
+    message:
+      prepared.destination.type === "cashu"
+        ? "Real regtest Cashu transfer settled and destination proofs were claimed."
+        : "Real regtest Cashu melt settled by host-held proofs.",
   };
 }
 

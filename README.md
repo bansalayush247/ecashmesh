@@ -119,6 +119,7 @@ source /tmp/cdk_regtest_env
 PAYMENT_ENVIRONMENT=regtest \
 ECASHMESH_ENABLE_REAL_PAYMENTS=true \
 ECASHMESH_MAX_PAYMENT_SATS=10000 \
+ECASHMESH_REQUIRE_PAYMENT_CONFIRMATION=true \
 ROUTING_MODE=live \
 ECASHMESH_CASHU_MINTS="[{\"id\":\"cashu:mint-a\",\"url\":\"$CDK_TEST_MINT_URL\"},{\"id\":\"cashu:mint-b\",\"url\":\"$CDK_TEST_MINT_URL_2\"}]" \
 nix develop -c cargo run -p ecashmesh-api

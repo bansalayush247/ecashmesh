@@ -147,6 +147,10 @@ export const paymentPreparationSchema = z
     status: z.literal("prepared"),
     settled: z.literal(false),
     source_mint_url: z.string(),
+    destination: z.discriminatedUnion("type", [
+      z.object({ type: z.literal("lightning"), invoice: z.string().min(1) }),
+      z.object({ type: z.literal("cashu"), mint_url: z.string().url() }),
+    ]),
     failure_reason: z.string().nullable(),
   })
   .passthrough();
