@@ -92,7 +92,8 @@ clients are not subject to browser CORS.
    sources, confidence, observations, and raw response JSON.
 6. Choose the recommendation or an alternative. Pocket receives that route for
    its confirmation screen. Simulator mode shows **Confirm simulated payment**;
-   live mode shows **Confirm simulator-backed completion**.
+   live mode shows **Confirm real regtest payment** and requires a host custody
+   adapter with genuine Cashu proofs before it can settle.
 7. Read **Simulation complete**, then return to Pocket. No funds moved.
 
 Other checks:

@@ -562,16 +562,22 @@ function ReferenceWallet() {
                   <Risks flags={flow.selected.risk_flags} />
                   <Text style={styles.body}>
                     {flow.decision?.mode === "live"
-                      ? "This confirms a simulator-backed completion only. EcashMesh evaluated live mint data and unpaid quotes, but it will not send a real payment."
+                      ? "This is a real regtest Cashu melt. It can execute only when the host wallet supplies genuine selected proofs and blinded change outputs."
                       : "This host-wallet confirmation runs only the selected route in the local simulator. It does not send a real payment."}
                   </Text>
                   {flow.error && <ErrorNotice error={flow.error} />}
                   {flow.busy ? (
-                    <Loading label="Confirming with the simulator…" />
+                    <Loading
+                      label={
+                        flow.decision?.mode === "live"
+                          ? "Preparing real regtest payment…"
+                          : "Confirming with the simulator…"
+                      }
+                    />
                   ) : (
                     <Button onPress={() => void flow.confirm()}>
                       {flow.decision?.mode === "live"
-                        ? "Confirm simulator-backed completion"
+                        ? "Confirm real regtest payment"
                         : "Confirm simulated payment"}
                     </Button>
                   )}
