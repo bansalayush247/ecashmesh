@@ -288,6 +288,9 @@ function asError(error: unknown) {
         : [],
     );
   }
+  if (error instanceof Error && error.message) {
+    return new EcashMeshError("CUSTODY_ERROR", error.message);
+  }
   return new EcashMeshError(
     "API_ERROR",
     "An unexpected error occurred. Try again.",
