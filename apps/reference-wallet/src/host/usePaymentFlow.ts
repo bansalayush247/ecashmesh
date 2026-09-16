@@ -266,10 +266,30 @@ async function executeRegtestPayment(
 }
 
 function asError(error: unknown) {
-  return error instanceof EcashMeshError
-    ? error
-    : new EcashMeshError(
-        "API_ERROR",
-        "An unexpected error occurred. Try again.",
-      );
+  if (error instanceof EcashMeshError) return error;
+  // React Native web can preserve enumerable fields but drop the Error
+  // prototype. Keep the API's actionable error instead of replacing an
+  // expired evaluation with a generic failure.
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    "message" in error &&
+    typeof error.code === "string" &&
+    typeof error.message === "string"
+  ) {
+    return new EcashMeshError(
+      error.code,
+      error.message,
+      "details" in error && Array.isArray(error.details)
+        ? error.details.filter(
+            (detail): detail is string => typeof detail === "string",
+          )
+        : [],
+    );
+  }
+  return new EcashMeshError(
+    "API_ERROR",
+    "An unexpected error occurred. Try again.",
+  );
 }

@@ -598,7 +598,16 @@ function ReferenceWallet() {
                         : "Enable the opt-in regtest custody wallet before confirming a real payment."
                       : "This host-wallet confirmation runs only the selected route in the local simulator. It does not send a real payment."}
                   </Text>
-                  {flow.error && <ErrorNotice error={flow.error} />}
+                  {flow.error && (
+                    <>
+                      <ErrorNotice error={flow.error} />
+                      {flow.error.details.includes("quote_id") && (
+                        <Button secondary onPress={() => void flow.evaluate()}>
+                          Re-evaluate route
+                        </Button>
+                      )}
+                    </>
+                  )}
                   {flow.busy ? (
                     <Loading
                       label={
