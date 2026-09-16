@@ -43,6 +43,14 @@ const simulator = createSimulatorClient({ baseUrl });
 const routingMode: RoutingMode =
   process.env.EXPO_PUBLIC_ROUTING_MODE === "simulator" ? "simulator" : "live";
 
+function compactDestination(value: string) {
+  const start = 18;
+  const end = 12;
+  return value.length > start + end + 1
+    ? `${value.slice(0, start)}…${value.slice(-end)}`
+    : value;
+}
+
 export default function App() {
   return (
     <SafeAreaProvider>
@@ -552,7 +560,7 @@ function ReferenceWallet() {
                     />
                     <Row
                       label="Destination"
-                      value={flow.payment.destination.value}
+                      value={compactDestination(flow.payment.destination.value)}
                     />
                     <Row
                       label="Selected route ID"
@@ -604,7 +612,9 @@ function ReferenceWallet() {
                 </View>
                 <Text style={local.testEyebrow}>
                   Pocket /{" "}
-                  {flow.receipt.simulated ? "Simulator result" : "Regtest settlement"}
+                  {flow.receipt.simulated
+                    ? "Simulator result"
+                    : "Regtest settlement"}
                 </Text>
                 <Heading
                   eyebrow={
@@ -612,19 +622,27 @@ function ReferenceWallet() {
                       ? "Simulator-backed success"
                       : "Real regtest payment settled"
                   }
-                  title={flow.receipt.simulated ? "Simulation complete" : "Payment complete"}
+                  title={
+                    flow.receipt.simulated
+                      ? "Simulation complete"
+                      : "Payment complete"
+                  }
                 >
                   {flow.receipt.message}
                 </Heading>
                 <Surface>
                   <Row
-                    label={flow.receipt.simulated ? "Simulated fee" : "Final fee"}
+                    label={
+                      flow.receipt.simulated ? "Simulated fee" : "Final fee"
+                    }
                     value={sats(flow.receipt.fee.amount)}
                   />
                   <Row label="Path" value={flow.receipt.path.join(" → ")} />
                   <Row label="Route ID" value={flow.receipt.route_id} />
                   <Row
-                    label={flow.receipt.simulated ? "Simulation ID" : "Payment ID"}
+                    label={
+                      flow.receipt.simulated ? "Simulation ID" : "Payment ID"
+                    }
                     value={flow.receipt.simulation_id}
                   />
                 </Surface>
