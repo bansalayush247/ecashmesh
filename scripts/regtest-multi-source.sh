@@ -9,6 +9,12 @@ state="$root/.regtest"
 env_file="$state/ecashmesh-regtest.env"
 api_pid_file="$state/ecashmesh-api.pid"
 api_log="$state/ecashmesh-api.log"
+amount="${1:-1000}"
+
+if ! [[ "$amount" =~ ^[1-9][0-9]*$ ]]; then
+  echo "amount must be a positive integer sats value" >&2
+  exit 1
+fi
 
 if [[ ! -f "$env_file" ]]; then
   echo "Missing $env_file. Start the real CDK regtest first with ./scripts/regtest-up.sh" >&2
@@ -53,14 +59,40 @@ if ! curl --fail --silent --max-time 3 http://127.0.0.1:5000/health >/dev/null; 
 fi
 
 echo "EcashMesh multi-source regtest API is ready."
-echo "source A:   $ECASHMESH_REGTEST_MINT_A_URL"
-echo "source B:   $ECASHMESH_REGTEST_MINT_B_URL"
+echo "source A:    $ECASHMESH_REGTEST_MINT_A_URL"
+echo "source B:    $ECASHMESH_REGTEST_MINT_B_URL"
 echo "destination: $ECASHMESH_REGTEST_DESTINATION_MINT_URL"
+echo "amount:      $amount sats"
 echo
 echo "Connector catalog:"
-curl --fail --silent 'http://127.0.0.1:5000/v1/connectors?amount=1000' | jq '{evaluated_amount_sats, observations: [.observations[] | {connector,mint_url,health,minting,melting}]}'
+curl --fail --silent 'http://127.0.0.1:5000/v1/connectors?amount=1000' \
+  | jq '{evaluated_amount_sats, observations: [.observations[] | {connector,mint_url,health,minting,melting}]}'
 echo
-echo "For route evaluation, pass a real BOLT11 invoice or Cashu NUT-18/cashu://request destination issued by the destination mint."
-echo "The API is configured with BOTH independent source mints, so top_k can return both executable source-mint candidates when both can quote the same payment."
+
+echo "Requesting a real NUT-04 destination invoice from the destination mint..."
+destination_quote="$(curl --fail --silent \
+  -H 'content-type: application/json' \
+  -d "{\"amount\":$amount,\"unit\":\"sat\"}" \
+  "$ECASHMESH_REGTEST_DESTINATION_MINT_URL/v1/mint/quote/bolt11")"
+invoice="$(jq -er '.request' <<<"$destination_quote")"
+quote_id="$(jq -er '.quote' <<<"$destination_quote")"
+
+echo "destination quote: $quote_id"
+echo "invoice: $invoice"
 echo
+
+echo "Evaluating BOTH independent source-mint routes against that invoice..."
+evaluation="$(jq -n \
+  --arg invoice "$invoice" \
+  --argjson amount "$amount" \
+  '{amount:$amount,asset:"BTC",destination:{type:"lightning",value:$invoice},payment_intent:"send",candidate_connectors:["cashu:source-a","cashu:source-b"]}' \
+  | curl --fail --silent \
+      -H 'content-type: application/json' \
+      -d @- \
+      http://127.0.0.1:5000/v1/routes/evaluate)"
+
+jq '{recommended_route: {connector: .recommended_route.connector, route_id: .recommended_route.route_id, fee: .recommended_route.fee}, alternatives: [.alternatives[] | {connector,route_id,fee}], graph: .live.graph}' <<<"$evaluation"
+
+echo
+echo "This checks route discovery/ranking only. Real Cashu proof custody and NUT-05 settlement remain a separate execution step."
 echo "API log: $api_log"
