@@ -703,6 +703,7 @@ function RegtestCustodyCard({
   amount: string;
   setAmount: (value: string) => void;
 }) {
+  const [copied, setCopied] = useState(false);
   if (routingMode !== "live") return null;
   if (!custody.enabled) {
     return (
@@ -760,6 +761,16 @@ function RegtestCustodyCard({
           <Text selectable style={styles.code}>
             {compactDestination(custody.quote.request)}
           </Text>
+          <Button
+            secondary
+            onPress={() =>
+              void navigator.clipboard
+                .writeText(custody.quote!.request)
+                .then(() => setCopied(true))
+            }
+          >
+            {copied ? "Invoice copied" : "Copy full invoice"}
+          </Button>
           <Button
             disabled={custody.loading}
             onPress={() => void custody.claimMint()}
