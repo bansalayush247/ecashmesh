@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BackHandler,
   KeyboardAvoidingView,
@@ -14,6 +14,7 @@ import {
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { createEcashMeshClient } from "./src/ecashmesh/client";
 import { createSimulatorClient } from "./src/host/simulator";
+import { useRegtestCustody } from "./src/host/useRegtestCustody";
 import { usePaymentFlow, type RoutingMode } from "./src/host/usePaymentFlow";
 import {
   Button,
@@ -42,6 +43,8 @@ const ecashmesh = createEcashMeshClient({ baseUrl });
 const simulator = createSimulatorClient({ baseUrl });
 const routingMode: RoutingMode =
   process.env.EXPO_PUBLIC_ROUTING_MODE === "simulator" ? "simulator" : "live";
+const regtestCustodyEnabled =
+  process.env.EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY === "true";
 
 function compactDestination(value: string) {
   const start = 18;
@@ -156,7 +159,16 @@ function BottomNav() {
 }
 
 function ReferenceWallet() {
-  const flow = usePaymentFlow(ecashmesh, simulator, routingMode);
+  const regtest = useRegtestCustody(
+    routingMode === "live" && regtestCustodyEnabled,
+  );
+  const flow = usePaymentFlow(
+    ecashmesh,
+    simulator,
+    routingMode,
+    regtest.custody,
+  );
+  const [fundAmount, setFundAmount] = useState("1000");
   const scroll = useRef<ScrollView>(null);
   useEffect(() => {
     scroll.current?.scrollTo({ y: 0, animated: false });
@@ -197,9 +209,20 @@ function ReferenceWallet() {
                 </View>
                 <View style={local.balanceCard}>
                   <Text style={local.balanceLabel}>Total Balance ◉</Text>
-                  <Text style={local.balance}>1,234,567 sats</Text>
-                  <Text style={local.balanceFiat}>≈ $742.11</Text>
+                  <Text style={local.balance}>
+                    {regtest.enabled
+                      ? `${regtest.balance.toLocaleString("en-US")} sats`
+                      : "1,234,567 sats"}
+                  </Text>
+                  <Text style={local.balanceFiat}>
+                    {regtest.enabled ? "Regtest Cashu balance" : "≈ $742.11"}
+                  </Text>
                 </View>
+                <RegtestCustodyCard
+                  custody={regtest}
+                  amount={fundAmount}
+                  setAmount={setFundAmount}
+                />
                 <View style={local.quickActions}>
                   {[
                     ["↑", "Send"],
@@ -570,7 +593,9 @@ function ReferenceWallet() {
                   <Risks flags={flow.selected.risk_flags} />
                   <Text style={styles.body}>
                     {flow.decision?.mode === "live"
-                      ? "This is a real regtest Cashu melt. It can execute only when the host wallet supplies genuine selected proofs and blinded change outputs."
+                      ? regtest.enabled
+                        ? "This browser holds the selected regtest Cashu proofs and NUT-08 change outputs locally. EcashMesh receives no proof secrets."
+                        : "Enable the opt-in regtest custody wallet before confirming a real payment."
                       : "This host-wallet confirmation runs only the selected route in the local simulator. It does not send a real payment."}
                   </Text>
                   {flow.error && <ErrorNotice error={flow.error} />}
@@ -666,6 +691,92 @@ function ReferenceWallet() {
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
+  );
+}
+
+function RegtestCustodyCard({
+  custody,
+  amount,
+  setAmount,
+}: {
+  custody: ReturnType<typeof useRegtestCustody>;
+  amount: string;
+  setAmount: (value: string) => void;
+}) {
+  if (routingMode !== "live") return null;
+  if (!custody.enabled) {
+    return (
+      <Surface>
+        <Text style={local.custodyTitle}>Regtest Cashu custody</Text>
+        <Text style={styles.small}>
+          Disabled. Start the web app with
+          EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY=true to hold local regtest proofs.
+        </Text>
+      </Surface>
+    );
+  }
+  const requested = Number(amount);
+  return (
+    <Surface>
+      <Text style={local.custodyTitle}>Regtest Cashu custody</Text>
+      <Text style={styles.small}>
+        Proofs stay in this browser’s IndexedDB. Use only with disposable
+        regtest funds.
+      </Text>
+      <Text style={local.fieldLabel}>Mint URL</Text>
+      <TextInput
+        accessibilityLabel="Regtest custody mint URL"
+        value={custody.mintUrl}
+        onChangeText={custody.setMintUrl}
+        autoCapitalize="none"
+        autoCorrect={false}
+        style={local.destinationInput}
+      />
+      <Row label="Available proofs" value={sats(custody.balance)} />
+      <Text style={local.fieldLabel}>Fund wallet</Text>
+      <View style={local.amountWrap}>
+        <TextInput
+          accessibilityLabel="Regtest funding amount in sats"
+          keyboardType="number-pad"
+          value={amount}
+          onChangeText={setAmount}
+          style={local.amountInput}
+        />
+        <Text style={local.satsSuffix}>sats</Text>
+      </View>
+      <Button
+        disabled={
+          custody.loading || !Number.isSafeInteger(requested) || requested <= 0
+        }
+        onPress={() => void custody.requestMint(requested)}
+      >
+        Create funding invoice
+      </Button>
+      {custody.quote && (
+        <View style={local.quoteBox}>
+          <Text style={styles.small}>
+            Pay this BOLT11 invoice from the local regtest node, then claim it.
+          </Text>
+          <Text selectable style={styles.code}>
+            {compactDestination(custody.quote.request)}
+          </Text>
+          <Button
+            disabled={custody.loading}
+            onPress={() => void custody.claimMint()}
+          >
+            {`Claim paid ${sats(custody.quote.amount)}`}
+          </Button>
+        </View>
+      )}
+      <Button
+        secondary
+        disabled={custody.loading}
+        onPress={() => void custody.refresh()}
+      >
+        Refresh balance
+      </Button>
+      {custody.error && <Text style={local.custodyError}>{custody.error}</Text>}
+    </Surface>
   );
 }
 
@@ -909,6 +1020,14 @@ const local = StyleSheet.create({
     backgroundColor: colors.blue,
   },
   powered: { color: colors.muted, fontSize: 11, textAlign: "center" },
+  custodyTitle: { color: colors.ink, fontSize: 16, fontWeight: "800" },
+  quoteBox: {
+    gap: 9,
+    borderRadius: 10,
+    backgroundColor: "#F3F7FE",
+    padding: 11,
+  },
+  custodyError: { color: colors.red, fontSize: 12, lineHeight: 17 },
   integrationLine: {
     flexDirection: "row",
     gap: 9,

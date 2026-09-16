@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import type { EcashMeshClient } from "../ecashmesh/client";
 import type {
   PaymentInput,
-  PaymentStatus,
   Route,
   RouteDecision,
 } from "../ecashmesh/contracts";
@@ -144,6 +143,7 @@ export function usePaymentFlow(
               regtestCustody,
               decision.quote_id,
               selected,
+              payment,
               controller.signal,
             );
       if (active.current !== controller) return;
@@ -210,6 +210,7 @@ async function executeRegtestPayment(
   custody: RegtestCustody | undefined,
   quoteId: string,
   route: Route,
+  payment: PaymentInput,
   signal: AbortSignal,
 ): Promise<Receipt> {
   if (!custody) {
@@ -218,44 +219,49 @@ async function executeRegtestPayment(
       "This host has no regtest Cashu custody adapter. It cannot create real proofs.",
     );
   }
-  const prepared = await ecashmesh.preparePayment(quoteId, route.route_id, signal);
-  const material = await custody.selectMeltInputs(
-    prepared.amount_sats + prepared.fee_reserve_sats,
-  );
-  const result = await ecashmesh.executePayment(
-    prepared.payment_id,
-    material.inputs,
-    material.outputs,
+  const prepared = await ecashmesh.preparePayment(
+    quoteId,
+    route.route_id,
     signal,
   );
-  if (!result.settled) {
+  if (payment.destination.type !== "lightning") {
     throw new EcashMeshError(
-      result.status === "pending" ? "PAYMENT_PENDING" : "PAYMENT_FAILED",
-      result.failure_reason ?? `Real regtest payment is ${result.status}.`,
+      "UNSUPPORTED_DESTINATION",
+      "Host custody can execute BOLT11 melts today. Cashu-to-Cashu settlement remains an explicit wallet transfer flow.",
     );
   }
-  return paymentReceipt(result, route);
-}
-
-function paymentReceipt(result: PaymentStatus, route: Route): Receipt {
+  // The API binds the evaluated route to a regtest payment ID. The host then
+  // executes directly against that selected mint; proof material never crosses
+  // the EcashMesh API boundary.
+  const result = await custody.meltBolt11({
+    mintUrl: prepared.source_mint_url,
+    invoice: payment.destination.value,
+    paymentId: prepared.payment_id,
+  });
+  if (result.status !== "settled") {
+    throw new EcashMeshError(
+      "PAYMENT_PENDING",
+      "The mint accepted the melt asynchronously. Its recovery record remains in this browser wallet.",
+    );
+  }
   return {
-    simulation_id: result.payment_id,
-    status: result.status,
+    simulation_id: prepared.payment_id,
+    status: "settled",
     simulated: false,
-    quote_id: result.quote_id,
-    route_id: result.route_id,
-    amount: result.amount_sats,
+    quote_id: prepared.quote_id,
+    route_id: prepared.route_id,
+    amount: prepared.amount_sats,
     asset: "BTC",
     fee: {
-      amount: result.final_fee_sats,
+      amount: result.finalFeeSats,
       asset: "sats",
       freshness: "fresh",
-      estimated_fee_sats: result.final_fee_sats,
-      fee_reserve_sats: result.fee_reserve_sats,
+      estimated_fee_sats: result.finalFeeSats,
+      fee_reserve_sats: prepared.fee_reserve_sats,
       estimate_kind: "reserve_estimate",
     },
     path: route.path,
-    message: "Real regtest Cashu melt settled.",
+    message: "Real regtest Cashu melt settled by host-held proofs.",
   };
 }
 
