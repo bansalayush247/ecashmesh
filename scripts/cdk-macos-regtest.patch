@@ -24,6 +24,28 @@ index 0000000..0000000 100644
  
          Ok(())
      }
+diff --git a/misc/interactive_regtest_mprocs.sh b/misc/interactive_regtest_mprocs.sh
+index 0000000..0000000 100644
+--- a/misc/interactive_regtest_mprocs.sh
++++ b/misc/interactive_regtest_mprocs.sh
+@@ -495,4 +495,13 @@
+-# Start mprocs with direct process management
+-echo "Starting mprocs..."
+-cd "$CDK_ITESTS_DIR"
+-mprocs --config "$MPROCS_CONFIG"
++# mprocs aborts on macOS when launched by a detached automation process, even
++# when given a pseudo-terminal.  Start the exact same mint commands directly;
++# the enclosing script remains alive and its existing EXIT trap still tears
++# down the real Bitcoin and Lightning topology.
++echo "Starting mint processes without mprocs (macOS detached mode)..."
++"$CDK_ITESTS_DIR/start_cln_mint.sh" >"$CDK_ITESTS_DIR/cln_mint.log" 2>&1 &
++CLN_MINT_PID=$!
++"$CDK_ITESTS_DIR/start_lnd_mint.sh" >"$CDK_ITESTS_DIR/lnd_mint.log" 2>&1 &
++LND_MINT_PID=$!
++"$CDK_ITESTS_DIR/start_ldk_node_mint.sh" >"$CDK_ITESTS_DIR/ldk_node_mint.log" 2>&1 &
++LDK_MINT_PID=$!
++echo "Mint PIDs: $CLN_MINT_PID $LND_MINT_PID $LDK_MINT_PID"
++wait "$CLN_MINT_PID" "$LND_MINT_PID" "$LDK_MINT_PID"
 diff --git a/crates/cdk-integration-tests/src/ln_regtest/cln.rs b/crates/cdk-integration-tests/src/ln_regtest/cln.rs
 index 0000000..0000000 100644
 --- a/crates/cdk-integration-tests/src/ln_regtest/cln.rs
