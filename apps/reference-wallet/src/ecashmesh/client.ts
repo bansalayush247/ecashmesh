@@ -1,4 +1,9 @@
-import { decisionSchema, paymentToWire, type PaymentInput } from "./contracts";
+import {
+  decisionSchema,
+  paymentPreparationSchema,
+  paymentToWire,
+  type PaymentInput,
+} from "./contracts";
 import { createTransport, type ClientOptions } from "./transport";
 
 /** Portable SDK boundary: no React Native imports, routing or wallet state. */
@@ -10,6 +15,14 @@ export function createEcashMeshClient(options: ClientOptions) {
         "/v1/routes/evaluate",
         paymentToWire(payment),
         decisionSchema,
+        signal,
+      );
+    },
+    preparePayment(quoteId: string, routeId: string, signal?: AbortSignal) {
+      return post(
+        "/v1/payments/prepare",
+        { quote_id: quoteId, route_id: routeId },
+        paymentPreparationSchema,
         signal,
       );
     },

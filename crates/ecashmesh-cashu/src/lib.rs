@@ -1,4 +1,4 @@
-//! Read-only Cashu NUT-06/NUT-02 observations. No wallet or payment operations.
+//! Cashu discovery and unpaid-quote transport.
 //!
 //! Transaction limits are not liquidity. Input fees are not a melt fee quote.
 //! HTTP reachability is not payment reliability or proof of reserves.

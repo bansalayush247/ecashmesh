@@ -6,7 +6,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, EvaluateRequest, FeeResponse, Provider, deterministic_id, evaluate_using};
+use super::{
+    ApiError, AppState, EvaluateRequest, FeeResponse, Provider, deterministic_id, evaluate_using,
+};
 
 #[derive(Deserialize)]
 pub(super) struct SimulationRequest {
@@ -30,49 +32,21 @@ pub(super) struct SimulationReceipt {
 }
 
 pub(super) async fn confirm(
-    State(provider): State<Provider>,
+    State(state): State<AppState>,
     request: Result<Json<SimulationRequest>, JsonRejection>,
 ) -> Result<Json<SimulationReceipt>, ApiError> {
     let Json(request) = request.map_err(|error| {
         ApiError::validation("Invalid simulator confirmation", vec![error.to_string()])
     })?;
     let amount = request.payment.amount;
-    if !matches!(provider, Provider::Simulator) {
-        request.payment.validate()?;
-        if request.quote_id.trim().is_empty() || request.route_id.trim().is_empty() {
-            return Err(ApiError::validation(
-                "Live simulator completion needs a quote and selected route",
-                vec!["quote_id".into(), "route_id".into()],
-            ));
-        }
-        return Ok(Json(SimulationReceipt {
-            simulation_id: deterministic_id(
-                "live_simulation",
-                &[request.quote_id.clone(), request.route_id.clone()],
-            ),
-            status: "simulated_success",
-            simulated: true,
-            quote_id: request.quote_id,
-            route_id: request.route_id,
-            amount,
-            asset: "BTC",
-            fee: FeeResponse {
-                amount: None,
-                asset: "sats",
-                freshness: "unknown",
-                estimated_fee_sats: None,
-                fee_reserve_sats: None,
-                fee_rate_basis_points: None,
-                estimate_kind: "unknown",
-                input_fee_schedule: None,
-            },
-            path: Vec::new(),
-            message: "Live route evaluation was confirmed in the host simulator. No funds moved.",
-        }));
+    if !matches!(state.provider, Provider::Simulator) {
+        return Err(ApiError::payment_safety(
+            "The simulator endpoint is unavailable for live or regtest routing; use /v1/payments/prepare and let the host wallet execute the melt directly.",
+        ));
     }
     // Reuse the same engine/fixture inputs. The host cannot supply a fabricated
     // route, fee, score, or success result. Alternative selections are allowed.
-    let Json(decision) = evaluate_using(&provider, Ok(Json(request.payment))).await?;
+    let Json(decision) = evaluate_using(&state.provider, Ok(Json(request.payment))).await?;
     if request.quote_id != decision.quote_id {
         return Err(ApiError::validation(
             "Quote does not match this simulated payment; evaluate again.",

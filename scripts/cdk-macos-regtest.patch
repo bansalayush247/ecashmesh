@@ -1,0 +1,62 @@
+diff --git a/crates/cdk-integration-tests/src/ln_regtest/bitcoin_client.rs b/crates/cdk-integration-tests/src/ln_regtest/bitcoin_client.rs
+index 0000000..0000000 100644
+--- a/crates/cdk-integration-tests/src/ln_regtest/bitcoin_client.rs
++++ b/crates/cdk-integration-tests/src/ln_regtest/bitcoin_client.rs
+@@ -65,11 +65,16 @@ impl BitcoinClient {
+     /// Generate blocks
+     pub fn generate_blocks(&self, address: &str, block_count: u64) -> Result<()> {
+         let client = &self.client;
+-
+-        client.generate_to_address(
+-            block_count,
+-            Address::from_str(address)?.assume_checked_ref(),
+-        )?;
++        let address = Address::from_str(address)?.assume_checked();
++        let mut remaining = block_count;
++        while remaining > 0 {
++            // On macOS the simple HTTP JSON-RPC transport can time out while
++            // Bitcoin Core is constructing a large regtest batch response.
++            // Batching preserves real mining while keeping each RPC bounded.
++            let batch = remaining.min(10);
++            client.generate_to_address(batch, &address)?;
++            remaining -= batch;
++        }
+ 
+         Ok(())
+     }
+diff --git a/misc/interactive_regtest_mprocs.sh b/misc/interactive_regtest_mprocs.sh
+index 0000000..0000000 100644
+--- a/misc/interactive_regtest_mprocs.sh
++++ b/misc/interactive_regtest_mprocs.sh
+@@ -495,4 +495,13 @@
+-# Start mprocs with direct process management
+-echo "Starting mprocs..."
+-cd "$CDK_ITESTS_DIR"
+-mprocs --config "$MPROCS_CONFIG"
++# mprocs aborts on macOS when launched by a detached automation process, even
++# when given a pseudo-terminal.  Start the exact same mint commands directly;
++# the enclosing script remains alive and its existing EXIT trap still tears
++# down the real Bitcoin and Lightning topology.
++echo "Starting mint processes without mprocs (macOS detached mode)..."
++"$CDK_ITESTS_DIR/start_cln_mint.sh" >"$CDK_ITESTS_DIR/cln_mint.log" 2>&1 &
++CLN_MINT_PID=$!
++"$CDK_ITESTS_DIR/start_lnd_mint.sh" >"$CDK_ITESTS_DIR/lnd_mint.log" 2>&1 &
++LND_MINT_PID=$!
++"$CDK_ITESTS_DIR/start_ldk_node_mint.sh" >"$CDK_ITESTS_DIR/ldk_node_mint.log" 2>&1 &
++LDK_MINT_PID=$!
++echo "Mint PIDs: $CLN_MINT_PID $LND_MINT_PID $LDK_MINT_PID"
++wait "$CLN_MINT_PID" "$LND_MINT_PID" "$LDK_MINT_PID"
+diff --git a/crates/cdk-integration-tests/src/ln_regtest/cln.rs b/crates/cdk-integration-tests/src/ln_regtest/cln.rs
+index 0000000..0000000 100644
+--- a/crates/cdk-integration-tests/src/ln_regtest/cln.rs
++++ b/crates/cdk-integration-tests/src/ln_regtest/cln.rs
+@@ -63,6 +63,8 @@ impl Clnd {
+         self.child = Some(child);
+ 
+         // Let clnd start up
+-        sleep(Duration::from_secs(5));
++        // The macOS Nix build can take longer to initialize the Unix RPC
++        // socket after bitcoind has just generated the bootstrap chain.
++        sleep(Duration::from_secs(20));
+ 
+         Ok(())

@@ -8,6 +8,20 @@ import type {
 import { EcashMeshError } from "../ecashmesh/transport";
 import { collectPayment } from "./payment";
 import type { SimulationReceipt, SimulatorClient } from "./simulator";
+import type { RegtestCustody } from "./regtestCustody";
+
+type Receipt = {
+  simulation_id: string;
+  status: string;
+  simulated: boolean;
+  quote_id: string;
+  route_id: string;
+  amount: number;
+  asset: "BTC";
+  fee: SimulationReceipt["fee"];
+  path: string[];
+  message: string;
+};
 
 export type Screen =
   "home" | "payment" | "decision" | "details" | "confirmation" | "success";
@@ -17,6 +31,7 @@ export function usePaymentFlow(
   ecashmesh: EcashMeshClient,
   simulator: SimulatorClient,
   mode: RoutingMode,
+  regtestCustody?: RegtestCustody,
 ) {
   const [screen, setScreen] = useState<Screen>("home");
   const [amount, setAmount] = useState("100000");
@@ -30,7 +45,7 @@ export function usePaymentFlow(
   const [payment, setPayment] = useState<PaymentInput | null>(null);
   const [decision, setDecision] = useState<RouteDecision | null>(null);
   const [selected, setSelected] = useState<Route | null>(null);
-  const [receipt, setReceipt] = useState<SimulationReceipt | null>(null);
+  const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [error, setError] = useState<EcashMeshError | null>(null);
   const [busy, setBusy] = useState(false);
   const active = useRef<AbortController | null>(null);
@@ -115,12 +130,22 @@ export function usePaymentFlow(
     setBusy(true);
     setError(null);
     try {
-      const result = await simulator.confirm(
-        payment,
-        decision.quote_id,
-        selected.route_id,
-        controller.signal,
-      );
+      const result =
+        mode === "simulator"
+          ? await simulator.confirm(
+              payment,
+              decision.quote_id,
+              selected.route_id,
+              controller.signal,
+            )
+          : await executeRegtestPayment(
+              ecashmesh,
+              regtestCustody,
+              decision.quote_id,
+              selected,
+              payment,
+              controller.signal,
+            );
       if (active.current !== controller) return;
       // Check receipt correlation only; feasibility and risk stay on the server.
       if (
@@ -180,11 +205,94 @@ export function usePaymentFlow(
   };
 }
 
+async function executeRegtestPayment(
+  ecashmesh: EcashMeshClient,
+  custody: RegtestCustody | undefined,
+  quoteId: string,
+  route: Route,
+  payment: PaymentInput,
+  signal: AbortSignal,
+): Promise<Receipt> {
+  if (!custody) {
+    throw new EcashMeshError(
+      "CUSTODY_UNAVAILABLE",
+      "This host has no regtest Cashu custody adapter. It cannot create real proofs.",
+    );
+  }
+  const prepared = await ecashmesh.preparePayment(
+    quoteId,
+    route.route_id,
+    signal,
+  );
+  if (payment.destination.type !== "lightning") {
+    throw new EcashMeshError(
+      "UNSUPPORTED_DESTINATION",
+      "Host custody can execute BOLT11 melts today. Cashu-to-Cashu settlement remains an explicit wallet transfer flow.",
+    );
+  }
+  // The API binds the evaluated route to a regtest payment ID. The host then
+  // executes directly against that selected mint; proof material never crosses
+  // the EcashMesh API boundary.
+  const result = await custody.meltBolt11({
+    mintUrl: prepared.source_mint_url,
+    invoice: payment.destination.value,
+    paymentId: prepared.payment_id,
+  });
+  if (result.status !== "settled") {
+    throw new EcashMeshError(
+      "PAYMENT_PENDING",
+      "The mint accepted the melt asynchronously. Its recovery record remains in this browser wallet.",
+    );
+  }
+  return {
+    simulation_id: prepared.payment_id,
+    status: "settled",
+    simulated: false,
+    quote_id: prepared.quote_id,
+    route_id: prepared.route_id,
+    amount: prepared.amount_sats,
+    asset: "BTC",
+    fee: {
+      amount: result.finalFeeSats,
+      asset: "sats",
+      freshness: "fresh",
+      estimated_fee_sats: result.finalFeeSats,
+      fee_reserve_sats: prepared.fee_reserve_sats,
+      estimate_kind: "reserve_estimate",
+    },
+    path: route.path,
+    message: "Real regtest Cashu melt settled by host-held proofs.",
+  };
+}
+
 function asError(error: unknown) {
-  return error instanceof EcashMeshError
-    ? error
-    : new EcashMeshError(
-        "API_ERROR",
-        "An unexpected error occurred. Try again.",
-      );
+  if (error instanceof EcashMeshError) return error;
+  // React Native web can preserve enumerable fields but drop the Error
+  // prototype. Keep the API's actionable error instead of replacing an
+  // expired evaluation with a generic failure.
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    "message" in error &&
+    typeof error.code === "string" &&
+    typeof error.message === "string"
+  ) {
+    return new EcashMeshError(
+      error.code,
+      error.message,
+      "details" in error && Array.isArray(error.details)
+        ? error.details.filter(
+            (detail): detail is string => typeof detail === "string",
+          )
+        : [],
+    );
+  }
+  if (error instanceof Error && error.message) {
+    return new EcashMeshError("CUSTODY_ERROR", error.message);
+  }
+  return new EcashMeshError(
+    "API_ERROR",
+    "An unexpected error occurred. Try again.",
+  );
 }

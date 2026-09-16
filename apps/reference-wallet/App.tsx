@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BackHandler,
   KeyboardAvoidingView,
@@ -14,6 +14,7 @@ import {
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { createEcashMeshClient } from "./src/ecashmesh/client";
 import { createSimulatorClient } from "./src/host/simulator";
+import { useRegtestCustody } from "./src/host/useRegtestCustody";
 import { usePaymentFlow, type RoutingMode } from "./src/host/usePaymentFlow";
 import {
   Button,
@@ -42,6 +43,16 @@ const ecashmesh = createEcashMeshClient({ baseUrl });
 const simulator = createSimulatorClient({ baseUrl });
 const routingMode: RoutingMode =
   process.env.EXPO_PUBLIC_ROUTING_MODE === "simulator" ? "simulator" : "live";
+const regtestCustodyEnabled =
+  process.env.EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY === "true";
+
+function compactDestination(value: string) {
+  const start = 18;
+  const end = 12;
+  return value.length > start + end + 1
+    ? `${value.slice(0, start)}…${value.slice(-end)}`
+    : value;
+}
 
 export default function App() {
   return (
@@ -148,7 +159,16 @@ function BottomNav() {
 }
 
 function ReferenceWallet() {
-  const flow = usePaymentFlow(ecashmesh, simulator, routingMode);
+  const regtest = useRegtestCustody(
+    routingMode === "live" && regtestCustodyEnabled,
+  );
+  const flow = usePaymentFlow(
+    ecashmesh,
+    simulator,
+    routingMode,
+    regtest.custody,
+  );
+  const [fundAmount, setFundAmount] = useState("1000");
   const scroll = useRef<ScrollView>(null);
   useEffect(() => {
     scroll.current?.scrollTo({ y: 0, animated: false });
@@ -189,9 +209,20 @@ function ReferenceWallet() {
                 </View>
                 <View style={local.balanceCard}>
                   <Text style={local.balanceLabel}>Total Balance ◉</Text>
-                  <Text style={local.balance}>1,234,567 sats</Text>
-                  <Text style={local.balanceFiat}>≈ $742.11</Text>
+                  <Text style={local.balance}>
+                    {regtest.enabled
+                      ? `${regtest.balance.toLocaleString("en-US")} sats`
+                      : "1,234,567 sats"}
+                  </Text>
+                  <Text style={local.balanceFiat}>
+                    {regtest.enabled ? "Regtest Cashu balance" : "≈ $742.11"}
+                  </Text>
                 </View>
+                <RegtestCustodyCard
+                  custody={regtest}
+                  amount={fundAmount}
+                  setAmount={setFundAmount}
+                />
                 <View style={local.quickActions}>
                   {[
                     ["↑", "Send"],
@@ -552,7 +583,7 @@ function ReferenceWallet() {
                     />
                     <Row
                       label="Destination"
-                      value={flow.payment.destination.value}
+                      value={compactDestination(flow.payment.destination.value)}
                     />
                     <Row
                       label="Selected route ID"
@@ -562,16 +593,33 @@ function ReferenceWallet() {
                   <Risks flags={flow.selected.risk_flags} />
                   <Text style={styles.body}>
                     {flow.decision?.mode === "live"
-                      ? "This confirms a simulator-backed completion only. EcashMesh evaluated live mint data and unpaid quotes, but it will not send a real payment."
+                      ? regtest.enabled
+                        ? "This browser holds the selected regtest Cashu proofs and NUT-08 change outputs locally. EcashMesh receives no proof secrets."
+                        : "Enable the opt-in regtest custody wallet before confirming a real payment."
                       : "This host-wallet confirmation runs only the selected route in the local simulator. It does not send a real payment."}
                   </Text>
-                  {flow.error && <ErrorNotice error={flow.error} />}
+                  {flow.error && (
+                    <>
+                      <ErrorNotice error={flow.error} />
+                      {flow.error.details.includes("quote_id") && (
+                        <Button secondary onPress={() => void flow.evaluate()}>
+                          Re-evaluate route
+                        </Button>
+                      )}
+                    </>
+                  )}
                   {flow.busy ? (
-                    <Loading label="Confirming with the simulator…" />
+                    <Loading
+                      label={
+                        flow.decision?.mode === "live"
+                          ? "Preparing real regtest payment…"
+                          : "Confirming with the simulator…"
+                      }
+                    />
                   ) : (
                     <Button onPress={() => void flow.confirm()}>
                       {flow.decision?.mode === "live"
-                        ? "Confirm simulator-backed completion"
+                        ? "Confirm real regtest payment"
                         : "Confirm simulated payment"}
                     </Button>
                   )}
@@ -598,35 +646,44 @@ function ReferenceWallet() {
                 </View>
                 <Text style={local.testEyebrow}>
                   Pocket /{" "}
-                  {flow.decision?.mode === "live"
-                    ? "Live evaluation simulation"
-                    : "Simulator result"}
+                  {flow.receipt.simulated
+                    ? "Simulator result"
+                    : "Regtest settlement"}
                 </Text>
                 <Heading
                   eyebrow={
-                    flow.decision?.mode === "live"
-                      ? "Simulator-backed live evaluation"
-                      : "Simulator-backed success"
+                    flow.receipt.simulated
+                      ? "Simulator-backed success"
+                      : "Real regtest payment settled"
                   }
-                  title="Simulation complete"
+                  title={
+                    flow.receipt.simulated
+                      ? "Simulation complete"
+                      : "Payment complete"
+                  }
                 >
                   {flow.receipt.message}
                 </Heading>
                 <Surface>
                   <Row
-                    label="Simulated fee"
+                    label={
+                      flow.receipt.simulated ? "Simulated fee" : "Final fee"
+                    }
                     value={sats(flow.receipt.fee.amount)}
                   />
                   <Row label="Path" value={flow.receipt.path.join(" → ")} />
                   <Row label="Route ID" value={flow.receipt.route_id} />
                   <Row
-                    label="Simulation ID"
+                    label={
+                      flow.receipt.simulated ? "Simulation ID" : "Payment ID"
+                    }
                     value={flow.receipt.simulation_id}
                   />
                 </Surface>
                 <Text style={styles.small}>
-                  This result is returned by the simulator. Nothing is stored as
-                  a transaction and no real payment was executed.
+                  {flow.receipt.simulated
+                    ? "This result is returned by the simulator. No real payment was executed."
+                    : "This result was reported settled by the regtest Cashu mint."}
                 </Text>
                 <Button secondary onPress={flow.home}>
                   Return to Pocket
@@ -643,6 +700,103 @@ function ReferenceWallet() {
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
+  );
+}
+
+function RegtestCustodyCard({
+  custody,
+  amount,
+  setAmount,
+}: {
+  custody: ReturnType<typeof useRegtestCustody>;
+  amount: string;
+  setAmount: (value: string) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  if (routingMode !== "live") return null;
+  if (!custody.enabled) {
+    return (
+      <Surface>
+        <Text style={local.custodyTitle}>Regtest Cashu custody</Text>
+        <Text style={styles.small}>
+          Disabled. Start the web app with
+          EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY=true to hold local regtest proofs.
+        </Text>
+      </Surface>
+    );
+  }
+  const requested = Number(amount);
+  return (
+    <Surface>
+      <Text style={local.custodyTitle}>Regtest Cashu custody</Text>
+      <Text style={styles.small}>
+        Proofs stay in this browser’s IndexedDB. Use only with disposable
+        regtest funds.
+      </Text>
+      <Text style={local.fieldLabel}>Mint URL</Text>
+      <TextInput
+        accessibilityLabel="Regtest custody mint URL"
+        value={custody.mintUrl}
+        onChangeText={custody.setMintUrl}
+        autoCapitalize="none"
+        autoCorrect={false}
+        style={local.destinationInput}
+      />
+      <Row label="Available proofs" value={sats(custody.balance)} />
+      <Text style={local.fieldLabel}>Fund wallet</Text>
+      <View style={local.amountWrap}>
+        <TextInput
+          accessibilityLabel="Regtest funding amount in sats"
+          keyboardType="number-pad"
+          value={amount}
+          onChangeText={setAmount}
+          style={local.amountInput}
+        />
+        <Text style={local.satsSuffix}>sats</Text>
+      </View>
+      <Button
+        disabled={
+          custody.loading || !Number.isSafeInteger(requested) || requested <= 0
+        }
+        onPress={() => void custody.requestMint(requested)}
+      >
+        Create funding invoice
+      </Button>
+      {custody.quote && (
+        <View style={local.quoteBox}>
+          <Text style={styles.small}>
+            Pay this BOLT11 invoice from the local regtest node, then claim it.
+          </Text>
+          <Text selectable style={styles.code}>
+            {compactDestination(custody.quote.request)}
+          </Text>
+          <Button
+            secondary
+            onPress={() =>
+              void navigator.clipboard
+                .writeText(custody.quote!.request)
+                .then(() => setCopied(true))
+            }
+          >
+            {copied ? "Invoice copied" : "Copy full invoice"}
+          </Button>
+          <Button
+            disabled={custody.loading}
+            onPress={() => void custody.claimMint()}
+          >
+            {`Claim paid ${sats(custody.quote.amount)}`}
+          </Button>
+        </View>
+      )}
+      <Button
+        secondary
+        disabled={custody.loading}
+        onPress={() => void custody.refresh()}
+      >
+        Refresh balance
+      </Button>
+      {custody.error && <Text style={local.custodyError}>{custody.error}</Text>}
+    </Surface>
   );
 }
 
@@ -886,6 +1040,14 @@ const local = StyleSheet.create({
     backgroundColor: colors.blue,
   },
   powered: { color: colors.muted, fontSize: 11, textAlign: "center" },
+  custodyTitle: { color: colors.ink, fontSize: 16, fontWeight: "800" },
+  quoteBox: {
+    gap: 9,
+    borderRadius: 10,
+    backgroundColor: "#F3F7FE",
+    padding: 11,
+  },
+  custodyError: { color: colors.red, fontSize: 12, lineHeight: 17 },
   integrationLine: {
     flexDirection: "row",
     gap: 9,

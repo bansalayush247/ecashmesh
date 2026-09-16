@@ -58,9 +58,13 @@ fn cashu_public_observations_flow_through_the_core_ranker() {
         "payment": request(100_000), "quote_id": decision["quote_id"],
         "route_id": decision["recommended_route"]["route_id"]}),
     );
-    assert_eq!(status, 200);
-    assert_eq!(receipt["simulated"], true);
-    assert!(receipt["message"].to_string().contains("No funds moved"));
+    assert_eq!(status, 403);
+    assert_eq!(receipt["error"]["code"], "PAYMENT_SAFETY");
+    assert!(
+        receipt["error"]["message"]
+            .to_string()
+            .contains("unavailable")
+    );
 }
 
 #[test]

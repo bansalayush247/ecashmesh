@@ -234,8 +234,10 @@ dependencies = [
  "base64",
  "ecashmesh-cashu",
  "ecashmesh-core",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tower-http",
 ]

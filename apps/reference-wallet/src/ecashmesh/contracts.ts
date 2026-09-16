@@ -135,6 +135,23 @@ export type PaymentInput = {
   sourceMintUrl?: string;
 };
 
+export const paymentPreparationSchema = z
+  .object({
+    mode: z.literal("live"),
+    environment: z.enum(["regtest", "mainnet"]),
+    payment_id: z.string().min(1),
+    quote_id: z.string().min(1),
+    route_id: z.string().min(1),
+    amount_sats: unsigned,
+    fee_reserve_sats: unsigned,
+    status: z.literal("prepared"),
+    settled: z.literal(false),
+    source_mint_url: z.string(),
+    failure_reason: z.string().nullable(),
+  })
+  .passthrough();
+export type PaymentPreparation = z.infer<typeof paymentPreparationSchema>;
+
 export function paymentToWire(payment: PaymentInput) {
   return {
     amount: payment.amount,

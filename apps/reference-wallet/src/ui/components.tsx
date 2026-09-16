@@ -242,7 +242,9 @@ export const styles = StyleSheet.create({
   rowLabel: { flex: 1, fontSize: 13, lineHeight: 19, color: colors.muted },
   rowValue: {
     flex: 1.25,
+    flexBasis: 0,
     flexShrink: 1,
+    minWidth: 0,
     fontSize: 13,
     lineHeight: 19,
     fontWeight: "700",

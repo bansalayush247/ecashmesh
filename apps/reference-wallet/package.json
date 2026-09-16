@@ -16,6 +16,7 @@
     "export:web": "expo export --platform web"
   },
   "dependencies": {
+    "@cashu/cashu-ts": "^4.10.2",
     "expo": "~57.0.22",
     "react": "19.2.3",
     "react-dom": "19.2.3",

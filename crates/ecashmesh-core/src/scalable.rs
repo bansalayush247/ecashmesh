@@ -1920,7 +1920,10 @@ fn cheap_search(
             if labels
                 .iter()
                 .copied()
-                .any(|existing| existing.dominates(cost) || existing == cost)
+                // Equal-cost labels can carry distinct connector paths. Keep
+                // them (within the existing Pareto bound) so independent
+                // sources with identical quotes remain selectable routes.
+                .any(|existing| existing.dominates(cost))
             {
                 metrics.pareto_pruned = metrics.pareto_pruned.saturating_add(1);
                 continue;
@@ -2768,6 +2771,46 @@ mod tests {
         );
         assert!(second.metrics.cache_hit);
         assert!(second.ranking.ranked.len() <= 3);
+    }
+
+    #[test]
+    fn equal_cost_paths_from_distinct_sources_remain_alternatives() {
+        let (details, _) = registry_and_snapshot();
+        let nodes = details
+            .connectors
+            .iter()
+            .map(|record| GraphNode::new(record.connector_type, record.capabilities, record.health))
+            .collect();
+        let mut builder = GraphBuilder::new(nodes).registry_generation(details.generation());
+        builder.extend_edges([known_edge(0, 2, 20), known_edge(1, 2, 20)]);
+        let snapshot = builder.build(2).expect("graph");
+        let request = RouteSearchRequest {
+            amount: Amount::from_sats(100_000),
+            sources: vec![
+                SearchEndpoint::Connector(CompactConnectorId::from_index(0)),
+                SearchEndpoint::Connector(CompactConnectorId::from_index(1)),
+            ],
+            destinations: vec![SearchEndpoint::Connector(CompactConnectorId::from_index(2))],
+            top_k: 3,
+        };
+
+        let (routes, _) =
+            cheap_search(&snapshot, &request, RouteSearchConfig::default()).expect("search");
+        assert_eq!(routes.len(), 2);
+        assert_eq!(
+            routes[0].path,
+            vec![
+                CompactConnectorId::from_index(0),
+                CompactConnectorId::from_index(2)
+            ]
+        );
+        assert_eq!(
+            routes[1].path,
+            vec![
+                CompactConnectorId::from_index(1),
+                CompactConnectorId::from_index(2)
+            ]
+        );
     }
 
     #[test]
