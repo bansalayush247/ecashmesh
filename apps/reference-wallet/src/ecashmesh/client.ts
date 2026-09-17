@@ -26,19 +26,6 @@ export function createEcashMeshClient(options: ClientOptions) {
         signal,
       );
     },
-    executePayment(
-      paymentId: string,
-      inputs: unknown[],
-      outputs: unknown[],
-      signal?: AbortSignal,
-    ) {
-      return post(
-        "/v1/payments/execute",
-        { payment_id: paymentId, confirmed: true, inputs, outputs },
-        paymentStatusSchema,
-        signal,
-      );
-    },
   };
 }
 export type EcashMeshClient = ReturnType<typeof createEcashMeshClient>;

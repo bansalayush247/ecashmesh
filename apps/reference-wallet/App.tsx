@@ -25,6 +25,7 @@ import {
   feeRate,
   feeReasonableness,
   Heading,
+  humanize,
   Loading,
   Row,
   sats,
@@ -250,7 +251,7 @@ function ReferenceWallet() {
                     </Text>
                     <Text style={local.promoTitle}>EcashMesh</Text>
                     <Text style={styles.small}>
-                      Find the best route across Cashu, Fedimint and Lightning.
+                      Choose the best payment source across Cashu, Fedimint and Lightning.
                     </Text>
                   </View>
                   <Text style={local.promoArrow}>›</Text>
@@ -333,7 +334,7 @@ function ReferenceWallet() {
                 >
                   <Text style={local.modeNoticeTitle}>
                     {flow.mode === "live"
-                      ? "Live route discovery"
+                      ? "Live source discovery"
                       : "Deterministic simulator"}
                   </Text>
                   <Text style={styles.small}>
@@ -432,7 +433,7 @@ function ReferenceWallet() {
                 <Section title="Payment Method">
                   <Choice
                     title="Use EcashMesh"
-                    copy="Find the best route automatically"
+                    copy="Compare available payment sources automatically"
                     icon="✦"
                     selected
                   />
@@ -453,7 +454,7 @@ function ReferenceWallet() {
                   />
                 </Section>
                 <Button onPress={() => void flow.evaluate()}>
-                  EcashMesh Smart Route
+                  EcashMesh Source Selection
                 </Button>
                 <Text style={local.powered}>
                   Powered by EcashMesh · {flow.mode}
@@ -471,23 +472,23 @@ function ReferenceWallet() {
                 <View style={local.integrationLine}>
                   <EcashMeshMark small />
                   <Text style={styles.small}>
-                    Smart Route · integrated into My Wallet
+                    Source selection · integrated into My Wallet
                   </Text>
                 </View>
                 <Heading
-                  eyebrow="Smart Route / Evaluation"
-                  title="Route Options"
+                  eyebrow="Source selection / Evaluation"
+                  title="Available sources"
                 >
                   {flow.payment
                     ? `${sats(flow.payment.amount)} · ${flow.payment.destination.type} · Send`
-                    : "Your payment routes"}
+                    : "Your available payment sources"}
                 </Heading>
                 {flow.busy && (
                   <Loading
                     label={
                       flow.mode === "live"
-                        ? "Discovering live quote-backed routes…"
-                        : "Evaluating simulated routes…"
+                        ? "Discovering live quote-backed sources…"
+                        : "Evaluating simulated sources…"
                     }
                   />
                 )}
@@ -516,10 +517,10 @@ function ReferenceWallet() {
 
             {flow.screen === "details" && flow.decision && flow.selected && (
               <>
-                <ScreenHeader title="Route Details" onBack={flow.back} />
+                <ScreenHeader title="Source Details" onBack={flow.back} />
                 <Heading
-                  eyebrow="Smart Route / Details"
-                  title="Understand the route."
+                  eyebrow="Source selection / Details"
+                  title="Understand this source."
                 />
                 <RouteDetails
                   key={flow.selected.route_id}
@@ -545,10 +546,14 @@ function ReferenceWallet() {
                             {flow.selected.connector}
                           </Text>
                           <Text style={styles.small}>
-                            ◈ Cashu · ϟ Lightning
+                            {flow.selected.protocol === "fedimint"
+                              ? "◉ Fedimint"
+                              : flow.selected.protocol === "lightning"
+                                ? "ϟ Lightning"
+                                : "◈ Cashu"}
                           </Text>
                           <Text style={styles.small}>
-                            ⌁ {flow.selected.path.length} hops
+                            Settlement: {humanize(flow.selected.settlement_mechanism ?? "adapter-declared")}
                           </Text>
                         </View>
                       </View>
@@ -586,7 +591,7 @@ function ReferenceWallet() {
                       value={compactDestination(flow.payment.destination.value)}
                     />
                     <Row
-                      label="Selected route ID"
+                      label="Selected source execution ID"
                       value={flow.selected.route_id}
                     />
                   </Surface>
@@ -596,14 +601,14 @@ function ReferenceWallet() {
                       ? regtest.enabled
                         ? "This browser holds the selected regtest Cashu proofs and NUT-08 change outputs locally. EcashMesh receives no proof secrets."
                         : "Enable the opt-in regtest custody wallet before confirming a real payment."
-                      : "This host-wallet confirmation runs only the selected route in the local simulator. It does not send a real payment."}
+                      : "This host-wallet confirmation runs only the selected source in the local simulator. It does not send a real payment."}
                   </Text>
                   {flow.error && (
                     <>
                       <ErrorNotice error={flow.error} />
                       {flow.error.details.includes("quote_id") && (
                         <Button secondary onPress={() => void flow.evaluate()}>
-                          Re-evaluate route
+                          Re-evaluate source
                         </Button>
                       )}
                     </>
@@ -671,8 +676,8 @@ function ReferenceWallet() {
                     }
                     value={sats(flow.receipt.fee.amount)}
                   />
-                  <Row label="Path" value={flow.receipt.path.join(" → ")} />
-                  <Row label="Route ID" value={flow.receipt.route_id} />
+                  <Row label="Settlement source" value={flow.receipt.path[0] ?? "unknown"} />
+                  <Row label="Execution ID" value={flow.receipt.route_id} />
                   <Row
                     label={
                       flow.receipt.simulated ? "Simulation ID" : "Payment ID"

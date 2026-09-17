@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { EcashMeshClient } from "../ecashmesh/client";
 import type {
   PaymentInput,
-  Route,
+  PaymentSource,
   RouteDecision,
 } from "../ecashmesh/contracts";
 import { EcashMeshError } from "../ecashmesh/transport";
@@ -44,7 +44,7 @@ export function usePaymentFlow(
   const [sourceMintUrl, setSourceMintUrl] = useState("");
   const [payment, setPayment] = useState<PaymentInput | null>(null);
   const [decision, setDecision] = useState<RouteDecision | null>(null);
-  const [selected, setSelected] = useState<Route | null>(null);
+  const [selected, setSelected] = useState<PaymentSource | null>(null);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [error, setError] = useState<EcashMeshError | null>(null);
   const [busy, setBusy] = useState(false);
@@ -113,11 +113,11 @@ export function usePaymentFlow(
     }
   }
 
-  function inspect(route: Route) {
+  function inspect(route: PaymentSource) {
     setSelected(route);
     setScreen("details");
   }
-  function select(route: Route) {
+  function select(route: PaymentSource) {
     setSelected(route);
     setError(null);
     setScreen("confirmation");
@@ -209,7 +209,7 @@ async function executeRegtestPayment(
   ecashmesh: EcashMeshClient,
   custody: RegtestCustody | undefined,
   quoteId: string,
-  route: Route,
+  route: PaymentSource,
   payment: PaymentInput,
   signal: AbortSignal,
 ): Promise<Receipt> {

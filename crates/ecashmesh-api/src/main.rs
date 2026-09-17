@@ -84,8 +84,6 @@ fn app(provider: Provider) -> Router {
         .route("/v1/connectors/discover", post(discover_connectors))
         .route("/v1/simulator/confirm", post(simulation::confirm))
         .route("/v1/payments/prepare", post(payment::prepare))
-        .route("/v1/payments/execute", post(payment::execute))
-        .route("/v1/payments/{payment_id}", get(payment::status))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -114,9 +112,9 @@ async fn index() -> Html<&'static str> {
     <p>The reference wallet integration is a separate React Native client.</p>
     <p>Run <code>npm run web</code> from <code>apps/reference-wallet</code>.</p>
     <p>Open <a href="http://localhost:8081">http://localhost:8081</a>.</p>
-    <p>Route evaluation: <code>POST /v1/routes/evaluate</code></p>
+    <p>Payment-source evaluation: <code>POST /v1/routes/evaluate</code></p>
     <p>Simulator confirmation: <code>POST /v1/simulator/confirm</code></p>
-    <p>Real payment lifecycle: <code>POST /v1/payments/prepare</code>, <code>POST /v1/payments/execute</code>, <code>GET /v1/payments/:id</code></p>
+    <p>Real payment preparation: <code>POST /v1/payments/prepare</code>. Wallet custody settles directly with the selected source.</p>
   </body>
 </html>"#,
     )
@@ -330,11 +328,12 @@ async fn evaluate_using(
         }));
         response.expires_at_unix_seconds = evaluation.expires_at_unix_seconds;
         response.expires_at = format!("unix:{}", response.expires_at_unix_seconds);
-        for route in
-            std::iter::once(&mut response.recommended_route).chain(&mut response.alternatives)
+        for source in std::iter::once(&mut response.recommended_source)
+            .chain(&mut response.alternative_sources)
         {
-            route.estimated_time_seconds = None;
+            source.estimated_time_seconds = None;
         }
+        response.sync_legacy_route_fields();
         return Ok(Json(response));
     }
 
@@ -426,15 +425,6 @@ impl ApiError {
         Self {
             status: StatusCode::FORBIDDEN,
             code: "PAYMENT_SAFETY",
-            message: message.into(),
-            details: Vec::new(),
-        }
-    }
-
-    fn payment_execution(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_GATEWAY,
-            code: "PAYMENT_EXECUTION_FAILED",
             message: message.into(),
             details: Vec::new(),
         }
@@ -958,8 +948,16 @@ pub(crate) struct EvaluateResponse {
     pub(crate) live: Option<serde_json::Value>,
     pub(crate) connector_observations: Vec<serde_json::Value>,
     pub(crate) quote_id: String,
-    pub(crate) recommended_route: EvaluatedRouteResponse,
-    pub(crate) alternatives: Vec<EvaluatedRouteResponse>,
+    /// The source EcashMesh recommends for this payment target.
+    pub(crate) recommended_source: EvaluatedRouteResponse,
+    /// Other independently executable payment sources, in rank order.
+    pub(crate) alternative_sources: Vec<EvaluatedRouteResponse>,
+    /// Compatibility mirror for clients migrating from route-selection wording.
+    #[serde(rename = "recommended_route")]
+    pub(crate) legacy_recommended_route: EvaluatedRouteResponse,
+    /// Compatibility mirror for clients migrating from route-selection wording.
+    #[serde(rename = "alternatives")]
+    pub(crate) legacy_alternatives: Vec<EvaluatedRouteResponse>,
     score_breakdown: ScoreBreakdownResponse,
     risk_flags: Vec<&'static str>,
     evidence: Vec<EvidenceResponse>,
@@ -982,12 +980,12 @@ impl EvaluateResponse {
             .into_iter()
             .map(|route| EvaluatedRouteResponse::from_ranked(&quote_id, &route))
             .collect::<Vec<_>>();
-        let recommended_route = routes.remove(0);
-        let score_breakdown = ScoreBreakdownResponse::from_route(&recommended_route);
-        let risk_flags = recommended_route.risk_flags.clone();
+        let recommended_source = routes.remove(0);
+        let score_breakdown = ScoreBreakdownResponse::from_route(&recommended_source);
+        let risk_flags = recommended_source.risk_flags.clone();
         let explanation = EvaluationExplanationResponse::from_decision(
             decision,
-            &recommended_route,
+            &recommended_source,
             destination,
             payment_intent,
         );
@@ -998,8 +996,10 @@ impl EvaluateResponse {
             connector_observations: Vec::new(),
             live: None,
             quote_id,
-            recommended_route,
-            alternatives: routes,
+            legacy_recommended_route: recommended_source.clone(),
+            legacy_alternatives: routes.clone(),
+            recommended_source,
+            alternative_sources: routes,
             score_breakdown,
             risk_flags,
             evidence: connectors
@@ -1013,7 +1013,9 @@ impl EvaluateResponse {
     }
 
     fn apply_live_fee_terms(&mut self, terms: &[live::LiveFeeTerms], payment_amount: Amount) {
-        for route in std::iter::once(&mut self.recommended_route).chain(&mut self.alternatives) {
+        for route in
+            std::iter::once(&mut self.recommended_source).chain(&mut self.alternative_sources)
+        {
             if let Some(terms) = terms
                 .iter()
                 .find(|terms| terms.source_connector.as_str() == route.connector)
@@ -1024,13 +1026,28 @@ impl EvaluateResponse {
                 route.fee_reasonableness = None;
             }
         }
-        self.score_breakdown = ScoreBreakdownResponse::from_route(&self.recommended_route);
+        self.score_breakdown = ScoreBreakdownResponse::from_route(&self.recommended_source);
+        self.sync_legacy_route_fields();
+    }
+
+    fn sync_legacy_route_fields(&mut self) {
+        self.legacy_recommended_route = self.recommended_source.clone();
+        self.legacy_alternatives = self.alternative_sources.clone();
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct EvaluatedRouteResponse {
+    /// Internal execution correlation only. This is not a Lightning path ID.
     pub(crate) route_id: String,
+    /// Stable independent custody/payment source identifier.
+    source_id: String,
+    /// Protocol providing the selected source.
+    protocol: &'static str,
+    /// Adapter-declared native settlement capability used for this target.
+    settlement_mechanism: &'static str,
+    /// The adapter returned a current quote and can execute this settlement.
+    executable: bool,
     pub(crate) connector: String,
     path: Vec<String>,
     score: u8,
@@ -1056,6 +1073,10 @@ impl EvaluatedRouteResponse {
         let connector = path.first().cloned().unwrap_or_default();
         Self {
             route_id: deterministic_route_id(quote_id, &path),
+            source_id: connector.clone(),
+            protocol: protocol_for_connector(&connector),
+            settlement_mechanism: settlement_mechanism_for_connector(&connector),
+            executable: true,
             connector,
             path,
             score: as_percent(route.score),
@@ -1089,7 +1110,7 @@ impl EvaluatedRouteResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct FeeResponse {
     /// Backwards-compatible route estimate field. For a live Cashu route this
     /// is a NUT-05 reserve and is never a promised final fee.
@@ -1142,7 +1163,7 @@ impl FeeResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct InputFeeScheduleResponse {
     state: &'static str,
     freshness: &'static str,
@@ -1171,7 +1192,6 @@ struct ScoreBreakdownResponse {
     reliability: u8,
     evidence_freshness: u8,
     fees: Option<u8>,
-    route_complexity: usize,
     risk_penalty: u8,
 }
 
@@ -1182,7 +1202,6 @@ impl ScoreBreakdownResponse {
             reliability: route.reliability_confidence,
             evidence_freshness: route.evidence_freshness,
             fees: route.fee_reasonableness,
-            route_complexity: route.path.len(),
             risk_penalty: route.risk_penalty,
         }
     }
@@ -1196,7 +1215,7 @@ struct EvidenceResponse {
     first_observed_at_unix_seconds: Option<u64>,
     liquidity: EvidenceStateResponse,
     fee: EvidenceStateResponse,
-    hop_reliability: EvidenceStateResponse,
+    source_reliability: EvidenceStateResponse,
     health: EvidenceStateResponse,
     solvency: EvidenceStateResponse,
     connector_reliability: EvidenceStateResponse,
@@ -1222,7 +1241,7 @@ impl EvidenceResponse {
                 &connector.fee,
                 |fee| json!({ "amount_sats": fee.amount.sats() }),
             ),
-            hop_reliability: EvidenceStateResponse::from_core(
+            source_reliability: EvidenceStateResponse::from_core(
                 &connector.reliability,
                 reliability_value,
             ),
@@ -1310,7 +1329,7 @@ impl EvaluationExplanationResponse {
     ) -> Self {
         Self {
             summary: format!(
-                "Selected {} for {} to {} with the strongest deterministic route score.",
+                "Selected source {} for {} to {} with the strongest deterministic source score.",
                 recommended.connector, payment_intent, destination.value
             ),
             reasons: decision
@@ -1646,6 +1665,26 @@ const fn connector_type_code(connector_type: ConnectorType) -> &'static str {
         ConnectorType::Cashu => "cashu",
         ConnectorType::Fedimint => "fedimint",
         ConnectorType::Lightning => "lightning",
+    }
+}
+
+fn protocol_for_connector(connector: &str) -> &'static str {
+    if connector.starts_with("cashu:") {
+        "cashu"
+    } else if connector.starts_with("fedimint:") {
+        "fedimint"
+    } else {
+        "lightning"
+    }
+}
+
+fn settlement_mechanism_for_connector(connector: &str) -> &'static str {
+    if connector.starts_with("cashu:") {
+        "cashu_lightning"
+    } else if connector.starts_with("fedimint:") {
+        "fedimint_gateway"
+    } else {
+        "lightning_direct"
     }
 }
 

@@ -32,7 +32,7 @@ impl PaymentEnvironment {
     }
 
     pub const fn allows_execution(self) -> bool {
-        matches!(self, Self::Regtest | Self::Mainnet)
+        matches!(self, Self::Regtest)
     }
 
     #[allow(dead_code)] // Used by safety tests and retained as an explicit environment predicate.
@@ -68,7 +68,7 @@ impl PaymentSafetyConfig {
             })?;
 
         if execution_enabled && !environment.allows_execution() {
-            return Err("Real payments require PAYMENT_ENVIRONMENT=regtest or mainnet".to_owned());
+            return Err("Real payments require PAYMENT_ENVIRONMENT=regtest".to_owned());
         }
         if max_amount_sats == 0 {
             return Err("ECASHMESH_MAX_PAYMENT_SATS must be greater than zero".to_owned());

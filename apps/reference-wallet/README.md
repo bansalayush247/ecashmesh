@@ -1,11 +1,13 @@
 # Pocket reference integration
 
-A minimal React Native host demonstrating **Existing wallet → Smart Route →
-Powered by EcashMesh → Decision and explanation → Host confirmation**.
-Pocket contains only a home and a send flow. There is no custody, key handling,
-token storage, accounts, balances, portfolio, history, or real execution.
-Payment state is in memory and cleared when returning home. The host simulator
-does not persist receipts.
+A minimal React Native host demonstrating **Existing wallet → payment-source
+selection → EcashMesh explanation → Host confirmation**.
+Pocket contains only a home and a send flow. By default it has no custody, key
+handling, token storage, accounts, balances, portfolio, history, or real
+execution. Its opt-in regtest adapter is the exception: it stores disposable
+regtest proofs locally in IndexedDB and settles directly with the selected mint;
+proof secrets never reach EcashMesh HTTP. Payment state is otherwise in memory
+and cleared when returning home. The host simulator does not persist receipts.
 
 ## Run locally
 
@@ -49,9 +51,9 @@ or select **Cashu request** and provide a NUT-18 `creqA...` request or
 not parse either target: it sends the chosen type and raw value to EcashMesh.
 The backend normalizes the target, reads real metadata, and obtains unpaid mint
 and melt quotes where supported. A failure to establish a supported quote-backed
-route is shown as `NO_VIABLE_ROUTE`, never as an invented recommendation.
+source is shown as `NO_VIABLE_ROUTE`, never as an invented recommendation.
 
-For live Cashu routes, the wallet labels a NUT-05 result as **Fee reserve
+For live Cashu sources, the wallet labels a NUT-05 result as **Fee reserve
 (estimate)** rather than a final fee, displays the server-calculated fee rate,
 and renders unknown fee reasonableness as **Unknown**. Public NUT-02 keyset input
 fees remain separate because the reference client never selects or stores proofs.
@@ -85,12 +87,12 @@ clients are not subject to browser CORS.
 1. Choose **Send payment** on the Pocket home.
 2. In simulator mode, keep **100000** sats and the simulated destination. In live
    mode, choose a destination type and paste a real BOLT11 invoice or Cashu request.
-3. Choose **EcashMesh Smart Route**. The SDK requests all simulated connectors.
+3. Choose **EcashMesh Source Selection**. The SDK evaluates all simulated sources.
 4. Inspect the recommendation, ranked alternatives, scores, fees, time estimates,
    liquidity/reliability/freshness signals, risks, and server-authored explanations.
-5. Open a path to see connector capabilities and individual evidence states,
+5. Open the source settlement view to see connector capabilities and individual evidence states,
    sources, confidence, observations, and raw response JSON.
-6. Choose the recommendation or an alternative. Pocket receives that route for
+6. Choose the recommendation or an alternative source. Pocket receives that source for
    its confirmation screen. Simulator mode shows **Confirm simulated payment**;
    live mode shows **Confirm real regtest payment** and requires a host custody
    adapter with genuine Cashu proofs before it can settle.
@@ -109,10 +111,10 @@ Other checks:
 
 The normal API returns `NO_VIABLE_ROUTE` when nothing is feasible. The UI also
 handles an explicitly null recommendation with an empty state; automated tests
-inject that response and malformed/error responses. It never manufactures routes.
+inject that response and malformed/error responses. It never manufactures sources.
 
 Signals are normalized server outputs, not success probabilities. The Phase 6
-`score_breakdown` contains signal percentages, a hop count, and a risk penalty;
+`score_breakdown` contains signal percentages and a risk penalty;
 these are not additive weighted score contributions. Unknown fees are displayed
 as unknown, never zero. Unknown evidence remains distinct from stale or negative
 observations. API expiry is expressed in **fixed simulator time** (`unix:…`),
@@ -126,7 +128,7 @@ executes a real payment.
 Pocket input and navigation (src/host)
     → SDK adapter (src/ecashmesh) → POST /v1/routes/evaluate → Rust core
     ← unchanged decision DTOs ← server ranking and explanation
-EcashMesh views (src/ui) → user-selected route → Pocket confirmation
+EcashMesh views (src/ui) → user-selected source → Pocket confirmation
     → host simulator bridge → POST /v1/simulator/confirm → simulated receipt
 ```
 
@@ -149,19 +151,19 @@ const decision = await ecashmesh.evaluateRoute({
 The adapter translates camelCase input to Phase 6 DTOs, validates response shape,
 preserves additive server fields, and exposes structured errors. It accepts an
 optional fetch implementation, timeout and abort signal. It does not route,
-score, rank, aggregate evidence, evaluate liquidity or risk, or choose a route.
-Views render reasons and ordering as received; the host only chooses the route
+score, rank, aggregate evidence, evaluate liquidity or risk, or choose a source.
+Views render reasons and ordering as received; the host only chooses the source
 the user selected. A real wallet can replace `src/host` and `App.tsx`, reuse the
 adapter/views, and implement its own authorized confirmation workflow.
 
 `src/host/simulator.ts` is intentionally **not** part of the routing SDK. The
 simulator endpoint accepts `{ payment, quote_id, route_id }`. In simulator mode
 it reevaluates through the existing engine and rejects changed inputs or fabricated
-route IDs. In live mode it returns only an explicitly simulation-backed completion
+execution IDs. In live mode it returns only an explicitly simulation-backed completion
 for the selected evaluated quote; it never calls a payment execution endpoint. It returns
 `{ simulation_id, status: "simulated_success", simulated: true, quote_id,
 route_id, amount, asset, fee, path, message }`. Both recommended and alternative
-routes are accepted if present in the quote. It has no storage or payment side
+sources are accepted if present in the quote. It has no storage or payment side
 effects; repetition is deterministic.
 
 ## Verification

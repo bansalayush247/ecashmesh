@@ -8,11 +8,11 @@ async function send(page: Page, amount = "100000") {
 async function evaluate(page: Page, amount = "100000") {
   await send(page, amount);
   await page
-    .getByRole("button", { name: "EcashMesh Smart Route", exact: true })
+    .getByRole("button", { name: "EcashMesh Source Selection", exact: true })
     .click();
 }
 
-test("real API decision → path and evidence → host confirmation → server simulator receipt", async ({
+test("real API decision → source evidence → host confirmation → server simulator receipt", async ({
   page,
 }, testInfo) => {
   const errors: string[] = [];
@@ -24,39 +24,39 @@ test("real API decision → path and evidence → host confirmation → server s
   });
   const response = page.waitForResponse("**/v1/routes/evaluate");
   await page
-    .getByRole("button", { name: "EcashMesh Smart Route", exact: true })
+    .getByRole("button", { name: "EcashMesh Source Selection", exact: true })
     .click();
   const decision = await (await response).json();
   await expect(
     page.getByText("Recommended by EcashMesh", { exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Why this route?", exact: true }),
+    page.getByRole("heading", { name: "Why this source?", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Ranked alternatives" }),
+    page.getByRole("heading", { name: "Alternative sources" }),
   ).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath("decision.png"),
     fullPage: true,
   });
-  await page.getByRole("button", { name: "Inspect recommended path" }).click();
+  await page.getByRole("button", { name: "Inspect recommended source" }).click();
   await page.getByRole("tab", { name: "Evidence" }).click();
   await expect(page.getByText("solvency", { exact: true })).toBeVisible();
-  await page.getByRole("tab", { name: "Path" }).click();
+  await page.getByRole("tab", { name: "Settlement" }).click();
   await expect(
-    page.getByRole("heading", { name: "Route / path" }),
+    page.getByRole("heading", { name: "Source / settlement" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Inspect response JSON" }).click();
   await expect(page.getByText('"quote_id"', { exact: false })).toBeVisible();
   await page
-    .getByRole("button", { name: "Use this route", exact: true })
+    .getByRole("button", { name: "Use this source", exact: true })
     .click();
   await expect(
     page.getByText("Pocket / Confirmation", { exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByText(decision.recommended_route.route_id, { exact: true }),
+    page.getByText(decision.recommended_source.route_id, { exact: true }),
   ).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath("confirmation.png"),
@@ -71,7 +71,7 @@ test("real API decision → path and evidence → host confirmation → server s
   await expect(
     page.getByText(receipt.simulation_id, { exact: true }),
   ).toBeVisible();
-  expect(receipt.route_id).toBe(decision.recommended_route.route_id);
+  expect(receipt.route_id).toBe(decision.recommended_source.route_id);
   expect(receipt.simulated).toBe(true);
   expect(errors).toEqual([]);
   await page.screenshot({
@@ -84,7 +84,7 @@ test("real API decision → path and evidence → host confirmation → server s
   ).toBeVisible();
 });
 
-test("choosing a stale alternative preserves its warnings and route through confirmation", async ({
+test("choosing a stale alternative source preserves its warnings through confirmation", async ({
   page,
 }) => {
   await evaluate(page, "10000");
@@ -92,7 +92,7 @@ test("choosing a stale alternative preserves its warnings and route through conf
     .getByRole("button", { name: "Inspect cashu:cheap-stale", exact: true })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Why not this alternative?" }),
+    page.getByRole("heading", { name: "Why not this source?" }),
   ).toBeVisible();
   await page.getByRole("tab", { name: "Risks" }).click();
   await expect(
@@ -101,7 +101,7 @@ test("choosing a stale alternative preserves its warnings and route through conf
       .first(),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: "Use this route", exact: true })
+    .getByRole("button", { name: "Use this source", exact: true })
     .click();
   await expect(
     page.getByText("cashu:cheap-stale", { exact: true }),
@@ -126,19 +126,19 @@ test("validation and no viable route states recover by editing payment", async (
   await expect(page.getByRole("alert")).toContainText("positive whole number");
   await page.getByLabel("Amount in sats").fill("500000");
   await page
-    .getByRole("button", { name: "EcashMesh Smart Route", exact: true })
+    .getByRole("button", { name: "EcashMesh Source Selection", exact: true })
     .click();
   await expect(page.getByRole("alert")).toContainText("NO_VIABLE_ROUTE");
   await expect(
-    page.getByRole("button", { name: "Use recommended route" }),
+    page.getByRole("button", { name: "Use recommended source" }),
   ).toHaveCount(0);
   await page.getByRole("button", { name: "Edit payment", exact: true }).click();
   await page.getByLabel("Amount in sats").fill("100000");
   await page
-    .getByRole("button", { name: "EcashMesh Smart Route", exact: true })
+    .getByRole("button", { name: "EcashMesh Source Selection", exact: true })
     .click();
   await expect(
-    page.getByRole("button", { name: "Use recommended route" }),
+    page.getByRole("button", { name: "Use recommended source" }),
   ).toBeVisible();
 });
 
@@ -149,15 +149,21 @@ test("empty and API error responses never show a confirmation action", async ({
     const response = await route.fetch();
     const body = await response.json();
     await route.fulfill({
-      json: { ...body, recommended_route: null, alternatives: [] },
+      json: {
+        ...body,
+        recommended_source: null,
+        alternative_sources: [],
+        recommended_route: null,
+        alternatives: [],
+      },
     });
   });
   await evaluate(page);
   await expect(
-    page.getByText("No routes returned", { exact: true }),
+    page.getByText("No payment sources returned", { exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Use recommended route" }),
+    page.getByRole("button", { name: "Use recommended source" }),
   ).toHaveCount(0);
   await page.unroute("**/v1/routes/evaluate");
   await page.route("**/v1/routes/evaluate", (route) =>
@@ -174,16 +180,16 @@ test("empty and API error responses never show a confirmation action", async ({
   );
   await page.getByRole("button", { name: "Edit payment", exact: true }).click();
   await page
-    .getByRole("button", { name: "EcashMesh Smart Route", exact: true })
+    .getByRole("button", { name: "EcashMesh Source Selection", exact: true })
     .click();
   await expect(page.getByRole("alert")).toContainText("Demo API unavailable");
   await expect(
-    page.getByRole("button", { name: "Use recommended route" }),
+    page.getByRole("button", { name: "Use recommended source" }),
   ).toHaveCount(0);
   await page.unroute("**/v1/routes/evaluate");
   await page.getByRole("button", { name: "Retry evaluation" }).click();
   await expect(
-    page.getByRole("button", { name: "Use recommended route" }),
+    page.getByRole("button", { name: "Use recommended source" }),
   ).toBeVisible();
 });
 
@@ -208,11 +214,11 @@ test("loading can be cancelled and an old evaluation cannot replace a changed pa
   release();
   await page.unroute("**/v1/routes/evaluate");
   await page
-    .getByRole("button", { name: "EcashMesh Smart Route", exact: true })
+    .getByRole("button", { name: "EcashMesh Source Selection", exact: true })
     .click();
   await expect(page.getByRole("alert")).toContainText("NO_VIABLE_ROUTE");
   await expect(
-    page.getByRole("button", { name: "Use recommended route" }),
+    page.getByRole("button", { name: "Use recommended source" }),
   ).toHaveCount(0);
 });
 
@@ -220,7 +226,7 @@ test("failed simulator confirmation does not fabricate success and can be retrie
   page,
 }) => {
   await evaluate(page);
-  await page.getByRole("button", { name: "Use recommended route" }).click();
+  await page.getByRole("button", { name: "Use recommended source" }).click();
   await page.route("**/v1/simulator/confirm", (route) => route.abort("failed"));
   await page.getByRole("button", { name: "Confirm simulated payment" }).click();
   await expect(page.getByRole("alert")).toContainText("NETWORK_ERROR");
@@ -240,20 +246,20 @@ test("same payment retains API ordering, scores and explanations across evaluati
   await send(page);
   const first = page.waitForResponse("**/v1/routes/evaluate");
   await page
-    .getByRole("button", { name: "EcashMesh Smart Route", exact: true })
+    .getByRole("button", { name: "EcashMesh Source Selection", exact: true })
     .click();
   const a = await (await first).json();
   await page.getByRole("button", { name: "Edit payment", exact: true }).click();
   const second = page.waitForResponse("**/v1/routes/evaluate");
   await page
-    .getByRole("button", { name: "EcashMesh Smart Route", exact: true })
+    .getByRole("button", { name: "EcashMesh Source Selection", exact: true })
     .click();
   expect(await (await second).json()).toEqual(a);
   const names = await page
     .getByRole("button", { name: /^Inspect cashu:/ })
     .allTextContents();
   expect(names).toEqual(
-    a.alternatives.map(
+    a.alternative_sources.map(
       (route: { connector: string }) => `Inspect ${route.connector}`,
     ),
   );

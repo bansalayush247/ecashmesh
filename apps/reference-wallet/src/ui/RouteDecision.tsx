@@ -3,7 +3,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import type {
   EvidenceState,
   Reason,
-  Route,
+  PaymentSource,
   RouteDecision,
 } from "../ecashmesh/contracts";
 import {
@@ -39,13 +39,13 @@ const compactDecisionText = (value: string) =>
     .replace(/creqA[A-Za-z0-9_-]+={0,2}/g, (match) => compactId(match, 14, 8))
     .replace(/cashu:\/\/[^\s]+/g, (match) => compactId(match, 22, 10));
 
-type DetailsTab = "overview" | "evidence" | "risks" | "path";
+type DetailsTab = "overview" | "evidence" | "risks" | "settlement";
 
 const detailTabs: { key: DetailsTab; label: string }[] = [
   { key: "overview", label: "Overview" },
   { key: "evidence", label: "Evidence" },
   { key: "risks", label: "Risks" },
-  { key: "path", label: "Path" },
+  { key: "settlement", label: "Settlement" },
 ];
 
 function Score({ score }: { score: number }) {
@@ -65,13 +65,24 @@ function ConnectorMark({ connector }: { connector: string }) {
   );
 }
 
-function Protocols({ route }: { route: Route }) {
+function Settlement({ source }: { source: PaymentSource }) {
+  const mechanism = source.settlement_mechanism ?? "adapter-declared";
   return (
     <View style={local.pills}>
-      <Text style={local.pill}>◈ Cashu</Text>
-      <Text style={local.pill}>ϟ Lightning</Text>
+      <Text style={local.pill}>
+        {source.protocol === "fedimint"
+          ? "◉ Fedimint"
+          : source.protocol === "lightning"
+            ? "ϟ Lightning"
+            : "◈ Cashu"}
+      </Text>
+      <Text style={local.pathLabel}>Settlement: {humanize(mechanism)}</Text>
       <Text style={local.pathLabel}>
-        ⌁ {route.path.length} hop{route.path.length === 1 ? "" : "s"}
+        {source.executable === true
+          ? "Executable"
+          : source.executable === false
+            ? "Not executable"
+            : "Execution capability unknown"}
       </Text>
     </View>
   );
@@ -114,7 +125,7 @@ function Reasons({ reasons }: { reasons: Reason[] }) {
   );
 }
 
-export function RouteMetrics({ route }: { route: Route }) {
+export function RouteMetrics({ route }: { route: PaymentSource }) {
   return (
     <View style={local.metricGroup}>
       <Metric
@@ -167,7 +178,7 @@ function RouteCard({
   route,
   onInspect,
 }: {
-  route: Route;
+  route: PaymentSource;
   onInspect: () => void;
 }) {
   return (
@@ -187,7 +198,7 @@ function RouteCard({
         </View>
         <Score score={route.score} />
       </View>
-      <Protocols route={route} />
+      <Settlement source={route} />
       <Button
         secondary
         onPress={onInspect}
@@ -203,14 +214,17 @@ export function DecisionView({
   select,
 }: {
   decision: RouteDecision;
-  inspect: (route: Route) => void;
-  select: (route: Route) => void;
+  inspect: (route: PaymentSource) => void;
+  select: (route: PaymentSource) => void;
 }) {
-  const recommended = decision.recommended_route;
+  const recommended =
+    decision.recommended_source ?? decision.recommended_route ?? null;
+  const alternatives =
+    decision.alternative_sources ?? decision.alternatives ?? [];
   if (!recommended) {
     return (
       <View style={styles.state}>
-        <Text style={styles.subtitle}>No routes returned</Text>
+        <Text style={styles.subtitle}>No payment sources returned</Text>
         <Text style={styles.body}>
           There is no recommendation to confirm. Edit your payment and evaluate
           again.
@@ -224,7 +238,7 @@ export function DecisionView({
         <Text style={local.bannerIcon}>✦</Text>
         <View style={{ flex: 1 }}>
           <Text style={local.bannerTitle}>
-            Found {decision.alternatives.length + 1} possible routes
+            Found {alternatives.length + 1} available sources
           </Text>
           <Text style={styles.small}>
             Here’s the best option based on evidence, liquidity and fees.
@@ -243,7 +257,7 @@ export function DecisionView({
               <Text selectable style={local.routeName}>
                 {compactId(recommended.connector)}
               </Text>
-              <Protocols route={recommended} />
+              <Settlement source={recommended} />
             </View>
           </View>
           <Score score={recommended.score} />
@@ -274,28 +288,28 @@ export function DecisionView({
               {recommended.risk_flags.length === 1 ? "" : "s"}
             </Text>
             <Text style={local.riskSummaryText}>
-              Open route details to review evidence, risks and path.
+              Open source details to review evidence, risks and settlement.
             </Text>
           </View>
         )}
         <Button onPress={() => select(recommended)}>
-          Use recommended route
+          Use recommended source
         </Button>
         <Button secondary onPress={() => inspect(recommended)}>
-          Inspect recommended path
+          Inspect recommended source
         </Button>
       </View>
-      <Section title="Why this route?">
+      <Section title="Why this source?">
         <Reasons reasons={decision.explanation.reasons} />
       </Section>
-      <Section title="Ranked alternatives">
+      <Section title="Alternative sources">
         <Text style={styles.small}>
           Other viable options, in deterministic server order.
         </Text>
-        {decision.alternatives.length === 0 && (
-          <Text style={styles.body}>No alternative routes returned.</Text>
+        {alternatives.length === 0 && (
+          <Text style={styles.body}>No alternative sources returned.</Text>
         )}
-        {decision.alternatives.map((route) => (
+        {alternatives.map((route) => (
           <RouteCard
             key={route.route_id}
             route={route}
@@ -343,12 +357,14 @@ export function RouteDetails({
   select,
 }: {
   decision: RouteDecision;
-  route: Route;
-  select: (route: Route) => void;
+  route: PaymentSource;
+  select: (route: PaymentSource) => void;
 }) {
   const [showRaw, setShowRaw] = useState(false);
   const [activeTab, setActiveTab] = useState<DetailsTab>("overview");
-  const isRecommended = route.route_id === decision.recommended_route?.route_id;
+  const recommended =
+    decision.recommended_source ?? decision.recommended_route ?? null;
+  const isRecommended = route.route_id === recommended?.route_id;
   const reasons = isRecommended
     ? decision.explanation.reasons
     : (decision.explanation.alternative_weaknesses.find(
@@ -364,7 +380,7 @@ export function RouteDetails({
               <Text selectable style={local.routeName}>
                 {compactId(route.connector)}
               </Text>
-              <Protocols route={route} />
+              <Settlement source={route} />
             </View>
           </View>
           <Score score={route.score} />
@@ -392,7 +408,7 @@ export function RouteDetails({
         <>
           <Section
             title={
-              isRecommended ? "✦ Why this route?" : "Why not this alternative?"
+              isRecommended ? "✦ Why this source?" : "Why not this source?"
             }
           >
             <Reasons reasons={reasons.slice(0, 3)} />
@@ -435,13 +451,13 @@ export function RouteDetails({
       )}
       {activeTab === "evidence" && (
         <Section title="Evidence">
-          {route.path.map((connector, i) => {
+          {[route.source_id ?? route.connector].map((connector) => {
             const evidence = decision.evidence.find(
               (item) => item.connector === connector,
             );
             if (!evidence) {
               return (
-                <View key={`${connector}-${i}`} style={local.pathCard}>
+                <View key={connector} style={local.pathCard}>
                   <Text style={styles.body}>
                     No connector evidence returned.
                   </Text>
@@ -449,7 +465,7 @@ export function RouteDetails({
               );
             }
             return (
-              <View key={`${connector}-${i}`} style={local.pathCard}>
+              <View key={connector} style={local.pathCard}>
                 <View style={{ flex: 1, gap: 6 }}>
                   <Text selectable style={local.compactCode}>
                     {compactId(connector)}
@@ -459,7 +475,7 @@ export function RouteDetails({
                     [
                       "liquidity",
                       "fee",
-                      "hop_reliability",
+                      "source_reliability",
                       "health",
                       "solvency",
                       "connector_reliability",
@@ -468,7 +484,9 @@ export function RouteDetails({
                     <EvidenceObservation
                       key={key}
                       label={key}
-                      evidence={evidence[key]}
+                      evidence={
+                        evidence[key] ?? evidence.hop_reliability ?? evidence.connector_reliability
+                      }
                     />
                   ))}
                 </View>
@@ -487,28 +505,25 @@ export function RouteDetails({
           {reasons.length > 3 && <Reasons reasons={reasons.slice(3)} />}
         </Section>
       )}
-      {activeTab === "path" && (
+      {activeTab === "settlement" && (
         <>
-          <Section title="Route / path">
+          <Section title="Source / settlement">
             <Text style={styles.small}>
-              Host wallet → connector path → Lightning destination
+              Host wallet → selected source → native settlement → payment target
             </Text>
-            {route.path.map((connector, i) => (
-              <View key={`${connector}-${i}`} style={local.pathCard}>
-                <Text style={local.pathStep}>{i + 1}</Text>
-                <View style={{ flex: 1, gap: 6 }}>
-                  <Text selectable style={local.pathName}>
-                    {compactId(connector, 24, 14)}
-                  </Text>
-                  <Text selectable style={local.compactCode}>
-                    {connector}
-                  </Text>
-                </View>
+            <View style={local.pathCard}>
+              <View style={{ flex: 1, gap: 6 }}>
+                <Text selectable style={local.pathName}>
+                  {compactId(route.source_id ?? route.connector, 24, 14)}
+                </Text>
+                <Text selectable style={local.compactCode}>
+                  {route.source_id ?? route.connector}
+                </Text>
               </View>
-            ))}
+            </View>
           </Section>
           <Section title="Evaluation details">
-            <Row label="Route ID" value={compactId(route.route_id)} />
+            <Row label="Execution ID" value={compactId(route.route_id)} />
             <Row label="Quote ID" value={decision.quote_id} />
             <Row
               label={feeEstimateLabel(route.fee.estimate_kind)}
@@ -547,7 +562,7 @@ export function RouteDetails({
           </Section>
         </>
       )}
-      <Button onPress={() => select(route)}>Use this route</Button>
+      <Button onPress={() => select(route)}>Use this source</Button>
     </View>
   );
 }
@@ -757,18 +772,6 @@ const local = StyleSheet.create({
     borderColor: colors.line,
     borderRadius: 12,
     padding: 12,
-  },
-  pathStep: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    textAlign: "center",
-    lineHeight: 24,
-    overflow: "hidden",
-    color: "white",
-    backgroundColor: colors.blue,
-    fontSize: 12,
-    fontWeight: "700",
   },
   observation: {
     gap: 3,
