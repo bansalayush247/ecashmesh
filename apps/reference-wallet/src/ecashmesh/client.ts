@@ -1,6 +1,6 @@
 import {
   decisionSchema,
-  paymentPreparationSchema,
+  paymentStatusSchema,
   paymentToWire,
   type PaymentInput,
 } from "./contracts";
@@ -22,7 +22,7 @@ export function createEcashMeshClient(options: ClientOptions) {
       return post(
         "/v1/payments/prepare",
         { quote_id: quoteId, route_id: routeId },
-        paymentPreparationSchema,
+        paymentStatusSchema,
         signal,
       );
     },

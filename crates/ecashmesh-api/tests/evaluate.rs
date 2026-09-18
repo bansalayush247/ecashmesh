@@ -117,6 +117,13 @@ impl Drop for ApiServer {
     }
 }
 
+#[test]
+fn api_has_no_cashu_proof_execution_endpoint() {
+    let server = ApiServer::start();
+    let (status, _) = server.get_text("/v1/payments/execute");
+    assert_eq!(status, 404);
+}
+
 fn valid_request(amount: u64, candidate_connectors: &Value) -> Value {
     json!({
         "amount": amount,

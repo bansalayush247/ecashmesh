@@ -41,7 +41,7 @@ pub(super) async fn confirm(
     let amount = request.payment.amount;
     if !matches!(state.provider, Provider::Simulator) {
         return Err(ApiError::payment_safety(
-            "The simulator endpoint is unavailable for live or regtest routing; use /v1/payments/prepare and let the host wallet execute the melt directly.",
+            "The simulator endpoint is unavailable for live or regtest routing; prepare a selected source and let wallet custody settle directly.",
         ));
     }
     // Reuse the same engine/fixture inputs. The host cannot supply a fabricated
@@ -53,8 +53,8 @@ pub(super) async fn confirm(
             vec!["quote_id".into()],
         ));
     }
-    let route = std::iter::once(decision.recommended_route)
-        .chain(decision.alternatives)
+    let route = std::iter::once(decision.recommended_source)
+        .chain(decision.alternative_sources)
         .find(|route| route.route_id == request.route_id)
         .ok_or_else(|| {
             ApiError::validation(

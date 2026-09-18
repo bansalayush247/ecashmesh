@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { EcashMeshClient } from "../ecashmesh/client";
 import type {
   PaymentInput,
-  Route,
+  PaymentSource,
   RouteDecision,
 } from "../ecashmesh/contracts";
 import { EcashMeshError } from "../ecashmesh/transport";
@@ -19,10 +19,6 @@ type Receipt = {
   amount: number;
   asset: "BTC";
   fee: SimulationReceipt["fee"];
-  inputFeeSats?: number;
-  feeReserveSats?: number;
-  totalRequiredSats?: number;
-  destinationMintUrl?: string;
   path: string[];
   message: string;
 };
@@ -48,7 +44,7 @@ export function usePaymentFlow(
   const [sourceMintUrl, setSourceMintUrl] = useState("");
   const [payment, setPayment] = useState<PaymentInput | null>(null);
   const [decision, setDecision] = useState<RouteDecision | null>(null);
-  const [selected, setSelected] = useState<Route | null>(null);
+  const [selected, setSelected] = useState<PaymentSource | null>(null);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [error, setError] = useState<EcashMeshError | null>(null);
   const [busy, setBusy] = useState(false);
@@ -117,11 +113,11 @@ export function usePaymentFlow(
     }
   }
 
-  function inspect(route: Route) {
+  function inspect(route: PaymentSource) {
     setSelected(route);
     setScreen("details");
   }
-  function select(route: Route) {
+  function select(route: PaymentSource) {
     setSelected(route);
     setError(null);
     setScreen("confirmation");
@@ -213,7 +209,7 @@ async function executeRegtestPayment(
   ecashmesh: EcashMeshClient,
   custody: RegtestCustody | undefined,
   quoteId: string,
-  route: Route,
+  route: PaymentSource,
   payment: PaymentInput,
   signal: AbortSignal,
 ): Promise<Receipt> {
@@ -228,22 +224,20 @@ async function executeRegtestPayment(
     route.route_id,
     signal,
   );
+  if (payment.destination.type !== "lightning") {
+    throw new EcashMeshError(
+      "UNSUPPORTED_DESTINATION",
+      "Host custody can execute BOLT11 melts today. Cashu-to-Cashu settlement remains an explicit wallet transfer flow.",
+    );
+  }
   // The API binds the evaluated route to a regtest payment ID. The host then
   // executes directly against that selected mint; proof material never crosses
   // the EcashMesh API boundary.
-  const result =
-    prepared.destination.type === "lightning"
-      ? await custody.meltBolt11({
-          mintUrl: prepared.source_mint_url,
-          invoice: prepared.destination.invoice,
-          paymentId: prepared.payment_id,
-        })
-      : await custody.meltToCashu({
-          sourceMintUrl: prepared.source_mint_url,
-          destinationMintUrl: prepared.destination.mint_url,
-          amountSats: prepared.amount_sats,
-          paymentId: prepared.payment_id,
-        });
+  const result = await custody.meltBolt11({
+    mintUrl: prepared.source_mint_url,
+    invoice: payment.destination.value,
+    paymentId: prepared.payment_id,
+  });
   if (result.status !== "settled") {
     throw new EcashMeshError(
       "PAYMENT_PENDING",
@@ -266,18 +260,8 @@ async function executeRegtestPayment(
       fee_reserve_sats: prepared.fee_reserve_sats,
       estimate_kind: "reserve_estimate",
     },
-    inputFeeSats: result.inputFeeSats,
-    feeReserveSats: result.feeReserveSats,
-    totalRequiredSats: result.totalRequiredSats,
-    destinationMintUrl:
-      prepared.destination.type === "cashu"
-        ? prepared.destination.mint_url
-        : undefined,
     path: route.path,
-    message:
-      prepared.destination.type === "cashu"
-        ? "Real regtest Cashu transfer settled and destination proofs were claimed."
-        : "Real regtest Cashu melt settled by host-held proofs.",
+    message: "Real regtest Cashu melt settled by host-held proofs.",
   };
 }
 

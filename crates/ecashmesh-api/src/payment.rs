@@ -1,8 +1,4 @@
-//! Live-payment preparation boundary.
-//!
-//! EcashMesh binds a fresh evaluated route to a source mint, but never accepts
-//! Cashu proofs or submits a melt. The host wallet owns proof selection,
-//! NUT-08 outputs, execution, and recovery.
+//! Preparation boundary for wallet-owned Cashu settlement; routing stays read-only.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -10,7 +6,6 @@ use axum::{
     Json,
     extract::{State, rejection::JsonRejection},
 };
-use ecashmesh_cashu::{CashuPaymentRequest, KeysetFee};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -22,30 +17,35 @@ use crate::{
 };
 
 #[derive(Clone)]
-struct RouteBinding {
+struct SourceBinding {
     source_mint_url: String,
     fee_reserve_sats: u64,
-    #[allow(dead_code)]
-    input_fees: Vec<KeysetFee>,
 }
-
-#[derive(Clone)]
-enum PreparedDestination {
-    Lightning { invoice: String },
-    Cashu { mint_url: String },
-}
-
 #[derive(Clone)]
 struct EvaluationRecord {
     quote_id: String,
     amount: u64,
     expires_at: u64,
-    routes: BTreeMap<String, RouteBinding>,
-    destination: PreparedDestination,
+    sources: BTreeMap<String, SourceBinding>,
+}
+#[derive(Clone)]
+struct PaymentRecord {
+    id: String,
+    quote_id: String,
+    route_id: String,
+    amount: u64,
+    source_mint_url: String,
+    fee_reserve_sats: u64,
+    environment: PaymentEnvironment,
+}
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PaymentStatus {
+    Prepared,
 }
 
-/// Keeps evaluated route bindings only. Proof material remains exclusively in
-/// the host wallet's custody implementation.
+/// Keeps source and quote bindings, never proof material. A wallet custody adapter
+/// supplies valid Cashu proofs and blinded outputs directly to the selected mint.
 pub(super) struct PaymentService {
     safety: PaymentSafetyConfig,
     evaluations: Mutex<BTreeMap<String, EvaluationRecord>>,
@@ -70,20 +70,10 @@ impl PaymentService {
         let Some(live) = &response.live else {
             return;
         };
-        let destination = match request.destination.kind.as_str() {
-            "lightning" => PreparedDestination::Lightning {
-                invoice: request.destination.value.clone(),
-            },
-            "cashu" => match CashuPaymentRequest::parse(&request.destination.value) {
-                Ok(payment_request) => PreparedDestination::Cashu {
-                    mint_url: payment_request.mint_url,
-                },
-                Err(_) => return,
-            },
-            _ => return,
-        };
-        let mut routes = BTreeMap::new();
-        for route in std::iter::once(&response.recommended_route).chain(&response.alternatives) {
+        let mut sources = BTreeMap::new();
+        for source in
+            std::iter::once(&response.recommended_source).chain(&response.alternative_sources)
+        {
             let quote = live
                 .get("quote_observations")
                 .and_then(Value::as_array)
@@ -91,55 +81,44 @@ impl PaymentService {
                     quotes.iter().find(|quote| {
                         quote.get("kind").and_then(Value::as_str) == Some("source_melt_quote")
                             && quote.get("connector").and_then(Value::as_str)
-                                == Some(route.connector.as_str())
+                                == Some(source.connector.as_str())
                             && quote.get("state").and_then(Value::as_str) == Some("known")
                     })
                 });
-            let Some(quote) = quote else { continue };
+            let Some(quote) = quote else {
+                continue;
+            };
             let Some(source_mint_url) = quote.get("mint_url").and_then(Value::as_str) else {
                 continue;
             };
-            let input_fees = response
-                .connector_observations
-                .iter()
-                .find(|observation| {
-                    observation.get("connector").and_then(Value::as_str)
-                        == Some(route.connector.as_str())
-                })
-                .and_then(|observation| observation.pointer("/input_fees/value"))
-                .cloned()
-                .and_then(|value| serde_json::from_value(value).ok())
-                .unwrap_or_default();
-            routes.insert(
-                route.route_id.clone(),
-                RouteBinding {
+            sources.insert(
+                source.route_id.clone(),
+                SourceBinding {
                     source_mint_url: source_mint_url.into(),
                     fee_reserve_sats: quote
                         .pointer("/value/fee_reserve_sats")
                         .and_then(Value::as_u64)
                         .unwrap_or_default(),
-                    input_fees,
                 },
             );
         }
-        if !routes.is_empty() {
+        if !sources.is_empty() {
             self.evaluations.lock().await.insert(
                 response.quote_id.clone(),
                 EvaluationRecord {
                     quote_id: response.quote_id.clone(),
                     amount: request.amount,
                     expires_at: response.expires_at_unix_seconds,
-                    routes,
-                    destination,
+                    sources,
                 },
             );
         }
     }
 
-    fn require_host_execution_environment(&self) -> Result<(), ApiError> {
+    fn require_real_environment(&self) -> Result<(), ApiError> {
         if self.safety.environment == PaymentEnvironment::Simulator {
             return Err(ApiError::payment_safety(
-                "Simulator mode can never prepare a real payment",
+                "Simulator mode can never execute real payments",
             ));
         }
         if !self.safety.execution_enabled {
@@ -147,14 +126,14 @@ impl PaymentService {
         }
         if !self.safety.require_confirmation {
             return Err(ApiError::payment_safety(
-                "Payment confirmation must be required for real payments",
+                "Host execution requires explicit confirmation",
             ));
         }
         Ok(())
     }
 
     async fn prepare(&self, request: PrepareRequest) -> Result<PaymentResponse, ApiError> {
-        self.require_host_execution_environment()?;
+        self.require_real_environment()?;
         let evaluation = self
             .evaluations
             .lock()
@@ -173,41 +152,40 @@ impl PaymentService {
                 vec!["quote_id".into()],
             ));
         }
-        let binding = evaluation.routes.get(&request.route_id).ok_or_else(|| {
-            ApiError::validation(
-                "Selected route is not part of this live evaluation; evaluate again.",
-                vec!["route_id".into()],
-            )
-        })?;
+        let binding = evaluation
+            .sources
+            .get(&request.route_id)
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::validation(
+                    "Selected source is not part of this live evaluation; evaluate again.",
+                    vec!["route_id".into()],
+                )
+            })?;
         self.safety
             .validate_amount(evaluation.amount)
             .map_err(ApiError::payment_safety)?;
         self.safety
             .validate_endpoint(&binding.source_mint_url)
             .map_err(ApiError::payment_safety)?;
-        let created_at = unix_now();
-        Ok(PaymentResponse {
-            mode: "live",
-            environment: environment_code(self.safety.environment),
-            payment_id: crate::deterministic_id(
-                "host_payment",
+        let now = unix_now();
+        let record = PaymentRecord {
+            id: crate::deterministic_id(
+                "payment",
                 &[
-                    request.quote_id,
+                    request.quote_id.clone(),
                     request.route_id.clone(),
-                    created_at.to_string(),
+                    now.to_string(),
                 ],
             ),
-            quote_id: evaluation.quote_id,
+            quote_id: request.quote_id,
             route_id: request.route_id,
-            amount_sats: evaluation.amount,
+            amount: evaluation.amount,
+            source_mint_url: binding.source_mint_url,
             fee_reserve_sats: binding.fee_reserve_sats,
-            final_fee_sats: None,
-            status: "prepared",
-            settled: false,
-            source_mint_url: binding.source_mint_url.clone(),
-            destination: PaymentDestinationResponse::from(&evaluation.destination),
-            failure_reason: None,
-        })
+            environment: self.safety.environment,
+        };
+        Ok(PaymentResponse::from_record(&record))
     }
 }
 
@@ -226,37 +204,23 @@ pub(super) struct PaymentResponse {
     route_id: String,
     amount_sats: u64,
     fee_reserve_sats: u64,
-    final_fee_sats: Option<u64>,
-    status: &'static str,
+    status: PaymentStatus,
     settled: bool,
     source_mint_url: String,
-    destination: PaymentDestinationResponse,
-    failure_reason: Option<String>,
 }
-
-#[derive(Serialize)]
-struct PaymentDestinationResponse {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    invoice: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mint_url: Option<String>,
-}
-
-impl From<&PreparedDestination> for PaymentDestinationResponse {
-    fn from(destination: &PreparedDestination) -> Self {
-        match destination {
-            PreparedDestination::Lightning { invoice } => Self {
-                kind: "lightning",
-                invoice: Some(invoice.clone()),
-                mint_url: None,
-            },
-            PreparedDestination::Cashu { mint_url } => Self {
-                kind: "cashu",
-                invoice: None,
-                mint_url: Some(mint_url.clone()),
-            },
+impl PaymentResponse {
+    fn from_record(record: &PaymentRecord) -> Self {
+        Self {
+            mode: "live",
+            environment: environment_code(record.environment),
+            payment_id: record.id.clone(),
+            quote_id: record.quote_id.clone(),
+            route_id: record.route_id.clone(),
+            amount_sats: record.amount,
+            fee_reserve_sats: record.fee_reserve_sats,
+            status: PaymentStatus::Prepared,
+            settled: false,
+            source_mint_url: record.source_mint_url.clone(),
         }
     }
 }

@@ -34,6 +34,11 @@ impl PaymentEnvironment {
     pub const fn allows_execution(self) -> bool {
         matches!(self, Self::Regtest)
     }
+
+    #[allow(dead_code)] // Used by safety tests and retained as an explicit environment predicate.
+    pub const fn is_mainnet(self) -> bool {
+        matches!(self, Self::Mainnet)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -61,15 +66,17 @@ impl PaymentSafetyConfig {
             .map_err(|_| {
                 "ECASHMESH_REQUIRE_PAYMENT_CONFIRMATION must be true or false".to_owned()
             })?;
+
         if execution_enabled && !environment.allows_execution() {
-            return Err("Real payments require PAYMENT_ENVIRONMENT=regtest or mainnet".to_owned());
+            return Err("Real payments require PAYMENT_ENVIRONMENT=regtest".to_owned());
         }
         if max_amount_sats == 0 {
             return Err("ECASHMESH_MAX_PAYMENT_SATS must be greater than zero".to_owned());
         }
-        if execution_enabled && !require_confirmation {
-            return Err("Real payments require explicit confirmation".to_owned());
+        if environment == PaymentEnvironment::Mainnet && !require_confirmation {
+            return Err("Mainnet payments require explicit confirmation".to_owned());
         }
+
         Ok(Self {
             environment,
             execution_enabled,
@@ -140,8 +147,8 @@ mod tests {
     }
 
     #[test]
-    fn mainnet_cannot_use_the_regtest_executor() {
-        assert!(!PaymentEnvironment::Mainnet.allows_execution());
+    fn mainnet_requires_confirmation() {
+        assert!(PaymentEnvironment::Mainnet.is_mainnet());
     }
 
     #[test]

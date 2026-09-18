@@ -108,92 +108,53 @@ export function useRegtestCustody(enabled: boolean) {
 
   const custody = useMemo<RegtestCustody | undefined>(() => {
     if (!enabled) return undefined;
-    const meltBolt11: RegtestCustody["meltBolt11"] = async ({
-      mintUrl: sourceMintUrl,
-      invoice,
-      paymentId,
-    }) => {
-      const store = await RegtestStore.open();
-      const wallet = await walletAt(sourceMintUrl);
-      const storageKey = mintStorageKey(sourceMintUrl);
-      const allProofs = deserializeProofs(await store.proofs(storageKey));
-      const quote = await wallet.createMeltQuoteBolt11(invoice);
-      const required = quote.amount.add(quote.fee_reserve);
-      const { keep, send } = await wallet.send(required, allProofs, {
-        includeFees: true,
-      });
-      const selectedTotal = sumProofs(send);
-      const inputFeeSats = selectedTotal.subtract(required).toNumber();
-      const preview = await wallet.prepareMelt("bolt11", quote, send);
-
-      // Mark selected proofs unavailable before the network request. The pending
-      // record is enough to recover NUT-08 change after a browser interruption.
-      await store.savePending({
-        paymentId,
-        mintUrl: storageKey,
-        quote: quote.quote,
-        inputs: asStored(send),
-        retained: asStored(keep),
-        outputData: preview.outputData.map((output) =>
-          OutputData.serialize(output),
-        ),
-        createdAt: Date.now(),
-      });
-      await store.replaceProofs(storageKey, asStored(keep));
-
-      try {
-        const result = await wallet.completeMelt(preview);
-        const change = result.change;
-        await store.replaceProofs(storageKey, asStored([...keep, ...change]));
-        await store.clearPending(paymentId);
-        const finalFeeSats = selectedTotal
-          .subtract(sumProofs(change))
-          .subtract(quote.amount)
-          .subtract(inputFeeSats)
-          .toNumber();
-        return {
-          finalFeeSats,
-          inputFeeSats,
-          feeReserveSats: quote.fee_reserve.toNumber(),
-          totalRequiredSats: required.add(inputFeeSats).toNumber(),
-          status: result.quote.state === "PAID" ? "settled" : "pending",
-        };
-      } catch (reason) {
-        // Do not restore proofs automatically: an interrupted melt may have
-        // settled. The persisted record keeps its inputs and blank outputs for
-        // explicit recovery rather than risking a double spend.
-        throw reason;
-      }
-    };
     return {
-      meltBolt11,
-      async meltToCashu({
-        sourceMintUrl,
-        destinationMintUrl,
-        amountSats,
-        paymentId,
-      }) {
-        const destinationWallet = await walletAt(destinationMintUrl);
-        const destinationQuote = await destinationWallet.createMintQuoteBolt11(
-          amountSats,
-          "EcashMesh regtest destination",
-        );
-        const result = await meltBolt11({
-          mintUrl: sourceMintUrl,
-          invoice: destinationQuote.request,
-          paymentId,
-        });
-        if (result.status !== "settled") return { ...result, destinationMintUrl };
-
-        const minted = await destinationWallet.mintProofsBolt11(
-          amountSats,
-          destinationQuote.quote,
-        );
+      async meltBolt11({ mintUrl: sourceMintUrl, invoice, paymentId }) {
         const store = await RegtestStore.open();
-        const destinationKey = mintStorageKey(destinationMintUrl);
-        const existing = deserializeProofs(await store.proofs(destinationKey));
-        await store.replaceProofs(destinationKey, asStored([...existing, ...minted]));
-        return { ...result, destinationMintUrl };
+        const wallet = await walletAt(sourceMintUrl);
+        const storageKey = mintStorageKey(sourceMintUrl);
+        const allProofs = deserializeProofs(await store.proofs(storageKey));
+        const quote = await wallet.createMeltQuoteBolt11(invoice);
+        const required = quote.amount.add(quote.fee_reserve);
+        const { keep, send } = await wallet.send(required, allProofs, {
+          includeFees: true,
+        });
+        const preview = await wallet.prepareMelt("bolt11", quote, send);
+
+        // Mark selected proofs unavailable before the network request. The pending
+        // record is enough to recover NUT-08 change after a browser interruption.
+        await store.savePending({
+          paymentId,
+          mintUrl: storageKey,
+          quote: quote.quote,
+          inputs: asStored(send),
+          retained: asStored(keep),
+          outputData: preview.outputData.map((output) =>
+            OutputData.serialize(output),
+          ),
+          createdAt: Date.now(),
+        });
+        await store.replaceProofs(storageKey, asStored(keep));
+
+        try {
+          const result = await wallet.completeMelt(preview);
+          const change = result.change;
+          await store.replaceProofs(storageKey, asStored([...keep, ...change]));
+          await store.clearPending(paymentId);
+          const finalFeeSats = sumProofs(send)
+            .subtract(sumProofs(change))
+            .subtract(quote.amount)
+            .toNumber();
+          return {
+            finalFeeSats,
+            status: result.quote.state === "PAID" ? "settled" : "pending",
+          };
+        } catch (reason) {
+          // Do not restore proofs automatically: an interrupted melt may have
+          // settled. The persisted record keeps its inputs and blank outputs for
+          // explicit recovery rather than risking a double spend.
+          throw reason;
+        }
       },
     };
   }, [enabled]);

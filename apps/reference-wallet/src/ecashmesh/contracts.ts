@@ -41,9 +41,15 @@ const evidenceStateSchema = z
     value: z.unknown(),
   })
   .passthrough();
-export const routeSchema = z
+/** A custody/payment source evaluated for one normalized payment target. */
+export const paymentSourceSchema = z
   .object({
+    // `route_id` remains an opaque execution-correlation token.
     route_id: z.string().min(1),
+    source_id: z.string().min(1).optional(),
+    protocol: z.enum(["cashu", "fedimint", "lightning"]).optional(),
+    settlement_mechanism: z.string().min(1).optional(),
+    executable: z.boolean().optional(),
     connector: z.string().min(1),
     path: z.array(z.string().min(1)).min(1),
     score: percentage,
@@ -58,19 +64,24 @@ export const routeSchema = z
     risk_penalty: percentage,
   })
   .passthrough();
+// Compatibility export for integrations that still import the old type name.
+export const routeSchema = paymentSourceSchema;
 export const decisionSchema = z
   .object({
     mode: z.enum(["live", "simulator"]).optional(),
     quote_id: z.string().min(1),
-    recommended_route: routeSchema.nullable(),
-    alternatives: z.array(routeSchema),
+    recommended_source: paymentSourceSchema.nullable().optional(),
+    alternative_sources: z.array(paymentSourceSchema).optional(),
+    // Deprecated wire fields are accepted while servers are upgraded. Views
+    // use them only as a source-selection fallback.
+    recommended_route: paymentSourceSchema.nullable().optional(),
+    alternatives: z.array(paymentSourceSchema).optional(),
     score_breakdown: z
       .object({
         liquidity: percentage,
         reliability: percentage,
         evidence_freshness: percentage,
         fees: percentage.nullable(),
-        route_complexity: unsigned,
         risk_penalty: percentage,
       })
       .passthrough(),
@@ -91,7 +102,8 @@ export const decisionSchema = z
           first_observed_at_unix_seconds: unsigned.nullable(),
           liquidity: evidenceStateSchema,
           fee: evidenceStateSchema,
-          hop_reliability: evidenceStateSchema,
+          source_reliability: evidenceStateSchema.optional(),
+          hop_reliability: evidenceStateSchema.optional(),
           health: evidenceStateSchema,
           solvency: evidenceStateSchema,
           connector_reliability: evidenceStateSchema,
@@ -117,7 +129,9 @@ export const decisionSchema = z
   })
   .passthrough();
 
-export type Route = z.infer<typeof routeSchema>;
+export type PaymentSource = z.infer<typeof paymentSourceSchema>;
+/** @deprecated Use PaymentSource. */
+export type Route = PaymentSource;
 export type RouteDecision = z.infer<typeof decisionSchema>;
 export type EvidenceState = z.infer<typeof evidenceStateSchema>;
 export type Reason = z.infer<typeof reasonSchema>;
@@ -135,7 +149,7 @@ export type PaymentInput = {
   sourceMintUrl?: string;
 };
 
-export const paymentPreparationSchema = z
+export const paymentStatusSchema = z
   .object({
     mode: z.literal("live"),
     environment: z.enum(["regtest", "mainnet"]),
@@ -144,17 +158,12 @@ export const paymentPreparationSchema = z
     route_id: z.string().min(1),
     amount_sats: unsigned,
     fee_reserve_sats: unsigned,
-    status: z.literal("prepared"),
-    settled: z.literal(false),
+    status: z.enum(["prepared", "pending", "settled", "failed", "recovery_required"]),
+    settled: z.boolean(),
     source_mint_url: z.string(),
-    destination: z.discriminatedUnion("type", [
-      z.object({ type: z.literal("lightning"), invoice: z.string().min(1) }),
-      z.object({ type: z.literal("cashu"), mint_url: z.string().url() }),
-    ]),
-    failure_reason: z.string().nullable(),
   })
   .passthrough();
-export type PaymentPreparation = z.infer<typeof paymentPreparationSchema>;
+export type PaymentStatus = z.infer<typeof paymentStatusSchema>;
 
 export function paymentToWire(payment: PaymentInput) {
   return {

@@ -1,4 +1,4 @@
-//! Cashu discovery and unpaid-quote transport.
+//! Cashu discovery and narrowly scoped NUT-05 execution transport.
 //!
 //! Transaction limits are not liquidity. Input fees are not a melt fee quote.
 //! HTTP reachability is not payment reliability or proof of reserves.
@@ -13,7 +13,10 @@ pub use payment_request::{
     CashuPaymentRequest, CashuPaymentRequestEncoding, CashuPaymentRequestError,
     CashuSupportedMethod, CashuTransport,
 };
-pub use transport::{CashuAdapter, MeltQuote, MintConfig, MintQuote, QuoteObservation};
+pub use transport::{
+    CashuAdapter, CashuMeltExecutor, MeltExecution, MeltQuote, MintConfig, MintQuote,
+    QuoteObservation,
+};
 
 use ecashmesh_core::{
     Amount, ConfidenceLevel, ConnectorCapabilities, ConnectorEvidence, ConnectorHealth,

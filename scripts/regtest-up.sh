@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # CDK's maintained Nix harness provisions real bitcoind, Lightning nodes, and
-# two CDK mints. The source is pinned outside this checkout for reproducibility.
+# three CDK mints. The source is pinned outside this checkout for reproducibility.
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 state="$root/.regtest"
 cdk_dir="$state/cdk"
@@ -32,8 +32,18 @@ for _ in $(seq 1 180); do
   if [[ -f /tmp/cdk_regtest_env ]]; then
     # shellcheck disable=SC1091
     source /tmp/cdk_regtest_env
-    if curl --fail --silent "$CDK_TEST_MINT_URL/v1/info" >/dev/null && curl --fail --silent "$CDK_TEST_MINT_URL_2/v1/info" >/dev/null; then
-      printf 'regtest ready: mint-a=%s mint-b=%s\n' "$CDK_TEST_MINT_URL" "$CDK_TEST_MINT_URL_2"
+    if curl --fail --silent "$CDK_TEST_MINT_URL/v1/info" >/dev/null \
+      && curl --fail --silent "$CDK_TEST_MINT_URL_2/v1/info" >/dev/null \
+      && curl --fail --silent "$CDK_TEST_MINT_URL_3/v1/info" >/dev/null; then
+      cat >"$state/ecashmesh-regtest.env" <<EOF
+# Generated from /tmp/cdk_regtest_env. Source-only helper for EcashMesh.
+export ECASHMESH_REGTEST_MINT_A_URL="$CDK_TEST_MINT_URL"
+export ECASHMESH_REGTEST_MINT_B_URL="$CDK_TEST_MINT_URL_2"
+export ECASHMESH_REGTEST_DESTINATION_MINT_URL="$CDK_TEST_MINT_URL_3"
+export ECASHMESH_CASHU_MINTS='[{"id":"cashu:mint-a","url":"$CDK_TEST_MINT_URL"},{"id":"cashu:mint-b","url":"$CDK_TEST_MINT_URL_2"},{"id":"cashu:destination","url":"$CDK_TEST_MINT_URL_3"}]'
+EOF
+      echo "regtest ready: mint-a=$CDK_TEST_MINT_URL mint-b=$CDK_TEST_MINT_URL_2 destination=$CDK_TEST_MINT_URL_3"
+      echo "EcashMesh env: $state/ecashmesh-regtest.env"
       exit 0
     fi
   fi

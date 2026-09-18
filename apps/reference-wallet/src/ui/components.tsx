@@ -144,7 +144,7 @@ export function Loading({ label }: { label: string }) {
 export function ErrorNotice({ error }: { error: EcashMeshError }) {
   const title =
     error.code === "NO_VIABLE_ROUTE"
-      ? "No viable route"
+      ? "No viable payment source"
       : error.code === "VALIDATION_ERROR"
         ? "Check payment details"
         : "Connection or API error";

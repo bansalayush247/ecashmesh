@@ -1,46 +1,36 @@
 # EcashMesh
 
-Evidence-aware payment-route evaluation for Cashu, Fedimint, and Lightning.
+Evidence-aware payment-source selection across ecash and payment systems.
 
-EcashMesh helps a wallet answer: **which available route should I use for this
-payment, and why?** It evaluates declared, executable routes using explicit
+EcashMesh helps a wallet answer: **which available custody or payment source
+should I use for this payment, and why?** It evaluates declared, executable sources using explicit
 evidence, fees, reliability, liquidity confidence, freshness, and risks.
 
-It is not a production wallet. It does not custody funds, store tokens, or
-handle private keys. The reference wallet includes an explicitly opt-in,
-regtest-only browser custody adapter solely to test the host boundary.
+EcashMesh does not replace Lightning pathfinding or the internal routing logic
+of Cashu and Fedimint. It chooses which independent payment source to use; the
+selected system performs its native settlement.
 
-## Repository layout
-
-```text
-apps/reference-wallet/       React Native Web reference host and regtest custody demo
-crates/ecashmesh-core/       Protocol-independent route model, search, ranking, evidence
-crates/ecashmesh-cashu/      Public Cashu discovery and unpaid NUT-04/NUT-05 quotes
-crates/ecashmesh-api/        HTTP API: evaluation, simulator, and live route binding
-crates/ecashmesh-simulator/  Deterministic local fixture utility
-scripts/                     Nix/CDK regtest lifecycle scripts
-```
-
-Keep wallet custody in `apps/`; keep protocol and routing logic in `crates/`.
-The API binds a user-selected live route but never accepts Cashu proofs or
-submits a melt.
+It is not a wallet. It does not custody funds, store tokens, or handle private
+keys. A host wallet supplies selected Cashu proofs and blinded change outputs
+only to the explicitly enabled real-payment boundary.
 
 ## Components
 
 | Component | Responsibility |
 | --- | --- |
-| `ecashmesh-core` | Protocol-independent domain model, evidence/risk evaluation, deterministic ranking, scalable graph search |
-| `ecashmesh-cashu` | Cashu public discovery and unpaid NUT-04/NUT-05 quote normalization |
+| `ecashmesh-core` | Protocol-independent source model, evidence/risk evaluation, deterministic ranking, explicit-mechanism graph search |
+| `ecashmesh-cashu` | Cashu discovery, quote normalization, and a write-only NUT-08 melt transport |
 | `ecashmesh-api` | Thin HTTP boundary on port `5000` |
-| `reference-wallet` | React Native Web reference host, simulator UI, and opt-in regtest custody demo |
+| `reference-wallet` | React Native reference host integration; renders EcashMesh decisions only |
 
-The supported live route shape is deliberately explicit:
+The supported live Cashu settlement mechanism is deliberately explicit:
 
 ```text
-Cashu source → Lightning invoice → Cashu destination quote
+Cashu source → native Cashu Lightning melt → payment target
 ```
 
-No direct mint-to-mint edge is invented merely because both endpoints use Cashu.
+No direct mint-to-mint edge is invented merely because both endpoints use Cashu,
+and no Lightning hops are modelled by EcashMesh.
 
 ## Architecture
 
@@ -57,7 +47,7 @@ API (`ecashmesh-api`)
   │                 public metadata + unpaid quote observations
   ▼
 Core (`ecashmesh-core`)
-  evidence → feasibility → bounded route search → ranking → explanation
+  evidence → source feasibility → bounded source selection → ranking → explanation
 ```
 
 Protocol-specific code stays outside the core. The scalable core separates
@@ -104,14 +94,14 @@ cd apps/reference-wallet
 EXPO_PUBLIC_ROUTING_MODE=live nix develop -c npm run web
 ```
 
-Live mode has no simulator fallback. It only returns a route when current,
+Live mode has no simulator fallback. It only returns a source when current,
 public mint metadata and unpaid NUT-04/NUT-05 quotes establish the declared
 mechanism. `/v1/simulator/confirm` is deliberately unavailable in live mode.
 
 ### Real regtest execution
 
-Host-custody testing is off by default. In regtest, the API only binds a fresh
-route to an approved local mint; the browser wallet executes the melt directly.
+Real execution is off by default and only accepts local mint endpoints in
+regtest. It never uses the simulator after a NUT-08 error.
 
 ```bash
 # Run ./scripts/regtest-up.sh first.
@@ -132,29 +122,21 @@ POST /v1/payments/prepare
 {"quote_id":"live_quote_...","route_id":"route_..."}
 ```
 
-The host wallet then creates its own fresh NUT-05 quote, selects its own
-proofs, creates NUT-08 change outputs, and submits the melt directly to the
-mint through a compatible Cashu SDK. EcashMesh never accepts proof secrets,
-blinded outputs, or a melt result. The reference wallet's opt-in regtest
-custody adapter persists that material locally; production hosts must supply
-their own encrypted custody and recovery policy.
+The host custody adapter then submits genuine NUT-00 proofs and blinded change
+outputs directly to the selected mint using its Cashu SDK. Proof secrets never
+cross EcashMesh HTTP. The wallet retains recovery state locally and keeps the
+NUT-05 fee reserve, NUT-02 input fees, and final melt fee distinct. Regtest
+settlement observations are never treated as production evidence.
 
-Start the reference wallet with the test adapter only when using disposable
-regtest funds:
-
-```bash
-cd apps/reference-wallet
-EXPO_PUBLIC_ROUTING_MODE=live \
-EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY=true \
-EXPO_PUBLIC_REGTEST_MINT_URL=http://127.0.0.1:8085 \
-nix develop -c npm run web
-```
+The reference wallet exposes a `RegtestCustody` host interface. A production
+host must provide it from a real Cashu SDK; the UI itself never manufactures or
+stores proof secrets.
 
 ### Nix regtest topology
 
 No Docker daemon is required. The pinned CDK harness used by these scripts
-starts Bitcoin Core regtest, two CLN nodes, two LND nodes, and two real CDK
-mints (one CLN-backed and one LND-backed). It does not use CDK's fake wallet.
+starts Bitcoin Core regtest, two CLN nodes, two LND nodes, and three real CDK
+mints (CLN-, LND-, and LDK-backed). It does not use CDK's fake wallet.
 
 ```bash
 ./scripts/regtest-up.sh
@@ -163,9 +145,9 @@ mints (one CLN-backed and one LND-backed). It does not use CDK's fake wallet.
 ```
 
 `regtest-up.sh` pins CDK at `4643cb73b4a1f66cf46b170347ac768d08f198c9`, waits
-for both mint `/v1/info` endpoints, and leaves logs in `.regtest/regtest.log`.
+for the source mint `/v1/info` endpoints, and leaves logs in `.regtest/regtest.log`.
 CDK exports the live endpoints through `/tmp/cdk_regtest_env` as
-`CDK_TEST_MINT_URL` and `CDK_TEST_MINT_URL_2`.
+`CDK_TEST_MINT_URL`, `CDK_TEST_MINT_URL_2`, and `CDK_TEST_MINT_URL_3`.
 
 ## Cashu destinations
 
@@ -210,7 +192,7 @@ For a 100-sat payment with a 2-sat reserve, the wallet shows a **Fee reserve
 }
 ```
 
-Responses contain the recommended route, ranked alternatives, fee estimate,
+Responses contain the recommended source, ranked alternative sources, fee estimate,
 score breakdown, evidence, risks, explanation, and expiry. Errors are structured:
 
 ```json
@@ -235,7 +217,7 @@ Other useful endpoints:
 ## Safety and evidence
 
 Evidence is always `known`, `stale`, or `unknown`. Missing evidence never
-silently improves route quality. Public transaction limits are not liquidity;
+silently improves source quality. Public transaction limits are not liquidity;
 HTTP reachability is not reliability; mint metadata is not proof of solvency.
 
 Cashu adapter requests are bounded and do not use custody, tokens, proofs, or
