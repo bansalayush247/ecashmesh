@@ -68,7 +68,7 @@ export const paymentSourceSchema = z
 export const routeSchema = paymentSourceSchema;
 export const decisionSchema = z
   .object({
-    mode: z.enum(["live", "simulator"]).optional(),
+    mode: z.literal("live").optional(),
     quote_id: z.string().min(1),
     recommended_source: paymentSourceSchema.nullable().optional(),
     alternative_sources: z.array(paymentSourceSchema).optional(),

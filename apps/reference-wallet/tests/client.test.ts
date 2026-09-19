@@ -3,10 +3,9 @@ import test from "node:test";
 import { createEcashMeshClient } from "../src/ecashmesh/client";
 import { EcashMeshError } from "../src/ecashmesh/transport";
 import { collectPayment } from "../src/host/payment";
-import { createSimulatorClient } from "../src/host/simulator";
 import { feeRate, feeReasonableness } from "../src/ui/fees";
 
-const payment = collectPayment("100000", "lnbc1simulateddestination");
+const payment = collectPayment("100000", "lnbc1testdestination");
 const fee = { amount: null, asset: "sats", freshness: "unknown" };
 const route = {
   route_id: "route_a",
@@ -274,38 +273,4 @@ test("host validates only payment input, including unsafe integers", () => {
   }
   assert.throws(() => collectPayment("1", "  "), { code: "VALIDATION_ERROR" });
   assert.equal(collectPayment("1", " target ").destination.value, "target");
-});
-
-test("simulator receives selected route and original payment, never fabricated fees or scores", async () => {
-  const receipt = {
-    simulation_id: "sim",
-    status: "simulated_success",
-    simulated: true,
-    quote_id: "quote_demo",
-    route_id: "alternative",
-    amount: payment.amount,
-    asset: "BTC",
-    fee,
-    path: route.path,
-    message: "No funds moved.",
-  };
-  const simulator = createSimulatorClient({
-    baseUrl: "http://local",
-    fetch: async (url, options) => {
-      assert.equal(url, "http://local/v1/simulator/confirm");
-      const request = JSON.parse(String(options?.body));
-      assert.deepEqual(Object.keys(request), [
-        "payment",
-        "quote_id",
-        "route_id",
-      ]);
-      assert.equal(request.route_id, "alternative");
-      assert.equal(request.payment.amount, payment.amount);
-      return json(receipt);
-    },
-  });
-  assert.deepEqual(
-    await simulator.confirm(payment, "quote_demo", "alternative"),
-    receipt,
-  );
 });

@@ -10,7 +10,6 @@ use reqwest::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaymentEnvironment {
-    Simulator,
     Regtest,
     Mainnet,
 }
@@ -18,15 +17,14 @@ pub enum PaymentEnvironment {
 impl PaymentEnvironment {
     pub fn from_env() -> Result<Self, String> {
         match env::var("PAYMENT_ENVIRONMENT")
-            .unwrap_or_else(|_| "simulator".to_owned())
+            .unwrap_or_else(|_| "regtest".to_owned())
             .to_ascii_lowercase()
             .as_str()
         {
-            "simulator" => Ok(Self::Simulator),
             "regtest" => Ok(Self::Regtest),
             "mainnet" => Ok(Self::Mainnet),
             value => Err(format!(
-                "Unsupported PAYMENT_ENVIRONMENT={value}; expected simulator, regtest, or mainnet"
+                "Unsupported PAYMENT_ENVIRONMENT={value}; expected regtest or mainnet"
             )),
         }
     }
@@ -135,11 +133,6 @@ impl PaymentSafetyConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn simulator_cannot_execute() {
-        assert!(!PaymentEnvironment::Simulator.allows_execution());
-    }
 
     #[test]
     fn regtest_allows_execution() {

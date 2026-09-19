@@ -5,7 +5,7 @@ use crate::{
     FeeQuote, LiquidityInfo, ReliabilityInfo, RouteCandidate, RouteCandidateError, RouteHop,
 };
 
-/// Normalized connector facts supplied by a simulator or protocol adapter.
+/// Normalized connector facts supplied by a protocol adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectorSnapshot {
     /// Stable connector identifier.
@@ -41,19 +41,5 @@ impl ConnectorSnapshot {
                 self.reliability.clone(),
             )],
         )
-    }
-}
-
-impl From<crate::SimulatedConnector> for ConnectorSnapshot {
-    fn from(connector: crate::SimulatedConnector) -> Self {
-        Self {
-            id: connector.id,
-            connector_type: connector.connector_type,
-            capabilities: connector.capabilities,
-            liquidity: connector.liquidity,
-            fee: connector.fee,
-            reliability: connector.reliability,
-            evidence: connector.evidence,
-        }
     }
 }

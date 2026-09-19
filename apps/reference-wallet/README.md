@@ -7,15 +7,16 @@ handling, token storage, accounts, balances, portfolio, history, or real
 execution. Its opt-in regtest adapter is the exception: it stores disposable
 regtest proofs locally in IndexedDB and settles directly with the selected mint;
 proof secrets never reach EcashMesh HTTP. Payment state is otherwise in memory
-and cleared when returning home. The host simulator does not persist receipts.
+and cleared when returning home.
 
 ## Run locally
 
-Choose an explicit backend mode. The deterministic simulator is best for offline
-development and is what the end-to-end test suite uses:
+Start the quote-backed API with an explicit source mint:
 
 ```sh
-ROUTING_MODE=simulator nix develop -c cargo run -p ecashmesh-api
+ROUTING_MODE=live \
+ECASHMESH_CASHU_MINTS='[{"id":"cashu:source","url":"https://your-source-mint.example"}]' \
+nix develop -c cargo run -p ecashmesh-api
 ```
 
 Terminal 2:
@@ -28,24 +29,9 @@ npm run web
 ```
 
 Open <http://localhost:8081>. This is the React Native client rendered through
-React Native Web; the API runs on port **5000**. No live connector services or
-Expo account are required. Initial package/browser installation needs internet;
-routing scenarios use only the local server afterward.
+React Native Web; the API runs on port **5000**.
 
-For the live BOSS Battle flow, configure a real source mint and make the wallet
-show its live-mode form:
-
-```sh
-# terminal 1, repository root
-ROUTING_MODE=live \
-ECASHMESH_CASHU_MINTS='[{"id":"cashu:source","url":"https://your-source-mint.example"}]' \
-nix develop -c cargo run -p ecashmesh-api
-
-# terminal 2, apps/reference-wallet
-EXPO_PUBLIC_ROUTING_MODE=live npm run web
-```
-
-Live mode has no simulator fallback. Paste a real whole-satoshi BOLT11 invoice,
+EcashMesh has no fixture fallback. Paste a real whole-satoshi BOLT11 invoice,
 or select **Cashu request** and provide a NUT-18 `creqA...` request or
 `cashu://request?mint=https%3A%2F%2Fdestination-mint.example`. The frontend does
 not parse either target: it sends the chosen type and raw value to EcashMesh.
@@ -85,18 +71,17 @@ clients are not subject to browser CORS.
 ## Try the flow
 
 1. Choose **Send payment** on the Pocket home.
-2. In simulator mode, keep **100000** sats and the simulated destination. In live
-   mode, choose a destination type and paste a real BOLT11 invoice or Cashu request.
-3. Choose **EcashMesh Source Selection**. The SDK evaluates all simulated sources.
+2. Choose a destination type and paste a real BOLT11 invoice or Cashu request.
+3. Choose **EcashMesh Source Selection**. The SDK evaluates available sources.
 4. Inspect the recommendation, ranked alternatives, scores, fees, time estimates,
    liquidity/reliability/freshness signals, risks, and server-authored explanations.
 5. Open the source settlement view to see connector capabilities and individual evidence states,
    sources, confidence, observations, and raw response JSON.
 6. Choose the recommendation or an alternative source. Pocket receives that source for
-   its confirmation screen. Simulator mode shows **Confirm simulated payment**;
-   live mode shows **Confirm real regtest payment** and requires a host custody
+   its confirmation screen. Live regtest shows **Confirm real regtest payment**
+   and requires a host custody
    adapter with genuine Cashu proofs before it can settle.
-7. Read **Simulation complete**, then return to Pocket. No funds moved.
+7. Read **Payment complete**, then return to Pocket.
 
 Other checks:
 
@@ -107,7 +92,7 @@ Other checks:
 | 0, fractional amount, or empty destination | Validation error                                                       |
 | Stop the API, evaluate or confirm          | Recoverable connection error; no invented recommendation or success    |
 | Back during evaluation                     | Cancel; late responses cannot replace an edited payment                |
-| Repeat identical payment                   | Same server ordering, scores, explanation, IDs, and simulator receipt  |
+| Repeat identical payment                   | Same server ordering, scores, explanation, and IDs                     |
 
 The normal API returns `NO_VIABLE_ROUTE` when nothing is feasible. The UI also
 handles an explicitly null recommendation with an empty state; automated tests
@@ -117,10 +102,8 @@ Signals are normalized server outputs, not success probabilities. The Phase 6
 `score_breakdown` contains signal percentages and a risk penalty;
 these are not additive weighted score contributions. Unknown fees are displayed
 as unknown, never zero. Unknown evidence remains distinct from stale or negative
-observations. API expiry is expressed in **fixed simulator time** (`unix:…`),
-not current time. Confirmation reevaluates that same fixture; no wall-clock
-expiry. Live expiry is based on available quote/metadata expiry. Neither mode
-executes a real payment.
+observations. Live expiry is based on available quote/metadata expiry. The
+evaluation step never executes a real payment.
 
 ## Integration boundaries
 
@@ -129,7 +112,7 @@ Pocket input and navigation (src/host)
     → SDK adapter (src/ecashmesh) → POST /v1/routes/evaluate → Rust core
     ← unchanged decision DTOs ← server ranking and explanation
 EcashMesh views (src/ui) → user-selected source → Pocket confirmation
-    → host simulator bridge → POST /v1/simulator/confirm → simulated receipt
+    → host custody adapter → selected source mint → settlement receipt
 ```
 
 The portable adapter has no React Native imports and can be copied into a real
@@ -155,16 +138,6 @@ score, rank, aggregate evidence, evaluate liquidity or risk, or choose a source.
 Views render reasons and ordering as received; the host only chooses the source
 the user selected. A real wallet can replace `src/host` and `App.tsx`, reuse the
 adapter/views, and implement its own authorized confirmation workflow.
-
-`src/host/simulator.ts` is intentionally **not** part of the routing SDK. The
-simulator endpoint accepts `{ payment, quote_id, route_id }`. In simulator mode
-it reevaluates through the existing engine and rejects changed inputs or fabricated
-execution IDs. In live mode it returns only an explicitly simulation-backed completion
-for the selected evaluated quote; it never calls a payment execution endpoint. It returns
-`{ simulation_id, status: "simulated_success", simulated: true, quote_id,
-route_id, amount, asset, fee, path, message }`. Both recommended and alternative
-sources are accepted if present in the quote. It has no storage or payment side
-effects; repetition is deterministic.
 
 ## Verification
 

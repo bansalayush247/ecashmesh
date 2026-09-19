@@ -44,10 +44,7 @@ fn lightning_invoice_returns_two_independent_cashu_sources() {
         &json!([]),
     );
 
-    let (status, response) = server.post(
-        "/v1/routes/evaluate",
-        &lightning_payment(100_000),
-    );
+    let (status, response) = server.post("/v1/routes/evaluate", &lightning_payment(100_000));
 
     assert_eq!(status, 200, "{response}");
     assert_eq!(response["recommended_source"]["protocol"], "cashu");

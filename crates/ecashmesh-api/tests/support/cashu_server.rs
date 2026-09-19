@@ -17,6 +17,7 @@ pub struct ApiServer {
 }
 
 impl ApiServer {
+    #[allow(dead_code)]
     pub fn start(mint_url: &str) -> Self {
         Self::start_with_sources(
             &json!([{"id":"cashu:fixture","url":mint_url}]),
@@ -54,6 +55,7 @@ impl ApiServer {
         self.request("POST", path, &body.to_string())
     }
 
+    #[allow(dead_code)]
     pub fn get(&self, path: &str) -> (u16, Value) {
         self.request("GET", path, "")
     }

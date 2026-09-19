@@ -14,7 +14,6 @@ mod model;
 pub mod risk;
 pub mod routing;
 pub mod scalable;
-pub mod simulator;
 
 pub use connector::ConnectorSnapshot;
 pub use evidence::{
@@ -46,8 +45,4 @@ pub use scalable::{
     RouteCache, RouteSearchConfig, RouteSearchError, RouteSearchMetrics, RouteSearchRequest,
     RouteSearchResult, ScalableRouter, SearchEndpoint, SearchObservability,
     SearchObservabilityReport, TransferMechanism,
-};
-pub use simulator::{
-    DEMO_EVALUATED_AT, RoutingScenario, ScenarioError, ScenarioName, ScenarioResult,
-    SimulatedConnector, all_scenarios, demo_connectors, run_all_scenarios, verify_all_scenarios,
 };

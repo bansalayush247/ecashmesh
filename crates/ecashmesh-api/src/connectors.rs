@@ -9,9 +9,7 @@ use ecashmesh_cashu::{
     CashuObservation,
     discovery::{DiscoveryReport, DiscoveryService, DiscoverySource, MintHint},
 };
-use ecashmesh_core::{
-    Amount, ConnectorId, ConnectorSnapshot, DEMO_EVALUATED_AT, EvidenceTimestamp,
-};
+use ecashmesh_core::{Amount, ConnectorId, ConnectorSnapshot, EvidenceTimestamp};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -19,18 +17,15 @@ use super::{ApiError, EvidenceStateResponse, connector_health_code};
 
 #[derive(Clone)]
 pub(super) enum Provider {
-    Simulator,
     Cashu(Arc<DiscoveryService>),
 }
 
 pub(super) struct ConnectorBatch {
     pub connectors: Vec<ConnectorSnapshot>,
-    /// Protocol observations retained for live quote-backed route construction.
+    /// Protocol observations retained for quote-backed route construction.
     pub live_observations: Vec<CashuObservation>,
     pub observations: Vec<Value>,
-    pub evaluated_at: EvidenceTimestamp,
     pub expires_at_unix_seconds: u64,
-    pub simulated: bool,
     pub discovery: DiscoveryReport,
 }
 
@@ -96,7 +91,7 @@ pub(super) fn select(
 
 /// Narrows live candidates to an explicitly configured source when supplied.
 /// The absence of a source selector leaves the already-selected live sources
-/// intact; it never adds simulator fixtures or undiscovered connectors.
+/// intact; it never adds fixtures or undiscovered connectors.
 pub(super) fn select_live_sources(
     selected: &[ConnectorSnapshot],
     source_connector: Option<String>,
@@ -158,7 +153,6 @@ impl Provider {
     pub fn from_env() -> Result<Self, String> {
         let mode = std::env::var("ROUTING_MODE").unwrap_or_else(|_| "live".into());
         match mode.as_str() {
-            "simulator" => Ok(Self::Simulator),
             "live" => {
                 let config = std::env::var("ECASHMESH_CASHU_MINTS").unwrap_or_else(|_| "[]".into());
                 let config: Vec<ConfigInput> =
@@ -191,14 +185,8 @@ impl Provider {
     }
 
     #[must_use]
-    pub const fn is_live(&self) -> bool {
-        matches!(self, Self::Cashu(_))
-    }
-
-    #[must_use]
     pub const fn cashu_service(&self) -> Option<&Arc<DiscoveryService>> {
         match self {
-            Self::Simulator => None,
             Self::Cashu(service) => Some(service),
         }
     }
@@ -208,26 +196,7 @@ impl Provider {
         amount: Amount,
         hints: Vec<MintHint>,
     ) -> Result<ConnectorBatch, ApiError> {
-        if matches!(self, Self::Simulator) && !hints.is_empty() {
-            return Err(ApiError::validation(
-                "Mint discovery requires cashu mode",
-                vec!["ROUTING_MODE=live".into()],
-            ));
-        }
         match self {
-            Self::Simulator => Ok(ConnectorBatch {
-                connectors: ecashmesh_core::demo_connectors()
-                    .map_err(|error| ApiError::internal("simulator_error", error.to_string()))?
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-                live_observations: Vec::new(),
-                observations: Vec::new(),
-                evaluated_at: DEMO_EVALUATED_AT,
-                simulated: true,
-                expires_at_unix_seconds: DEMO_EVALUATED_AT.unix_seconds() + 300,
-                discovery: DiscoveryReport::default(),
-            }),
             Self::Cashu(service) => {
                 let state = service
                     .collect(hints)
@@ -254,8 +223,6 @@ impl Provider {
                         .iter()
                         .map(|observation| observation_json(observation, amount))
                         .collect(),
-                    evaluated_at,
-                    simulated: false,
                     discovery: state.report,
                 })
             }

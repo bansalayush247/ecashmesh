@@ -1,4 +1,4 @@
-//! Local HTTP surface for manually exercising deterministic route ranking.
+//! Local HTTP surface for manually exercising live payment-source evaluation.
 
 use std::collections::BTreeMap;
 
@@ -13,10 +13,10 @@ use axum::{
 use ecashmesh_cashu::KeysetFee;
 use ecashmesh_core::{
     Amount, ConfidenceLevel, ConnectorCapabilities, ConnectorEvidence, ConnectorHealth,
-    ConnectorId, ConnectorType, DEMO_EVALUATED_AT, DecisionReason, Evidence, EvidenceFreshness,
-    EvidenceSource, EvidenceTimestamp, ExplainedRoute, FeeQuote, LiquidityInfo, PaymentRequest,
-    ReliabilityInfo, RouteCandidate, RouteDecisionExplanation, RouteHop, RouteRankingConfig,
-    SolvencyStatus, explain_ranking, rank_routes,
+    ConnectorId, ConnectorType, DecisionReason, Evidence, EvidenceFreshness, EvidenceSource,
+    EvidenceTimestamp, ExplainedRoute, FeeQuote, LiquidityInfo, PaymentRequest, ReliabilityInfo,
+    RouteCandidate, RouteDecisionExplanation, RouteHop, RouteRankingConfig, SolvencyStatus,
+    explain_ranking, rank_routes,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -26,7 +26,6 @@ mod connectors;
 mod live;
 mod payment;
 mod payment_mode;
-mod simulation;
 use connectors::Provider;
 
 #[derive(Clone)]
@@ -82,7 +81,6 @@ fn app(provider: Provider) -> Router {
         .route("/v1/routes/evaluate", post(evaluate))
         .route("/v1/connectors", get(connector_observations))
         .route("/v1/connectors/discover", post(discover_connectors))
-        .route("/v1/simulator/confirm", post(simulation::confirm))
         .route("/v1/payments/prepare", post(payment::prepare))
         .with_state(state)
         .layer(
@@ -108,12 +106,11 @@ async fn index() -> Html<&'static str> {
   </head>
   <body>
     <h1>EcashMesh local API</h1>
-    <p>EcashMesh is running. Set ROUTING_MODE=live for quote-backed Cashu discovery or ROUTING_MODE=simulator for offline fixtures.</p>
+    <p>EcashMesh is running in live quote-backed Cashu discovery mode.</p>
     <p>The reference wallet integration is a separate React Native client.</p>
     <p>Run <code>npm run web</code> from <code>apps/reference-wallet</code>.</p>
     <p>Open <a href="http://localhost:8081">http://localhost:8081</a>.</p>
     <p>Payment-source evaluation: <code>POST /v1/routes/evaluate</code></p>
-    <p>Simulator confirmation: <code>POST /v1/simulator/confirm</code></p>
     <p>Real payment preparation: <code>POST /v1/payments/prepare</code>. Wallet custody settles directly with the selected source.</p>
   </body>
 </html>"#,
@@ -201,7 +198,7 @@ async fn connector_observations(
 fn catalog_json(batch: &connectors::ConnectorBatch, amount: u64) -> serde_json::Value {
     json!({
         "evaluated_amount_sats": amount,
-        "mode": if batch.simulated { "simulator" } else { "live" },
+        "mode": "live",
         "read_only": true,
         "evidence": batch.connectors.iter().map(EvidenceResponse::from_connector).collect::<Vec<_>>(),
         "observations": batch.observations,
@@ -235,19 +232,15 @@ async fn evaluate_using(
     let Json(request) = request
         .map_err(|error| ApiError::new("invalid_json", format!("invalid request body: {error}")))?;
     request.validate()?;
-    let live_destination = provider
-        .is_live()
-        .then(|| {
-            live::LiveDestination::parse(&request.destination.kind, &request.destination.value)
-        })
-        .transpose()
-        .map_err(|error| {
-            ApiError::validation(
-                "Unsupported live destination",
-                vec![format!("unsupported destination: {error}")],
-            )
-        })?;
-    let hints = request.discovery_hints(live_destination.as_ref())?;
+    let live_destination =
+        live::LiveDestination::parse(&request.destination.kind, &request.destination.value)
+            .map_err(|error| {
+                ApiError::validation(
+                    "Unsupported live destination",
+                    vec![format!("unsupported destination: {error}")],
+                )
+            })?;
+    let hints = request.discovery_hints(Some(&live_destination))?;
     let EvaluateRequest {
         amount,
         asset: _,
@@ -259,120 +252,83 @@ async fn evaluate_using(
         ..
     } = request;
 
-    let mut batch = provider.collect(Amount::from_sats(amount), hints).await?;
+    let batch = provider.collect(Amount::from_sats(amount), hints).await?;
     let candidate_connectors = connectors::resolve_ids(candidate_connectors, &batch.discovery);
     let selected = connectors::select(batch.connectors.clone(), candidate_connectors)?;
     let amount = Amount::from_sats(amount);
-    if let (Some(live_destination), Some(service)) = (live_destination, provider.cashu_service()) {
-        let sources = connectors::select_live_sources(
-            &selected,
-            source_connector,
-            source_mint_url,
-            &batch.discovery,
-        )?;
-        let evaluation = match live::evaluate(service, &batch, sources, live_destination, amount)
-            .await
-        {
-            Ok(evaluation) => evaluation,
-            Err(no_route) => {
-                return Err(ApiError::no_viable(
-                    "No viable live route found.",
-                    no_route
-                        .details
-                        .into_iter()
-                        .chain(batch.discovery.issues.iter().map(|issue| {
-                            format!("{}: {} ({})", issue.field, issue.message, issue.code)
-                        }))
-                        .chain(no_route.quote_observations.iter().filter_map(|quote| {
-                            quote["issue"].as_object().map(|issue| {
-                                format!(
-                                    "{}: {} ({})",
-                                    quote["kind"].as_str().unwrap_or("quote"),
-                                    issue["message"].as_str().unwrap_or("unknown quote failure"),
-                                    issue["code"].as_str().unwrap_or("UNKNOWN")
-                                )
-                            })
-                        }))
-                        .collect(),
-                ));
-            }
-        };
-        let quote_id = deterministic_id(
-            "live_quote",
-            &[
-                deterministic_quote_id(
-                    amount,
-                    &destination,
-                    &payment_intent,
-                    &evaluation.connectors,
-                ),
-                json!(evaluation.quote_observations).to_string(),
-            ],
-        );
-        let mut response = EvaluateResponse::from_ranking(
-            quote_id,
-            &destination,
-            &payment_intent,
-            &evaluation.connectors,
-            evaluation.ranking,
-        );
-        response.apply_live_fee_terms(&evaluation.fee_terms, amount);
-        response.simulated = false;
-        response.mode = "live";
-        response.discovery = batch.discovery;
-        response.connector_observations = batch.observations;
-        response.live = Some(json!({
-            "quote_observations": evaluation.quote_observations,
-            "graph": evaluation.graph_context,
-            "execution": "evaluation_only_no_funds_moved",
-        }));
-        response.expires_at_unix_seconds = evaluation.expires_at_unix_seconds;
-        response.expires_at = format!("unix:{}", response.expires_at_unix_seconds);
-        for source in std::iter::once(&mut response.recommended_source)
-            .chain(&mut response.alternative_sources)
-        {
-            source.estimated_time_seconds = None;
-        }
-        response.sync_legacy_route_fields();
-        return Ok(Json(response));
-    }
-
-    batch.observations.retain(|observation| {
-        selected
-            .iter()
-            .any(|connector| Some(connector.id.as_str()) == observation["connector"].as_str())
-    });
-    let candidates = selected
-        .iter()
-        .map(|connector| connector.quote(amount))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| ApiError::internal("simulator_error", error.to_string()))?;
-    let connector_evidence = selected
-        .iter()
-        .map(|connector| (connector.id.clone(), connector.evidence.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let ranking = rank_routes(
-        PaymentRequest::new(amount),
-        candidates,
-        &connector_evidence,
-        batch.evaluated_at,
-        RouteRankingConfig::default(),
-    );
-    if ranking.ranked.is_empty() {
-        return Err(ApiError::no_viable(
-            "No available route can satisfy this payment.",
-            ranking
-                .rejected
-                .iter()
-                .flat_map(|route| route.reasons.iter())
-                .map(|reason| format!("{reason:?}"))
-                .collect(),
+    let Some(service) = provider.cashu_service() else {
+        return Err(ApiError::internal(
+            "provider_error",
+            "Cashu discovery provider is unavailable",
         ));
+    };
+    let sources = connectors::select_live_sources(
+        &selected,
+        source_connector,
+        source_mint_url,
+        &batch.discovery,
+    )?;
+    let evaluation = match live::evaluate(service, &batch, sources, live_destination, amount).await
+    {
+        Ok(evaluation) => evaluation,
+        Err(no_route) => {
+            return Err(ApiError::no_viable(
+                "No viable live route found.",
+                no_route
+                    .details
+                    .into_iter()
+                    .chain(batch.discovery.issues.iter().map(|issue| {
+                        format!("{}: {} ({})", issue.field, issue.message, issue.code)
+                    }))
+                    .chain(no_route.quote_observations.iter().filter_map(|quote| {
+                        quote["issue"].as_object().map(|issue| {
+                            format!(
+                                "{}: {} ({})",
+                                quote["kind"].as_str().unwrap_or("quote"),
+                                issue["message"].as_str().unwrap_or("unknown quote failure"),
+                                issue["code"].as_str().unwrap_or("UNKNOWN")
+                            )
+                        })
+                    }))
+                    .collect(),
+            ));
+        }
+    };
+    let quote_id = deterministic_id(
+        "live_quote",
+        &[
+            deterministic_quote_id(
+                amount,
+                &destination,
+                &payment_intent,
+                &evaluation.connectors,
+            ),
+            json!(evaluation.quote_observations).to_string(),
+        ],
+    );
+    let mut response = EvaluateResponse::from_ranking(
+        quote_id,
+        &destination,
+        &payment_intent,
+        &evaluation.connectors,
+        evaluation.ranking,
+    );
+    response.apply_live_fee_terms(&evaluation.fee_terms, amount);
+    response.discovery = batch.discovery;
+    response.connector_observations = batch.observations;
+    response.live = Some(json!({
+        "quote_observations": evaluation.quote_observations,
+        "graph": evaluation.graph_context,
+        "execution": "evaluation_only_no_funds_moved",
+    }));
+    response.expires_at_unix_seconds = evaluation.expires_at_unix_seconds;
+    response.expires_at = format!("unix:{}", response.expires_at_unix_seconds);
+    for source in
+        std::iter::once(&mut response.recommended_source).chain(&mut response.alternative_sources)
+    {
+        source.estimated_time_seconds = None;
     }
-    let quote_id = deterministic_quote_id(amount, &destination, &payment_intent, &selected);
-    let mut response =
-        EvaluateResponse::from_ranking(quote_id, &destination, &payment_intent, &selected, ranking);
-    response.mode = "simulator";
+    response.sync_legacy_route_fields();
     Ok(Json(response))
 }
 
@@ -943,7 +899,6 @@ impl RankResponse {
 pub(crate) struct EvaluateResponse {
     pub(crate) mode: &'static str,
     discovery: ecashmesh_cashu::discovery::DiscoveryReport,
-    simulated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) live: Option<serde_json::Value>,
     pub(crate) connector_observations: Vec<serde_json::Value>,
@@ -990,8 +945,7 @@ impl EvaluateResponse {
             payment_intent,
         );
         Self {
-            mode: "simulator",
-            simulated: true,
+            mode: "live",
             discovery: ecashmesh_cashu::discovery::DiscoveryReport::default(),
             connector_observations: Vec::new(),
             live: None,
@@ -1007,8 +961,8 @@ impl EvaluateResponse {
                 .map(EvidenceResponse::from_connector)
                 .collect(),
             explanation,
-            expires_at: format!("unix:{}", DEMO_EVALUATED_AT.unix_seconds() + 300),
-            expires_at_unix_seconds: DEMO_EVALUATED_AT.unix_seconds() + 300,
+            expires_at: String::new(),
+            expires_at_unix_seconds: 0,
         }
     }
 
@@ -1570,8 +1524,8 @@ fn deterministic_quote_id(
         .collect::<Vec<_>>();
     connector_ids.sort_unstable();
     // Keep payment fields distinct: sorting all values made a swapped amount
-    // and numeric destination share an ID. IDs bind simulator confirmation to
-    // these inputs; they are deterministic identifiers, not authorization tokens.
+    // and numeric destination share an ID. IDs bind evaluation to these inputs;
+    // they are deterministic identifiers, not authorization tokens.
     let identity = json!({
         "amount": amount.sats(),
         "destination_type": destination.kind,

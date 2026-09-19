@@ -13,9 +13,8 @@ import {
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { createEcashMeshClient } from "./src/ecashmesh/client";
-import { createSimulatorClient } from "./src/host/simulator";
 import { useRegtestCustody } from "./src/host/useRegtestCustody";
-import { usePaymentFlow, type RoutingMode } from "./src/host/usePaymentFlow";
+import { usePaymentFlow } from "./src/host/usePaymentFlow";
 import {
   Button,
   colors,
@@ -41,11 +40,9 @@ const baseUrl =
     ? "http://10.0.2.2:5000"
     : "http://127.0.0.1:5000");
 const ecashmesh = createEcashMeshClient({ baseUrl });
-const simulator = createSimulatorClient({ baseUrl });
-const routingMode: RoutingMode =
-  process.env.EXPO_PUBLIC_ROUTING_MODE === "simulator" ? "simulator" : "live";
 const regtestCustodyEnabled =
   process.env.EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY === "true";
+const btcUsdRate = Number(process.env.EXPO_PUBLIC_BTC_USD_RATE ?? "");
 
 function compactDestination(value: string) {
   const start = 18;
@@ -53,6 +50,23 @@ function compactDestination(value: string) {
   return value.length > start + end + 1
     ? `${value.slice(0, start)}…${value.slice(-end)}`
     : value;
+}
+
+function amountValueHint(value: string) {
+  const amount = Number.parseInt(value.replace(/[,_\s]/g, ""), 10);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return "Enter amount in sats";
+  }
+  if (Number.isFinite(btcUsdRate) && btcUsdRate > 0) {
+    const usd = (amount / 100_000_000) * btcUsdRate;
+    return `≈ ${new Intl.NumberFormat("en-US", {
+      currency: "USD",
+      maximumFractionDigits: usd >= 1 ? 2 : 4,
+      minimumFractionDigits: usd >= 1 ? 2 : 4,
+      style: "currency",
+    }).format(usd)}`;
+  }
+  return `${sats(amount)} selected`;
 }
 
 export default function App() {
@@ -161,14 +175,9 @@ function BottomNav() {
 
 function ReferenceWallet() {
   const regtest = useRegtestCustody(
-    routingMode === "live" && regtestCustodyEnabled,
+    regtestCustodyEnabled,
   );
-  const flow = usePaymentFlow(
-    ecashmesh,
-    simulator,
-    routingMode,
-    regtest.custody,
-  );
+  const flow = usePaymentFlow(ecashmesh, regtest.custody);
   const [fundAmount, setFundAmount] = useState("1000");
   const scroll = useRef<ScrollView>(null);
   useEffect(() => {
@@ -258,7 +267,7 @@ function ReferenceWallet() {
                 </Pressable>
                 <Section title="Recent Activity">
                   <View style={local.activityHead}>
-                    <Text style={local.activityNote}>Simulator examples</Text>
+                    <Text style={local.activityNote}>Recent wallet activity</Text>
                     <Text style={local.seeAll}>See all</Text>
                   </View>
                   {[
@@ -324,23 +333,17 @@ function ReferenceWallet() {
               <>
                 <ScreenHeader title="Send" onBack={flow.back} end="⌗" />
                 <View
-                  accessibilityLabel={`Routing mode: ${flow.mode}`}
+                  accessibilityLabel="Routing mode: live"
                   style={[
                     local.modeNotice,
-                    flow.mode === "live"
-                      ? local.liveNotice
-                      : local.simulatorNotice,
+                    local.liveNotice,
                   ]}
                 >
                   <Text style={local.modeNoticeTitle}>
-                    {flow.mode === "live"
-                      ? "Live source discovery"
-                      : "Deterministic simulator"}
+                    Live source discovery
                   </Text>
                   <Text style={styles.small}>
-                    {flow.mode === "live"
-                      ? "Real mint metadata and unpaid quotes. No funds move."
-                      : "Fixture connectors and a simulated destination for safe testing."}
+                    Real mint metadata and unpaid quotes. No funds move.
                   </Text>
                 </View>
                 <Text style={local.fieldLabel}>Amount</Text>
@@ -355,46 +358,42 @@ function ReferenceWallet() {
                   />
                   <Text style={local.satsSuffix}>sats</Text>
                 </View>
-                <Text style={local.fiatHint}>≈ $60.09</Text>
-                {flow.mode === "live" && (
-                  <>
-                    <Text style={local.fieldLabel}>
-                      Payment destination type
-                    </Text>
-                    <View style={local.destinationTypes}>
-                      <Choice
-                        title="Lightning invoice"
-                        copy="Paste a checksummed BOLT11 invoice"
-                        icon="ϟ"
-                        selected={flow.destinationType === "lightning"}
-                        onPress={() => flow.setDestinationType("lightning")}
-                      />
-                      <Choice
-                        title="Cashu request"
-                        copy="Paste a NUT-18 creq… request or destination URI"
-                        icon="◈"
-                        selected={flow.destinationType === "cashu"}
-                        onPress={() => flow.setDestinationType("cashu")}
-                      />
-                    </View>
-                    <Text style={local.fieldLabel}>Source Cashu mint URL</Text>
-                    <View style={local.destinationWrap}>
-                      <TextInput
-                        accessibilityLabel="Source Cashu mint URL"
-                        value={flow.sourceMintUrl}
-                        onChangeText={flow.setSourceMintUrl}
-                        autoCapitalize="none"
-                        autoCorrect={false}
-                        style={local.destinationInput}
-                        placeholder="https://mint.example"
-                      />
-                    </View>
-                    <Text style={local.fiatHint}>
-                      Optional when your API is already configured with a source
-                      mint.
-                    </Text>
-                  </>
-                )}
+                <Text style={local.fiatHint}>
+                  {amountValueHint(flow.amount)}
+                </Text>
+                <Text style={local.fieldLabel}>Payment destination type</Text>
+                <View style={local.destinationTypes}>
+                  <Choice
+                    title="Lightning invoice"
+                    copy="Paste a checksummed BOLT11 invoice"
+                    icon="ϟ"
+                    selected={flow.destinationType === "lightning"}
+                    onPress={() => flow.setDestinationType("lightning")}
+                  />
+                  <Choice
+                    title="Cashu request"
+                    copy="Paste a NUT-18 creq… request or destination URI"
+                    icon="◈"
+                    selected={flow.destinationType === "cashu"}
+                    onPress={() => flow.setDestinationType("cashu")}
+                  />
+                </View>
+                <Text style={local.fieldLabel}>Source Cashu mint URL</Text>
+                <View style={local.destinationWrap}>
+                  <TextInput
+                    accessibilityLabel="Source Cashu mint URL"
+                    value={flow.sourceMintUrl}
+                    onChangeText={flow.setSourceMintUrl}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    style={local.destinationInput}
+                    placeholder="https://mint.example"
+                  />
+                </View>
+                <Text style={local.fiatHint}>
+                  Optional when your API is already configured with a source
+                  mint.
+                </Text>
                 <Text style={local.fieldLabel}>
                   {flow.destinationType === "cashu"
                     ? "Cashu payment request"
@@ -420,15 +419,6 @@ function ReferenceWallet() {
                   />
                   <Text style={local.destinationIcon}>⌗</Text>
                 </View>
-                {flow.mode === "simulator" && (
-                  <View style={local.contactCard}>
-                    <Text style={local.contactBolt}>ϟ</Text>
-                    <View>
-                      <Text style={local.contactName}>Coffee Shop</Text>
-                      <Text style={styles.small}>Online store</Text>
-                    </View>
-                  </View>
-                )}
                 {flow.error && <ErrorNotice error={flow.error} />}
                 <Section title="Payment Method">
                   <Choice
@@ -457,7 +447,7 @@ function ReferenceWallet() {
                   EcashMesh Source Selection
                 </Button>
                 <Text style={local.powered}>
-                  Powered by EcashMesh · {flow.mode}
+                  Powered by EcashMesh · live
                 </Text>
               </>
             )}
@@ -485,11 +475,7 @@ function ReferenceWallet() {
                 </Heading>
                 {flow.busy && (
                   <Loading
-                    label={
-                      flow.mode === "live"
-                        ? "Discovering live quote-backed sources…"
-                        : "Evaluating simulated sources…"
-                    }
+                    label="Discovering live quote-backed sources…"
                   />
                 )}
                 {flow.error && (
@@ -597,11 +583,9 @@ function ReferenceWallet() {
                   </Surface>
                   <Risks flags={flow.selected.risk_flags} />
                   <Text style={styles.body}>
-                    {flow.decision?.mode === "live"
-                      ? regtest.enabled
-                        ? "This browser holds the selected regtest Cashu proofs and NUT-08 change outputs locally. EcashMesh receives no proof secrets."
-                        : "Enable the opt-in regtest custody wallet before confirming a real payment."
-                      : "This host-wallet confirmation runs only the selected source in the local simulator. It does not send a real payment."}
+                    {regtest.enabled
+                      ? "This browser holds the selected regtest Cashu proofs and NUT-08 change outputs locally. EcashMesh receives no proof secrets."
+                      : "Enable the opt-in regtest custody wallet before confirming a real payment."}
                   </Text>
                   {flow.error && (
                     <>
@@ -615,17 +599,11 @@ function ReferenceWallet() {
                   )}
                   {flow.busy ? (
                     <Loading
-                      label={
-                        flow.decision?.mode === "live"
-                          ? "Preparing real regtest payment…"
-                          : "Confirming with the simulator…"
-                      }
+                      label="Preparing real regtest payment…"
                     />
                   ) : (
                     <Button onPress={() => void flow.confirm()}>
-                      {flow.decision?.mode === "live"
-                        ? "Confirm real regtest payment"
-                        : "Confirm simulated payment"}
+                      Confirm real regtest payment
                     </Button>
                   )}
                   {!flow.busy && (
@@ -650,45 +628,22 @@ function ReferenceWallet() {
                   <Text style={styles.body}>to Coffee Shop</Text>
                 </View>
                 <Text style={local.testEyebrow}>
-                  Pocket /{" "}
-                  {flow.receipt.simulated
-                    ? "Simulator result"
-                    : "Regtest settlement"}
+                  Pocket / Regtest settlement
                 </Text>
                 <Heading
-                  eyebrow={
-                    flow.receipt.simulated
-                      ? "Simulator-backed success"
-                      : "Real regtest payment settled"
-                  }
-                  title={
-                    flow.receipt.simulated
-                      ? "Simulation complete"
-                      : "Payment complete"
-                  }
+                  eyebrow="Real regtest payment settled"
+                  title="Payment complete"
                 >
                   {flow.receipt.message}
                 </Heading>
                 <Surface>
-                  <Row
-                    label={
-                      flow.receipt.simulated ? "Simulated fee" : "Final fee"
-                    }
-                    value={sats(flow.receipt.fee.amount)}
-                  />
+                  <Row label="Final fee" value={sats(flow.receipt.fee.amount)} />
                   <Row label="Settlement source" value={flow.receipt.path[0] ?? "unknown"} />
                   <Row label="Execution ID" value={flow.receipt.route_id} />
-                  <Row
-                    label={
-                      flow.receipt.simulated ? "Simulation ID" : "Payment ID"
-                    }
-                    value={flow.receipt.simulation_id}
-                  />
+                  <Row label="Payment ID" value={flow.receipt.payment_id} />
                 </Surface>
                 <Text style={styles.small}>
-                  {flow.receipt.simulated
-                    ? "This result is returned by the simulator. No real payment was executed."
-                    : "This result was reported settled by the regtest Cashu mint."}
+                  This result was reported settled by the regtest Cashu mint.
                 </Text>
                 <Button secondary onPress={flow.home}>
                   Return to Pocket
@@ -718,7 +673,6 @@ function RegtestCustodyCard({
   setAmount: (value: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
-  if (routingMode !== "live") return null;
   if (!custody.enabled) {
     return (
       <Surface>
@@ -953,7 +907,6 @@ const local = StyleSheet.create({
     gap: 3,
   },
   liveNotice: { backgroundColor: "#EDF8F4", borderColor: "#AEE8CD" },
-  simulatorNotice: { backgroundColor: "#EDF6FF", borderColor: "#C9DDF9" },
   modeNoticeTitle: { color: colors.ink, fontWeight: "800", fontSize: 14 },
   destinationTypes: { gap: 8 },
   fieldLabel: {

@@ -264,13 +264,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ecashmesh-simulator"
-version = "0.1.0"
-dependencies = [
- "ecashmesh-core",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

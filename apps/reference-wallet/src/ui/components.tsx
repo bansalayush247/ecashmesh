@@ -136,7 +136,7 @@ export function Loading({ label }: { label: string }) {
       <Text accessibilityLiveRegion="polite" style={styles.subtitle}>
         {label}
       </Text>
-      <Text style={styles.small}>Checking simulated connector evidence…</Text>
+      <Text style={styles.small}>Checking quote-backed source evidence…</Text>
     </View>
   );
 }

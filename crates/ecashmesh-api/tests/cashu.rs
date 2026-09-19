@@ -1,5 +1,3 @@
-// Reuse the existing binary HTTP harness and run the simulator regression suite
-// in evaluate.rs separately.
 #[path = "support/cashu_server.rs"]
 mod support;
 
@@ -18,7 +16,6 @@ fn cashu_public_observations_flow_through_the_core_ranker() {
     let server = ApiServer::start(&mint.url);
     let (status, decision) = server.post("/v1/routes/evaluate", &request(100_000));
     assert_eq!(status, 200, "{decision}");
-    assert_eq!(decision["simulated"], false);
     assert_eq!(decision["mode"], "live");
     assert_eq!(decision["recommended_route"]["connector"], "cashu:fixture");
     assert_eq!(decision["recommended_route"]["fee"]["amount"], 321);
@@ -52,19 +49,6 @@ fn cashu_public_observations_flow_through_the_core_ranker() {
         );
     }
     assert_eq!(decision["explanation"], repeated["explanation"]);
-    let (status, receipt) = server.post(
-        "/v1/simulator/confirm",
-        &json!({
-        "payment": request(100_000), "quote_id": decision["quote_id"],
-        "route_id": decision["recommended_route"]["route_id"]}),
-    );
-    assert_eq!(status, 403);
-    assert_eq!(receipt["error"]["code"], "PAYMENT_SAFETY");
-    assert!(
-        receipt["error"]["message"]
-            .to_string()
-            .contains("unavailable")
-    );
 }
 
 #[test]
@@ -192,7 +176,7 @@ fn malformed_nut18_request_is_a_validation_error_not_a_cashu_token() {
 }
 
 #[test]
-fn missing_live_quote_returns_no_route_without_simulator_fallback() {
+fn missing_live_quote_returns_no_route_without_fixture_fallback() {
     let mint = MockMint::start("quote_unavailable");
     let server = ApiServer::start(&mint.url);
     let (status, error) = server.post("/v1/routes/evaluate", &request(100_000));

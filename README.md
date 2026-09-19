@@ -58,25 +58,6 @@ demo first collects a bounded read-only mint snapshot for its evaluation.
 
 Requirements are provided by Nix, including Rust and Node.js.
 
-### Deterministic simulator
-
-Terminal 1:
-
-```bash
-cd /Users/nightfury/Desktop/ecashmesh
-ROUTING_MODE=simulator nix develop -c cargo run -p ecashmesh-api
-```
-
-Terminal 2:
-
-```bash
-cd /Users/nightfury/Desktop/ecashmesh/apps/reference-wallet
-nix develop -c npm ci
-nix develop -c npm run web
-```
-
-Open <http://localhost:8081>. The API listens on <http://127.0.0.1:5000>.
-
 ### Live Cashu discovery
 
 Configure at least one source mint explicitly:
@@ -87,21 +68,21 @@ ECASHMESH_CASHU_MINTS='[{"id":"cashu:source","url":"https://your-source-mint.exa
 nix develop -c cargo run -p ecashmesh-api
 ```
 
-Start the reference wallet with live mode:
+Start the reference wallet:
 
 ```bash
 cd apps/reference-wallet
-EXPO_PUBLIC_ROUTING_MODE=live nix develop -c npm run web
+nix develop -c npm run web
 ```
 
-Live mode has no simulator fallback. It only returns a source when current,
+EcashMesh has no fixture fallback. It only returns a source when current,
 public mint metadata and unpaid NUT-04/NUT-05 quotes establish the declared
-mechanism. `/v1/simulator/confirm` is deliberately unavailable in live mode.
+mechanism.
 
 ### Real regtest execution
 
 Real execution is off by default and only accepts local mint endpoints in
-regtest. It never uses the simulator after a NUT-08 error.
+regtest. It never fabricates completion after a NUT-08 error.
 
 ```bash
 # Run ./scripts/regtest-up.sh first.
@@ -185,7 +166,7 @@ For a 100-sat payment with a 2-sat reserve, the wallet shows a **Fee reserve
   "asset": "BTC",
   "destination": {
     "type": "lightning",
-    "value": "lnbc1simulateddestination"
+    "value": "<checksummed BOLT11 invoice>"
   },
   "payment_intent": "send",
   "candidate_connectors": []
@@ -211,7 +192,6 @@ Other useful endpoints:
 - `GET /v1/connectors`
 - `POST /v1/connectors/discover`
 - `POST /v1/routes/rank`
-- `POST /v1/simulator/confirm`
 - `POST /v1/payments/prepare`
 
 ## Safety and evidence

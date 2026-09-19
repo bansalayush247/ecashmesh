@@ -1,7 +1,7 @@
 /**
  * Regtest-only browser persistence for bearer proofs and in-flight melts.
  * This is deliberately unavailable outside a browser and is never used by
- * simulator mode. Proof material must remain in the host, not EcashMesh.
+ * live mode. Proof material must remain in the host, not EcashMesh.
  */
 export type StoredProof = {
   amount: string;

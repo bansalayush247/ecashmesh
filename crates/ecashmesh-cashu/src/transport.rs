@@ -59,7 +59,7 @@ pub struct MeltExecution {
 /// Write-only NUT-08 client. It owns no secrets and never synthesizes proofs;
 /// a wallet custody adapter must supply selected, valid protocol proofs and
 /// blinded change outputs. This makes the HTTP call a real Cashu melt, rather
-/// than a simulator or a quote being misrepresented as settlement.
+/// than a fixture or a quote being misrepresented as settlement.
 pub struct CashuMeltExecutor {
     url: Url,
     client: Client,

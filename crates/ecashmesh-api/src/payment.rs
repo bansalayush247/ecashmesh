@@ -116,11 +116,6 @@ impl PaymentService {
     }
 
     fn require_real_environment(&self) -> Result<(), ApiError> {
-        if self.safety.environment == PaymentEnvironment::Simulator {
-            return Err(ApiError::payment_safety(
-                "Simulator mode can never execute real payments",
-            ));
-        }
         if !self.safety.execution_enabled {
             return Err(ApiError::payment_safety("Payment execution is disabled"));
         }
@@ -227,7 +222,6 @@ impl PaymentResponse {
 
 const fn environment_code(environment: PaymentEnvironment) -> &'static str {
     match environment {
-        PaymentEnvironment::Simulator => "simulator",
         PaymentEnvironment::Regtest => "regtest",
         PaymentEnvironment::Mainnet => "mainnet",
     }

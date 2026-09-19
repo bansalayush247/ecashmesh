@@ -7,37 +7,37 @@ import type {
 } from "../ecashmesh/contracts";
 import { EcashMeshError } from "../ecashmesh/transport";
 import { collectPayment } from "./payment";
-import type { SimulationReceipt, SimulatorClient } from "./simulator";
 import type { RegtestCustody } from "./regtestCustody";
 
 type Receipt = {
-  simulation_id: string;
   status: string;
-  simulated: boolean;
   quote_id: string;
   route_id: string;
   amount: number;
   asset: "BTC";
-  fee: SimulationReceipt["fee"];
+  fee: {
+    amount: number;
+    asset: "sats";
+    freshness: "fresh";
+    estimated_fee_sats: number;
+    fee_reserve_sats: number;
+    estimate_kind: "reserve_estimate";
+  };
   path: string[];
   message: string;
+  payment_id: string;
 };
 
 export type Screen =
   "home" | "payment" | "decision" | "details" | "confirmation" | "success";
-export type RoutingMode = "live" | "simulator";
 
 export function usePaymentFlow(
   ecashmesh: EcashMeshClient,
-  simulator: SimulatorClient,
-  mode: RoutingMode,
   regtestCustody?: RegtestCustody,
 ) {
   const [screen, setScreen] = useState<Screen>("home");
   const [amount, setAmount] = useState("100000");
-  const [destination, setDestination] = useState(
-    mode === "simulator" ? "lnbc1simulateddestination" : "",
-  );
+  const [destination, setDestination] = useState("");
   const [destinationType, setDestinationType] = useState<"lightning" | "cashu">(
     "lightning",
   );
@@ -71,7 +71,7 @@ export function usePaymentFlow(
   function home() {
     edit();
     setAmount("100000");
-    setDestination(mode === "simulator" ? "lnbc1simulateddestination" : "");
+    setDestination("");
     setDestinationType("lightning");
     setSourceMintUrl("");
     setScreen("home");
@@ -130,22 +130,14 @@ export function usePaymentFlow(
     setBusy(true);
     setError(null);
     try {
-      const result =
-        mode === "simulator"
-          ? await simulator.confirm(
-              payment,
-              decision.quote_id,
-              selected.route_id,
-              controller.signal,
-            )
-          : await executeRegtestPayment(
-              ecashmesh,
-              regtestCustody,
-              decision.quote_id,
-              selected,
-              payment,
-              controller.signal,
-            );
+      const result = await executeRegtestPayment(
+        ecashmesh,
+        regtestCustody,
+        decision.quote_id,
+        selected,
+        payment,
+        controller.signal,
+      );
       if (active.current !== controller) return;
       // Check receipt correlation only; feasibility and risk stay on the server.
       if (
@@ -155,7 +147,7 @@ export function usePaymentFlow(
       ) {
         throw new EcashMeshError(
           "INVALID_RESPONSE",
-          "Simulator receipt does not match the selected payment.",
+          "Payment receipt does not match the selected payment.",
         );
       }
       setReceipt(result);
@@ -188,7 +180,6 @@ export function usePaymentFlow(
     setDestinationType,
     sourceMintUrl,
     setSourceMintUrl,
-    mode,
     payment,
     decision,
     selected,
@@ -245,9 +236,7 @@ async function executeRegtestPayment(
     );
   }
   return {
-    simulation_id: prepared.payment_id,
     status: "settled",
-    simulated: false,
     quote_id: prepared.quote_id,
     route_id: prepared.route_id,
     amount: prepared.amount_sats,
@@ -262,6 +251,7 @@ async function executeRegtestPayment(
     },
     path: route.path,
     message: "Real regtest Cashu melt settled by host-held proofs.",
+    payment_id: prepared.payment_id,
   };
 }
 

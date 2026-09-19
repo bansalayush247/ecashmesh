@@ -3,7 +3,6 @@ members = [
   "crates/ecashmesh-api",
   "crates/ecashmesh-cashu",
   "crates/ecashmesh-core",
-  "crates/ecashmesh-simulator",
 ]
 resolver = "2"
 

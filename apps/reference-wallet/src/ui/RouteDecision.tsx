@@ -318,7 +318,7 @@ export function DecisionView({
         ))}
       </Section>
       <Text style={styles.small}>
-        Quote expires: {decision.expires_at} (fixed simulator clock).
+        Quote expires: {decision.expires_at}.
       </Text>
     </View>
   );
