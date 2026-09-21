@@ -17,7 +17,10 @@ use super::{ApiError, EvidenceStateResponse, connector_health_code};
 
 #[derive(Clone)]
 pub(super) enum Provider {
-    Cashu(Arc<DiscoveryService>),
+    Cashu {
+        service: Arc<DiscoveryService>,
+        allow_discovered_sources: bool,
+    },
 }
 
 pub(super) struct ConnectorBatch {
@@ -97,6 +100,8 @@ pub(super) fn select_live_sources(
     source_connector: Option<String>,
     source_mint_url: Option<String>,
     discovery: &DiscoveryReport,
+    destination_mint_urls: &[String],
+    allow_discovered_sources: bool,
 ) -> Result<Vec<ConnectorSnapshot>, ApiError> {
     let source_connector = source_connector
         .filter(|value| !value.trim().is_empty())
@@ -130,6 +135,18 @@ pub(super) fn select_live_sources(
     let expected = source_connector
         .as_deref()
         .or_else(|| source_from_url.as_ref().map(ConnectorId::as_str));
+    let allowed_sources = discovery
+        .mints
+        .iter()
+        .filter(|mint| {
+            !destination_mint_urls.contains(&mint.canonical_url)
+                && (allow_discovered_sources
+                    || mint.provenance.iter().any(|hint| {
+                        matches!(hint.source, DiscoverySource::Seed | DiscoverySource::Wallet)
+                    }))
+        })
+        .map(|mint| mint.connector_id())
+        .collect::<BTreeSet<_>>();
     let narrowed = expected.map_or_else(
         || selected.to_vec(),
         |expected| {
@@ -140,10 +157,16 @@ pub(super) fn select_live_sources(
                 .collect()
         },
     );
+    let narrowed = narrowed
+        .into_iter()
+        .filter(|connector| allowed_sources.contains(&connector.id))
+        .collect::<Vec<_>>();
     if narrowed.is_empty() {
         return Err(ApiError::validation(
-            "Configured source connector is unavailable",
-            vec![expected.unwrap_or("source_connector").into()],
+            "No eligible wallet source mint is available",
+            vec![
+                "Destination mints and directory-only discoveries are not source candidates".into(),
+            ],
         ));
     }
     Ok(narrowed)
@@ -173,12 +196,17 @@ impl Provider {
                     .collect();
                 let directories = env_urls("ECASHMESH_CASHU_DIRECTORIES")?;
                 let allowed = env_urls("ECASHMESH_CASHU_ALLOWED_MINTS")?;
-                Ok(Self::Cashu(Arc::new(DiscoveryService::new(
-                    seeds,
-                    directories,
-                    allowed,
-                    ttl,
-                )?)))
+                let allow_discovered_sources =
+                    std::env::var("ECASHMESH_CASHU_ALLOW_DISCOVERED_SOURCES")
+                        .unwrap_or_else(|_| "false".into())
+                        .parse::<bool>()
+                        .map_err(
+                            |_| "ECASHMESH_CASHU_ALLOW_DISCOVERED_SOURCES must be true or false",
+                        )?;
+                Ok(Self::Cashu {
+                    service: Arc::new(DiscoveryService::new(seeds, directories, allowed, ttl)?),
+                    allow_discovered_sources,
+                })
             }
             other => Err(format!("Unsupported ROUTING_MODE: {other}")),
         }
@@ -187,7 +215,16 @@ impl Provider {
     #[must_use]
     pub const fn cashu_service(&self) -> Option<&Arc<DiscoveryService>> {
         match self {
-            Self::Cashu(service) => Some(service),
+            Self::Cashu { service, .. } => Some(service),
+        }
+    }
+
+    pub const fn allows_discovered_sources(&self) -> bool {
+        match self {
+            Self::Cashu {
+                allow_discovered_sources,
+                ..
+            } => *allow_discovered_sources,
         }
     }
 
@@ -197,7 +234,7 @@ impl Provider {
         hints: Vec<MintHint>,
     ) -> Result<ConnectorBatch, ApiError> {
         match self {
-            Self::Cashu(service) => {
+            Self::Cashu { service, .. } => {
                 let state = service
                     .collect(hints)
                     .await

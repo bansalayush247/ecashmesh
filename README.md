@@ -60,11 +60,16 @@ Requirements are provided by Nix, including Rust and Node.js.
 
 ### Live Cashu discovery
 
-Configure at least one source mint explicitly:
+Configure two or three wallet/source mints explicitly. These URLs are source
+claims, not a public-mint recommendation; use mints you have independently
+reviewed. Destination mints come only from the pasted Cashu request and are
+never promoted to sources.
 
 ```bash
+# Optional: directory mints are observations, not sources, by default.
 ROUTING_MODE=live \
-ECASHMESH_CASHU_MINTS='[{"id":"cashu:source","url":"https://your-source-mint.example"}]' \
+ECASHMESH_CASHU_MINTS='[{"id":"cashu:source-a","url":"https://mint-a.example"},{"id":"cashu:source-b","url":"https://mint-b.example"},{"id":"cashu:source-c","url":"https://mint-c.example"}]' \
+ECASHMESH_CASHU_DIRECTORIES='["https://your-directory.example/mints"]' \
 nix develop -c cargo run -p ecashmesh-api
 ```
 
@@ -78,6 +83,26 @@ nix develop -c npm run web
 EcashMesh has no fixture fallback. It only returns a source when current,
 public mint metadata and unpaid NUT-04/NUT-05 quotes establish the declared
 mechanism.
+
+`ECASHMESH_CASHU_DIRECTORIES` is optional and must be a JSON array of HTTP(S)
+directory URLs. Its results are visible as discovered observations only. Set
+`ECASHMESH_CASHU_ALLOW_DISCOVERED_SOURCES=true` only when the operator
+deliberately wants directory discoveries to be eligible source candidates.
+`ECASHMESH_CASHU_ALLOWED_MINTS` is an optional JSON array for trusted local or
+test endpoints. It is not needed for public mainnet mints.
+
+### Public-mainnet read-only check
+
+1. Start the API using `ROUTING_MODE=live` and the configured source URLs above.
+   Do not set `ECASHMESH_ENABLE_REAL_PAYMENTS`.
+2. Start the wallet and open `http://localhost:8081`.
+3. Select **Send payment**, then **Cashu request**, and paste a receiver-provided
+   `creqA...` request or `cashu://request?...` URI for destination mint D.
+4. Optionally enter additional wallet source URLs, one per line. Select
+   **EcashMesh Source Selection**.
+5. Inspect **Live Cashu Route Discovery** and **Raw live observations**. Routes
+   are labelled **Quote-backed — read-only**; a NUT-05 fee reserve is an upper
+   bound, not a final fee. The confirmation screen has no mainnet send action.
 
 ### Real regtest execution
 

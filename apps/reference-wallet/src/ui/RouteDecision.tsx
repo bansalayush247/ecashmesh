@@ -67,6 +67,7 @@ function ConnectorMark({ connector }: { connector: string }) {
 
 function Settlement({ source }: { source: PaymentSource }) {
   const mechanism = source.settlement_mechanism ?? "adapter-declared";
+  const classification = source.route_classification ?? "unknown";
   return (
     <View style={local.pills}>
       <Text style={local.pill}>
@@ -78,11 +79,13 @@ function Settlement({ source }: { source: PaymentSource }) {
       </Text>
       <Text style={local.pathLabel}>Settlement: {humanize(mechanism)}</Text>
       <Text style={local.pathLabel}>
-        {source.executable === true
-          ? "Executable"
-          : source.executable === false
-            ? "Not executable"
-            : "Execution capability unknown"}
+        {classification === "quote_backed"
+          ? "Quote-backed — read-only"
+          : source.executable === true
+            ? "Wallet executable"
+            : source.executable === false
+              ? "Not wallet executable"
+              : "Execution capability unknown"}
       </Text>
     </View>
   );
@@ -241,12 +244,13 @@ export function DecisionView({
             Found {alternatives.length + 1} available sources
           </Text>
           <Text style={styles.small}>
-            Here’s the best option based on evidence, liquidity and fees.
+            Quote-backed sources are ranked by their current evidence. No funds
+            will move from this screen.
           </Text>
         </View>
       </View>
       <View style={local.recommendation}>
-        <Text style={local.visuallyPresent}>Recommended by EcashMesh</Text>
+        <Text style={local.visuallyPresent}>Recommended quote-backed source</Text>
         <View style={local.recommendedPill}>
           <Text style={local.recommendedText}>✦ Recommended</Text>
         </View>

@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { createEcashMeshClient } from "./src/ecashmesh/client";
+import type { RouteDecision } from "./src/ecashmesh/contracts";
 import { useRegtestCustody } from "./src/host/useRegtestCustody";
 import { usePaymentFlow } from "./src/host/usePaymentFlow";
 import {
@@ -67,6 +68,79 @@ function amountValueHint(value: string) {
     }).format(usd)}`;
   }
   return `${sats(amount)} selected`;
+}
+
+function LiveObservations({ decision }: { decision: RouteDecision }) {
+  const [expanded, setExpanded] = useState(false);
+  const observations = decision.connector_observations ?? [];
+  const live = decision.live as { graph?: { destination?: Record<string, unknown> } } | undefined;
+  const destination = live?.graph?.destination;
+  return (
+    <Section title="Live mint observations">
+      <Text style={styles.small}>
+        LIVE READ-ONLY — No funds will move. Public Cashu mint data and unpaid
+        quotes only.
+      </Text>
+      {destination && (
+        <Surface>
+          <Text style={local.custodyTitle}>Destination</Text>
+          <Text style={styles.small}>
+            {typeof destination.type === "string" ? destination.type : "unknown"}
+            {typeof destination.mint_url === "string"
+              ? ` · ${destination.mint_url}`
+              : ""}
+          </Text>
+          {typeof destination.unit === "string" && (
+            <Text style={styles.small}>Unit: {destination.unit}</Text>
+          )}
+        </Surface>
+      )}
+      {observations.length === 0 ? (
+        <Text style={styles.small}>No mint observations were returned.</Text>
+      ) : (
+        observations.map((value, index) => {
+          const observation = value as Record<string, unknown>;
+          const mintUrl = typeof observation.mint_url === "string"
+            ? observation.mint_url
+            : "Unknown mint";
+          const status = typeof observation.data_status === "string"
+            ? observation.data_status
+            : "unknown";
+          return (
+            <Surface key={`${mintUrl}-${index}`}>
+              <Text selectable style={styles.body}>{mintUrl}</Text>
+              <Text style={styles.small}>
+                /v1/info · /v1/keysets · /v1/keys: {status}
+              </Text>
+              <Text style={styles.small}>
+                Role: discovered observation (not automatically a wallet source)
+              </Text>
+            </Surface>
+          );
+        })
+      )}
+      <Pressable
+        accessibilityRole="button"
+        onPress={() => setExpanded((value) => !value)}
+      >
+        <Text style={local.rawToggle}>
+          {expanded ? "Hide raw live observations" : "Raw live observations"}
+        </Text>
+      </Pressable>
+      {expanded && (
+        <Text selectable style={styles.code}>
+          {JSON.stringify(
+            {
+              destination: live?.graph,
+              observations,
+            },
+            null,
+            2,
+          )}
+        </Text>
+      )}
+    </Section>
+  );
 }
 
 export default function App() {
@@ -340,10 +414,11 @@ function ReferenceWallet() {
                   ]}
                 >
                   <Text style={local.modeNoticeTitle}>
-                    Live source discovery
+                    Live Cashu Route Discovery
                   </Text>
                   <Text style={styles.small}>
-                    Real mint metadata and unpaid quotes. No funds move.
+                    LIVE READ-ONLY · No funds will move. Public Cashu mint data
+                    and unpaid quotes only.
                   </Text>
                 </View>
                 <Text style={local.fieldLabel}>Amount</Text>
@@ -378,21 +453,22 @@ function ReferenceWallet() {
                     onPress={() => flow.setDestinationType("cashu")}
                   />
                 </View>
-                <Text style={local.fieldLabel}>Source Cashu mint URL</Text>
+                <Text style={local.fieldLabel}>Wallet source Cashu mint URLs</Text>
                 <View style={local.destinationWrap}>
                   <TextInput
-                    accessibilityLabel="Source Cashu mint URL"
+                    accessibilityLabel="Wallet source Cashu mint URLs"
                     value={flow.sourceMintUrl}
                     onChangeText={flow.setSourceMintUrl}
                     autoCapitalize="none"
                     autoCorrect={false}
+                    multiline
                     style={local.destinationInput}
-                    placeholder="https://mint.example"
+                    placeholder={"https://mint-a.example\nhttps://mint-b.example"}
                   />
                 </View>
                 <Text style={local.fiatHint}>
-                  Optional when your API is already configured with a source
-                  mint.
+                  Optional. Enter one URL per line (or comma-separated). These
+                  are wallet sources; the destination mint is never added here.
                 </Text>
                 <Text style={local.fieldLabel}>
                   {flow.destinationType === "cashu"
@@ -487,11 +563,14 @@ function ReferenceWallet() {
                   </>
                 )}
                 {flow.decision && (
-                  <DecisionView
-                    decision={flow.decision}
-                    inspect={flow.inspect}
-                    select={flow.select}
-                  />
+                  <>
+                    <DecisionView
+                      decision={flow.decision}
+                      inspect={flow.inspect}
+                      select={flow.select}
+                    />
+                    <LiveObservations decision={flow.decision} />
+                  </>
                 )}
                 {!flow.busy && (
                   <Button secondary onPress={flow.edit}>
@@ -585,7 +664,7 @@ function ReferenceWallet() {
                   <Text style={styles.body}>
                     {regtest.enabled
                       ? "This browser holds the selected regtest Cashu proofs and NUT-08 change outputs locally. EcashMesh receives no proof secrets."
-                      : "Enable the opt-in regtest custody wallet before confirming a real payment."}
+                      : "This is a live read-only evaluation. Mainnet payment execution is unavailable."}
                   </Text>
                   {flow.error && (
                     <>
@@ -597,14 +676,22 @@ function ReferenceWallet() {
                       )}
                     </>
                   )}
-                  {flow.busy ? (
+                  {regtest.enabled && flow.busy ? (
                     <Loading
                       label="Preparing real regtest payment…"
                     />
-                  ) : (
+                  ) : regtest.enabled ? (
                     <Button onPress={() => void flow.confirm()}>
                       Confirm real regtest payment
                     </Button>
+                  ) : (
+                    <Surface>
+                      <Text style={local.custodyTitle}>Read-only route evaluation</Text>
+                      <Text style={styles.small}>
+                        This route is quote-backed only. EcashMesh did not receive
+                        proofs and cannot send a mainnet payment.
+                      </Text>
+                    </Surface>
                   )}
                   {!flow.busy && (
                     <Button secondary onPress={flow.edit}>
@@ -768,6 +855,12 @@ const local = StyleSheet.create({
     paddingBottom: 32,
   },
   shell: { width: "100%", maxWidth: 460, paddingTop: 8, gap: 13 },
+  rawToggle: {
+    color: colors.blueDark,
+    fontSize: 14,
+    fontWeight: "800",
+    paddingVertical: 6,
+  },
   screenHeader: {
     minHeight: 54,
     flexDirection: "row",

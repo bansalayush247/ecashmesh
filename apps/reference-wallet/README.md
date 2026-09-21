@@ -11,11 +11,13 @@ and cleared when returning home.
 
 ## Run locally
 
-Start the quote-backed API with an explicit source mint:
+Start the quote-backed API with explicit wallet source mints. The pasted Cashu
+request supplies the destination mint separately; it can never become a source
+candidate merely because it was observed.
 
 ```sh
 ROUTING_MODE=live \
-ECASHMESH_CASHU_MINTS='[{"id":"cashu:source","url":"https://your-source-mint.example"}]' \
+ECASHMESH_CASHU_MINTS='[{"id":"cashu:source-a","url":"https://mint-a.example"},{"id":"cashu:source-b","url":"https://mint-b.example"}]' \
 nix develop -c cargo run -p ecashmesh-api
 ```
 
@@ -38,6 +40,14 @@ not parse either target: it sends the chosen type and raw value to EcashMesh.
 The backend normalizes the target, reads real metadata, and obtains unpaid mint
 and melt quotes where supported. A failure to establish a supported quote-backed
 source is shown as `NO_VIABLE_ROUTE`, never as an invented recommendation.
+
+The payment screen is explicitly **LIVE READ-ONLY**. It displays live mint
+observations and a collapsible raw JSON view so the browser demo can show the
+actual `/v1/info`, `/v1/keysets`, `/v1/keys`, and quote evidence used for a
+decision. A `quote_backed` route means the mint returned compatible unpaid
+quotes; it is not a claim that the browser can execute a payment. Without the
+opt-in local regtest custody adapter, the confirmation screen has no send
+action.
 
 For live Cashu sources, the wallet labels a NUT-05 result as **Fee reserve
 (estimate)** rather than a final fee, displays the server-calculated fee rate,

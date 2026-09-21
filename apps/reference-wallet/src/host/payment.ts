@@ -26,11 +26,15 @@ export function collectPayment(
   }
   // Destination parsing is deliberately server-side. The host only preserves
   // the user-selected type and raw payment input for EcashMesh.
+  const sourceMintUrls = (sourceMintUrl ?? "")
+    .split(/[\n,]/)
+    .map((value) => value.trim())
+    .filter(Boolean);
   return {
     amount,
     asset: "BTC",
     destination: { type: destinationType, value: destination.trim() },
     paymentIntent: "send",
-    ...(sourceMintUrl?.trim() ? { sourceMintUrl: sourceMintUrl.trim() } : {}),
+    ...(sourceMintUrls.length ? { walletMintUrls: sourceMintUrls } : {}),
   };
 }

@@ -50,6 +50,18 @@ export const paymentSourceSchema = z
     protocol: z.enum(["cashu", "fedimint", "lightning"]).optional(),
     settlement_mechanism: z.string().min(1).optional(),
     executable: z.boolean().optional(),
+    route_classification: z
+      .enum([
+        "quote_backed",
+        "potentially_executable",
+        "wallet_executable",
+        "settled",
+        "unsupported",
+        "unknown",
+        "stale",
+        "unavailable",
+      ])
+      .optional(),
     connector: z.string().min(1),
     path: z.array(z.string().min(1)).min(1),
     score: percentage,
@@ -110,6 +122,8 @@ export const decisionSchema = z
         })
         .passthrough(),
     ),
+    connector_observations: z.array(z.unknown()).optional(),
+    live: z.unknown().optional(),
     explanation: z
       .object({
         summary: z.string(),
@@ -147,6 +161,7 @@ export type PaymentInput = {
   candidateConnectors?: string[];
   sourceConnector?: string;
   sourceMintUrl?: string;
+  walletMintUrls?: string[];
 };
 
 export const paymentStatusSchema = z
@@ -177,6 +192,9 @@ export function paymentToWire(payment: PaymentInput) {
       : {}),
     ...(payment.sourceMintUrl
       ? { source_mint_url: payment.sourceMintUrl }
+      : {}),
+    ...(payment.walletMintUrls?.length
+      ? { wallet_mint_urls: payment.walletMintUrls }
       : {}),
   };
 }

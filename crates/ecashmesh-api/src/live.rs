@@ -457,6 +457,15 @@ pub(super) async fn evaluate(
         .chain(std::iter::once(batch.expires_at_unix_seconds))
         .min()
         .unwrap_or_else(unix_now);
+    let source_context = live_sources
+        .iter()
+        .map(|source| {
+            json!({
+                "connector": source.id.as_str(),
+                "role": "wallet_source",
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(LiveEvaluation {
         ranking: result.ranking,
         connectors: live_sources,
@@ -465,6 +474,7 @@ pub(super) async fn evaluate(
         expires_at_unix_seconds,
         graph_context: json!({
             "destination": destination_context,
+            "sources": source_context,
             "graph_version": result.graph_version,
             "connector_count": snapshot.connector_count(),
             "edge_count": snapshot.edge_count(),
@@ -480,7 +490,9 @@ pub(super) async fn evaluate(
             "route_shape": match destination_type {
                 "cashu" => "Cashu source → Lightning invoice → Cashu destination quote",
                 _ => "Cashu source → Lightning invoice",
-            }
+            },
+            "route_classification": "quote_backed",
+            "execution": "No wallet proofs, funds, or payment instruction were supplied to EcashMesh",
         }),
     })
 }

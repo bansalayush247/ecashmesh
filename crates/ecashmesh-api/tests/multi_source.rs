@@ -128,7 +128,8 @@ fn live_cashu_source_selection_returns_two_independent_sources() {
     {
         assert_eq!(source["protocol"], "cashu");
         assert_eq!(source["settlement_mechanism"], "cashu_lightning");
-        assert_eq!(source["executable"], true);
+        assert_eq!(source["executable"], false);
+        assert_eq!(source["route_classification"], "quote_backed");
         assert_eq!(source["path"].as_array().unwrap().len(), 1);
     }
 }

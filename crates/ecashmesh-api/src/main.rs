@@ -256,6 +256,11 @@ async fn evaluate_using(
     let candidate_connectors = connectors::resolve_ids(candidate_connectors, &batch.discovery);
     let selected = connectors::select(batch.connectors.clone(), candidate_connectors)?;
     let amount = Amount::from_sats(amount);
+    let destination_mint_urls = live_destination
+        .destination_mint_urls()
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
     let Some(service) = provider.cashu_service() else {
         return Err(ApiError::internal(
             "provider_error",
@@ -267,6 +272,8 @@ async fn evaluate_using(
         source_connector,
         source_mint_url,
         &batch.discovery,
+        &destination_mint_urls,
+        provider.allows_discovered_sources(),
     )?;
     let evaluation = match live::evaluate(service, &batch, sources, live_destination, amount).await
     {
@@ -905,7 +912,7 @@ pub(crate) struct EvaluateResponse {
     pub(crate) quote_id: String,
     /// The source EcashMesh recommends for this payment target.
     pub(crate) recommended_source: EvaluatedRouteResponse,
-    /// Other independently executable payment sources, in rank order.
+    /// Other independently quote-backed payment sources, in rank order.
     pub(crate) alternative_sources: Vec<EvaluatedRouteResponse>,
     /// Compatibility mirror for clients migrating from route-selection wording.
     #[serde(rename = "recommended_route")]
@@ -1000,8 +1007,10 @@ pub(crate) struct EvaluatedRouteResponse {
     protocol: &'static str,
     /// Adapter-declared native settlement capability used for this target.
     settlement_mechanism: &'static str,
-    /// The adapter returned a current quote and can execute this settlement.
+    /// Kept for wire compatibility. A quote alone never proves wallet execution.
     executable: bool,
+    /// What EcashMesh actually established about this route.
+    route_classification: &'static str,
     pub(crate) connector: String,
     path: Vec<String>,
     score: u8,
@@ -1030,7 +1039,8 @@ impl EvaluatedRouteResponse {
             source_id: connector.clone(),
             protocol: protocol_for_connector(&connector),
             settlement_mechanism: settlement_mechanism_for_connector(&connector),
-            executable: true,
+            executable: false,
+            route_classification: "quote_backed",
             connector,
             path,
             score: as_percent(route.score),

@@ -113,7 +113,7 @@ test("live Cashu input is forwarded without client-side destination parsing", as
         },
         payment_intent: "send",
         candidate_connectors: [],
-        source_mint_url: "https://source.example",
+        wallet_mint_urls: ["https://source.example"],
       });
       return json({ ...decision, mode: "live" });
     },

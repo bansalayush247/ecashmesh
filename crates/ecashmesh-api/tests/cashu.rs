@@ -10,6 +10,13 @@ fn request(amount: u64) -> Value {
         "payment_intent": "send", "candidate_connectors": []})
 }
 
+fn cashu_request(mint_url: &str) -> String {
+    format!(
+        "cashu://request?mint={}",
+        mint_url.replace(':', "%3A").replace('/', "%2F")
+    )
+}
+
 #[test]
 fn cashu_public_observations_flow_through_the_core_ranker() {
     let mint = MockMint::start("healthy");
@@ -53,11 +60,16 @@ fn cashu_public_observations_flow_through_the_core_ranker() {
 
 #[test]
 fn cashu_destination_quote_creates_only_a_cashu_to_lightning_live_edge() {
-    let mint = MockMint::start("healthy");
-    let server = ApiServer::start(&mint.url);
+    let source = MockMint::start("healthy");
+    let destination_mint = MockMint::start("healthy");
+    let server = ApiServer::start_with_sources(
+        &json!([{"id":"cashu:source","url":source.url}]),
+        &json!([]),
+        &json!([destination_mint.url]),
+    );
     let destination = format!(
         "cashu://request?mint={}",
-        mint.url.replace(':', "%3A").replace('/', "%2F")
+        destination_mint.url.replace(':', "%3A").replace('/', "%2F")
     );
     let body = json!({
         "amount": 100_000,
@@ -65,7 +77,7 @@ fn cashu_destination_quote_creates_only_a_cashu_to_lightning_live_edge() {
         "destination": {"type": "cashu", "value": destination},
         "payment_intent": "send",
         "candidate_connectors": [],
-        "source_connector": "cashu:fixture"
+        "source_connector": "cashu:source"
     });
     let (status, decision) = server.post("/v1/routes/evaluate", &body);
     assert_eq!(status, 200, "{decision}");
@@ -96,15 +108,20 @@ fn cashu_destination_quote_creates_only_a_cashu_to_lightning_live_edge() {
 
 #[test]
 fn nut18_destination_uses_its_extracted_mint_for_quote_backed_route_discovery() {
+    let source = MockMint::start("healthy");
     let mint = MockMint::start("healthy");
-    let server = ApiServer::start(&mint.url);
+    let server = ApiServer::start_with_sources(
+        &json!([{"id":"cashu:source","url":source.url}]),
+        &json!([]),
+        &json!([mint.url]),
+    );
     let body = json!({
         "amount": 100_000,
         "asset": "BTC",
         "destination": {"type": "cashu", "value": nut18_request(&mint.url, 100_000)},
         "payment_intent": "send",
         "candidate_connectors": [],
-        "source_connector": "cashu:fixture"
+        "source_connector": "cashu:source"
     });
     let (status, decision) = server.post("/v1/routes/evaluate", &body);
     assert_eq!(status, 200, "{decision}");
@@ -147,6 +164,41 @@ fn nut18_destination_uses_its_extracted_mint_for_quote_backed_route_discovery() 
         decision["recommended_route"]["fee"]["input_fee_schedule"]["included_in_estimated_fee"],
         false
     );
+}
+
+#[test]
+fn destination_mint_is_never_implicitly_selected_as_a_source() {
+    let source = MockMint::start("healthy");
+    let destination = MockMint::start("healthy");
+    let server = ApiServer::start_with_sources(
+        &json!([
+            {"id":"cashu:source","url":source.url},
+            {"id":"cashu:destination","url":destination.url}
+        ]),
+        &json!([]),
+        &json!([]),
+    );
+    let body = json!({
+        "amount": 100_000,
+        "asset": "BTC",
+        "destination": {"type": "cashu", "value": cashu_request(&destination.url)},
+        "payment_intent": "send",
+        "candidate_connectors": ["cashu:source", "cashu:destination"]
+    });
+    let (status, decision) = server.post("/v1/routes/evaluate", &body);
+    assert_eq!(status, 200, "{decision}");
+    assert_eq!(decision["recommended_source"]["connector"], "cashu:source");
+    assert!(
+        decision["alternative_sources"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        decision["recommended_source"]["route_classification"],
+        "quote_backed"
+    );
+    assert_eq!(decision["recommended_source"]["executable"], false);
 }
 
 #[test]
