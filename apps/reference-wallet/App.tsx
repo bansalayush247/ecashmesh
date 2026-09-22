@@ -43,7 +43,6 @@ const baseUrl =
 const ecashmesh = createEcashMeshClient({ baseUrl });
 const regtestCustodyEnabled =
   process.env.EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY === "true";
-const btcUsdRate = Number(process.env.EXPO_PUBLIC_BTC_USD_RATE ?? "");
 
 function compactDestination(value: string) {
   const start = 18;
@@ -53,12 +52,12 @@ function compactDestination(value: string) {
     : value;
 }
 
-function amountValueHint(value: string) {
+function amountValueHint(value: string, btcUsdRate: number | null) {
   const amount = Number.parseInt(value.replace(/[,_\s]/g, ""), 10);
   if (!Number.isFinite(amount) || amount <= 0) {
     return "Enter amount in sats";
   }
-  if (Number.isFinite(btcUsdRate) && btcUsdRate > 0) {
+  if (btcUsdRate !== null) {
     const usd = (amount / 100_000_000) * btcUsdRate;
     return `≈ ${new Intl.NumberFormat("en-US", {
       currency: "USD",
@@ -67,7 +66,132 @@ function amountValueHint(value: string) {
       style: "currency",
     }).format(usd)}`;
   }
-  return `${sats(amount)} selected`;
+  return `${sats(amount)} selected · fetching live BTC/USD reference…`;
+}
+
+function useLiveBtcUsdRate() {
+  const [rate, setRate] = useState<number | null>(null);
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      try {
+        const response = await fetch(`${baseUrl}/v1/market/btc-usd`);
+        const payload: unknown = await response.json();
+        const value =
+          typeof payload === "object" && payload !== null && "btc_usd" in payload
+            ? (payload as { btc_usd?: unknown }).btc_usd
+            : null;
+        if (active && typeof value === "number" && Number.isFinite(value) && value > 0) {
+          setRate(value);
+        }
+      } catch {
+        // The sat amount remains authoritative when the optional display quote is unavailable.
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => void refresh(), 60_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
+  return rate;
+}
+
+type MintSummary = { mintUrl: string; status: string; health: string };
+
+function useLiveMintSummaries(amountText: string) {
+  const [mints, setMints] = useState<MintSummary[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    const amount = Number.parseInt(amountText, 10);
+    if (!Number.isSafeInteger(amount) || amount <= 0) return;
+    let active = true;
+    const load = async () => {
+      try {
+        const response = await fetch(`${baseUrl}/v1/connectors?amount=${amount}`);
+        const payload: unknown = await response.json();
+        if (!response.ok || typeof payload !== "object" || payload === null) {
+          throw new Error("Live source discovery is unavailable");
+        }
+        const observations = "observations" in payload && Array.isArray(payload.observations)
+          ? payload.observations
+          : [];
+        const summaries = observations.flatMap((value): MintSummary[] => {
+          if (typeof value !== "object" || value === null) return [];
+          const observation = value as Record<string, unknown>;
+          if (typeof observation.mint_url !== "string") return [];
+          const health = observation.health as Record<string, unknown> | undefined;
+          return [{
+            mintUrl: observation.mint_url,
+            status: typeof observation.data_status === "string" ? observation.data_status : "unknown",
+            health: typeof health?.value === "string" ? health.value : "unknown",
+          }];
+        });
+        if (active) {
+          setMints(summaries);
+          setError(null);
+          setLoaded(true);
+        }
+      } catch {
+        if (active) {
+          setMints([]);
+          setError("Live source discovery is unavailable. Check the local API connection.");
+          setLoaded(true);
+        }
+      }
+    };
+    void load();
+    const timer = setInterval(() => void load(), 30_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [amountText]);
+  return { mints, error, loaded };
+}
+
+function selectedMintUrls(value: string) {
+  return value
+    .split(/[\n,]/)
+    .map((url) => url.trim())
+    .filter(Boolean);
+}
+
+function SourceMintPicker({
+  mints,
+  value,
+  onChange,
+}: {
+  mints: MintSummary[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const selected = new Set(selectedMintUrls(value));
+  const toggle = (mintUrl: string) => {
+    const next = new Set(selected);
+    if (next.has(mintUrl)) next.delete(mintUrl);
+    else next.add(mintUrl);
+    onChange([...next].join("\n"));
+  };
+  return (
+    <Section title="Choose source mints">
+      <Text style={styles.small}>
+        Select one or more sources to compare.
+      </Text>
+      {mints.map((mint) => (
+        <Choice
+          key={mint.mintUrl}
+          title={mint.mintUrl}
+          copy={`Health: ${mint.health} · Metadata: ${mint.status}`}
+          icon="◈"
+          selected={selected.has(mint.mintUrl)}
+          onPress={() => toggle(mint.mintUrl)}
+        />
+      ))}
+    </Section>
+  );
 }
 
 function LiveObservations({ decision }: { decision: RouteDecision }) {
@@ -248,11 +372,13 @@ function BottomNav() {
 }
 
 function ReferenceWallet() {
+  const btcUsdRate = useLiveBtcUsdRate();
   const regtest = useRegtestCustody(
     regtestCustodyEnabled,
   );
   const flow = usePaymentFlow(ecashmesh, regtest.custody);
   const [fundAmount, setFundAmount] = useState("1000");
+  const liveSources = useLiveMintSummaries(flow.amount);
   const scroll = useRef<ScrollView>(null);
   useEffect(() => {
     scroll.current?.scrollTo({ y: 0, animated: false });
@@ -296,10 +422,12 @@ function ReferenceWallet() {
                   <Text style={local.balance}>
                     {regtest.enabled
                       ? `${regtest.balance.toLocaleString("en-US")} sats`
-                      : "1,234,567 sats"}
+                      : "Unavailable"}
                   </Text>
                   <Text style={local.balanceFiat}>
-                    {regtest.enabled ? "Regtest Cashu balance" : "≈ $742.11"}
+                    {regtest.enabled
+                      ? "Regtest Cashu balance"
+                      : "No wallet custody connected"}
                   </Text>
                 </View>
                 <RegtestCustodyCard
@@ -341,62 +469,17 @@ function ReferenceWallet() {
                 </Pressable>
                 <Section title="Recent Activity">
                   <View style={local.activityHead}>
-                    <Text style={local.activityNote}>Recent wallet activity</Text>
-                    <Text style={local.seeAll}>See all</Text>
+                    <Text style={local.activityNote}>
+                      {regtest.enabled
+                        ? "Local regtest wallet activity"
+                        : "No wallet activity is available in read-only mode"}
+                    </Text>
                   </View>
-                  {[
-                    [
-                      "↓",
-                      "Received",
-                      "+21,000 sats",
-                      "2 hours ago",
-                      "#E5FAF1",
-                      colors.green,
-                    ],
-                    [
-                      "↑",
-                      "Sent",
-                      "-50,000 sats",
-                      "1 day ago",
-                      "#FFF0F1",
-                      colors.red,
-                    ],
-                    [
-                      "↓",
-                      "Received",
-                      "+100,000 sats",
-                      "2 days ago",
-                      "#E5FAF1",
-                      colors.green,
-                    ],
-                  ].map(([icon, label, amount, time, bg, color]) => (
-                    <View key={`${label}-${time}`} style={local.activityRow}>
-                      <View
-                        style={[
-                          local.activityIcon,
-                          { backgroundColor: bg as string },
-                        ]}
-                      >
-                        <Text
-                          style={{ color: color as string, fontWeight: "800" }}
-                        >
-                          {icon}
-                        </Text>
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={local.activityLabel}>{label}</Text>
-                        <Text style={styles.small}>{time}</Text>
-                      </View>
-                      <Text
-                        style={[
-                          local.activityAmount,
-                          { color: color as string },
-                        ]}
-                      >
-                        {amount}
-                      </Text>
-                    </View>
-                  ))}
+                  <Text style={styles.small}>
+                    {regtest.enabled
+                      ? "Balances are derived from proofs stored locally in this browser."
+                      : "EcashMesh discovers public mint data and unpaid quotes only; it does not read balances, proofs, or transaction history."}
+                  </Text>
                 </Section>
                 <Button onPress={flow.edit}>Send payment</Button>
                 <BottomNav />
@@ -434,7 +517,7 @@ function ReferenceWallet() {
                   <Text style={local.satsSuffix}>sats</Text>
                 </View>
                 <Text style={local.fiatHint}>
-                  {amountValueHint(flow.amount)}
+                  {amountValueHint(flow.amount, btcUsdRate)}
                 </Text>
                 <Text style={local.fieldLabel}>Payment destination type</Text>
                 <View style={local.destinationTypes}>
@@ -447,39 +530,37 @@ function ReferenceWallet() {
                   />
                   <Choice
                     title="Cashu request"
-                    copy="Paste a NUT-18 creq… request or destination URI"
+                    copy="Enter the destination mint URL"
                     icon="◈"
                     selected={flow.destinationType === "cashu"}
                     onPress={() => flow.setDestinationType("cashu")}
                   />
                 </View>
-                <Text style={local.fieldLabel}>Wallet source Cashu mint URLs</Text>
-                <View style={local.destinationWrap}>
-                  <TextInput
-                    accessibilityLabel="Wallet source Cashu mint URLs"
+                {liveSources.mints.length > 0 ? (
+                  <SourceMintPicker
+                    mints={liveSources.mints}
                     value={flow.sourceMintUrl}
-                    onChangeText={flow.setSourceMintUrl}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    multiline
-                    style={local.destinationInput}
-                    placeholder={"https://mint-a.example\nhttps://mint-b.example"}
+                    onChange={flow.setSourceMintUrl}
                   />
-                </View>
-                <Text style={local.fiatHint}>
-                  Optional. Enter one URL per line (or comma-separated). These
-                  are wallet sources; the destination mint is never added here.
-                </Text>
+                ) : (
+                  <Section title="Choose source mints">
+                    <Text style={styles.small}>
+                      {liveSources.error ?? (liveSources.loaded
+                        ? "No source mints are configured in the local API."
+                        : "Loading live source mint observations…")}
+                    </Text>
+                  </Section>
+                )}
                 <Text style={local.fieldLabel}>
                   {flow.destinationType === "cashu"
-                    ? "Cashu payment request"
+                    ? "Destination Cashu mint URL"
                     : "Lightning invoice"}
                 </Text>
                 <View style={local.destinationWrap}>
                   <TextInput
                     accessibilityLabel={
                       flow.destinationType === "cashu"
-                        ? "Cashu payment request"
+                        ? "Destination Cashu mint URL"
                         : "Lightning destination"
                     }
                     value={flow.destination}
@@ -489,38 +570,15 @@ function ReferenceWallet() {
                     style={local.destinationInput}
                     placeholder={
                       flow.destinationType === "cashu"
-                        ? "creqA… or cashu://request?mint=https%3A%2F%2Fmint.example"
+                        ? "https://mint.example"
                         : "lnbc..."
                     }
                   />
                   <Text style={local.destinationIcon}>⌗</Text>
                 </View>
                 {flow.error && <ErrorNotice error={flow.error} />}
-                <Section title="Payment Method">
-                  <Choice
-                    title="Use EcashMesh"
-                    copy="Compare available payment sources automatically"
-                    icon="✦"
-                    selected
-                  />
-                  <Choice
-                    title="Lightning (direct)"
-                    copy="May be faster, higher fees"
-                    icon="ϟ"
-                  />
-                  <Choice
-                    title="Cashu (specific mint)"
-                    copy="Use a specific mint"
-                    icon="◈"
-                  />
-                  <Choice
-                    title="Fedimint (specific federation)"
-                    copy="Use a specific federation"
-                    icon="◉"
-                  />
-                </Section>
                 <Button onPress={() => void flow.evaluate()}>
-                  EcashMesh Source Selection
+                  Compare selected sources
                 </Button>
                 <Text style={local.powered}>
                   Powered by EcashMesh · live

@@ -20,6 +20,7 @@ pub(super) enum Provider {
     Cashu {
         service: Arc<DiscoveryService>,
         allow_discovered_sources: bool,
+        automatic_discovered_source_limit: usize,
     },
 }
 
@@ -99,9 +100,11 @@ pub(super) fn select_live_sources(
     selected: &[ConnectorSnapshot],
     source_connector: Option<String>,
     source_mint_url: Option<String>,
+    selected_source_mint_urls: Vec<String>,
     discovery: &DiscoveryReport,
     destination_mint_urls: &[String],
     allow_discovered_sources: bool,
+    automatic_discovered_source_limit: usize,
 ) -> Result<Vec<ConnectorSnapshot>, ApiError> {
     let source_connector = source_connector
         .filter(|value| !value.trim().is_empty())
@@ -111,6 +114,13 @@ pub(super) fn select_live_sources(
         .map(|value| ecashmesh_cashu::discovery::canonical_mint_url(&value))
         .transpose()
         .map_err(|error| ApiError::validation("source_mint_url is invalid", vec![error]))?;
+    let selected_source_mint_urls = selected_source_mint_urls
+        .into_iter()
+        .map(|url| ecashmesh_cashu::discovery::canonical_mint_url(&url))
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| {
+            ApiError::validation("wallet_mint_urls contains an invalid mint URL", vec![error])
+        })?;
     let source_from_url = source_mint_url.as_ref().and_then(|url| {
         discovery
             .mints
@@ -135,17 +145,34 @@ pub(super) fn select_live_sources(
     let expected = source_connector
         .as_deref()
         .or_else(|| source_from_url.as_ref().map(ConnectorId::as_str));
-    let allowed_sources = discovery
+    let explicit_sources = discovery
         .mints
         .iter()
         .filter(|mint| {
             !destination_mint_urls.contains(&mint.canonical_url)
-                && (allow_discovered_sources
-                    || mint.provenance.iter().any(|hint| {
-                        matches!(hint.source, DiscoverySource::Seed | DiscoverySource::Wallet)
-                    }))
+                && mint.provenance.iter().any(|hint| {
+                    matches!(hint.source, DiscoverySource::Seed | DiscoverySource::Wallet)
+                })
         })
         .map(|mint| mint.connector_id())
+        .collect::<BTreeSet<_>>();
+    let mut discovered_sources = discovery
+        .mints
+        .iter()
+        .filter(|mint| {
+            !destination_mint_urls.contains(&mint.canonical_url)
+                && !explicit_sources.contains(&mint.connector_id())
+        })
+        .map(|mint| mint.connector_id())
+        .collect::<Vec<_>>();
+    if automatic_discovered_source_limit > 0 {
+        discovered_sources.truncate(automatic_discovered_source_limit);
+    } else if !allow_discovered_sources {
+        discovered_sources.clear();
+    }
+    let allowed_sources = explicit_sources
+        .into_iter()
+        .chain(discovered_sources)
         .collect::<BTreeSet<_>>();
     let narrowed = expected.map_or_else(
         || selected.to_vec(),
@@ -159,7 +186,14 @@ pub(super) fn select_live_sources(
     );
     let narrowed = narrowed
         .into_iter()
-        .filter(|connector| allowed_sources.contains(&connector.id))
+        .filter(|connector| {
+            allowed_sources.contains(&connector.id)
+                && (selected_source_mint_urls.is_empty()
+                    || discovery.mints.iter().any(|mint| {
+                        mint.connector_id() == connector.id
+                            && selected_source_mint_urls.contains(&mint.canonical_url)
+                    }))
+        })
         .collect::<Vec<_>>();
     if narrowed.is_empty() {
         return Err(ApiError::validation(
@@ -203,9 +237,18 @@ impl Provider {
                         .map_err(
                             |_| "ECASHMESH_CASHU_ALLOW_DISCOVERED_SOURCES must be true or false",
                         )?;
+                let automatic_discovered_source_limit =
+                    std::env::var("ECASHMESH_CASHU_AUTO_SOURCE_LIMIT")
+                        .unwrap_or_else(|_| "0".into())
+                        .parse::<usize>()
+                        .map_err(|_| "ECASHMESH_CASHU_AUTO_SOURCE_LIMIT must be an integer")?;
+                if automatic_discovered_source_limit > 3 {
+                    return Err("ECASHMESH_CASHU_AUTO_SOURCE_LIMIT may not exceed 3".into());
+                }
                 Ok(Self::Cashu {
                     service: Arc::new(DiscoveryService::new(seeds, directories, allowed, ttl)?),
                     allow_discovered_sources,
+                    automatic_discovered_source_limit,
                 })
             }
             other => Err(format!("Unsupported ROUTING_MODE: {other}")),
@@ -225,6 +268,15 @@ impl Provider {
                 allow_discovered_sources,
                 ..
             } => *allow_discovered_sources,
+        }
+    }
+
+    pub const fn automatic_discovered_source_limit(&self) -> usize {
+        match self {
+            Self::Cashu {
+                automatic_discovered_source_limit,
+                ..
+            } => *automatic_discovered_source_limit,
         }
     }
 

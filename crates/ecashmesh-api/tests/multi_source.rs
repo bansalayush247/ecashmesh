@@ -180,3 +180,35 @@ fn unavailable_source_is_excluded_without_fabricating_a_mint_bridge() {
                 && quote["state"] == "known")
     );
 }
+
+#[test]
+fn explicitly_selected_wallet_sources_exclude_other_configured_mints() {
+    let source_a = MockMint::start("healthy");
+    let source_b = MockMint::start("healthy");
+    let source_c = MockMint::start("healthy");
+    let destination = MockMint::start("healthy");
+    let server = ApiServer::start_with_sources(
+        &json!([
+            {"id":"cashu:source-a","url":source_a.url},
+            {"id":"cashu:source-b","url":source_b.url},
+            {"id":"cashu:source-c","url":source_c.url}
+        ]),
+        &json!([]),
+        &json!([destination.url]),
+    );
+    let body = json!({
+        "amount": 100_000,
+        "asset": "BTC",
+        "destination": {"type":"cashu", "value":cashu_destination(&destination.url)},
+        "payment_intent":"send",
+        "wallet_mint_urls":[source_a.url, source_b.url]
+    });
+    let (status, response) = server.post("/v1/routes/evaluate", &body);
+    assert_eq!(status, 200, "{response}");
+    let sources = std::iter::once(&response["recommended_source"])
+        .chain(response["alternative_sources"].as_array().unwrap())
+        .map(|route| route["source_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(sources.len(), 2);
+    assert!(sources.iter().all(|source| *source != "cashu:source-c"));
+}

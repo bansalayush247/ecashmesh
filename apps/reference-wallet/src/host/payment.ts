@@ -30,10 +30,14 @@ export function collectPayment(
     .split(/[\n,]/)
     .map((value) => value.trim())
     .filter(Boolean);
+  const trimmedDestination = destination.trim();
+  const cashuDestination = destinationType === "cashu" && /^https?:\/\//i.test(trimmedDestination)
+    ? `cashu://request?mint=${encodeURIComponent(trimmedDestination)}&amount_sats=${amount}`
+    : trimmedDestination;
   return {
     amount,
     asset: "BTC",
-    destination: { type: destinationType, value: destination.trim() },
+    destination: { type: destinationType, value: cashuDestination },
     paymentIntent: "send",
     ...(sourceMintUrls.length ? { walletMintUrls: sourceMintUrls } : {}),
   };

@@ -88,6 +88,10 @@ mechanism.
 directory URLs. Its results are visible as discovered observations only. Set
 `ECASHMESH_CASHU_ALLOW_DISCOVERED_SOURCES=true` only when the operator
 deliberately wants directory discoveries to be eligible source candidates.
+For the bounded automatic public-demo policy, set
+`ECASHMESH_CASHU_AUTO_SOURCE_LIMIT=3`; it deterministically selects at most
+three non-destination directory observations as source candidates. This is
+still quote-only and does not establish wallet ownership or execution ability.
 `ECASHMESH_CASHU_ALLOWED_MINTS` is an optional JSON array for trusted local or
 test endpoints. It is not needed for public mainnet mints.
 

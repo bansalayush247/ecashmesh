@@ -77,6 +77,7 @@ fn app(provider: Provider) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/health", get(health))
+        .route("/v1/market/btc-usd", get(btc_usd_price))
         .route("/v1/routes/rank", post(rank))
         .route("/v1/routes/evaluate", post(evaluate))
         .route("/v1/connectors", get(connector_observations))
@@ -119,6 +120,65 @@ async fn index() -> Html<&'static str> {
 
 async fn health() -> Json<serde_json::Value> {
     Json(json!({ "status": "ok" }))
+}
+
+/// Display-only BTC/USD reference rate. It is independent from Cashu mint
+/// quotes and is never used for route selection or payment execution.
+async fn btc_usd_price() -> Result<Json<serde_json::Value>, ApiError> {
+    const DEFAULT_PRICE_URL: &str = "https://api.coinbase.com/v2/exchange-rates?currency=BTC";
+    let url = std::env::var("ECASHMESH_BTC_USD_PRICE_URL")
+        .unwrap_or_else(|_| DEFAULT_PRICE_URL.to_owned());
+    let parsed = reqwest::Url::parse(&url).map_err(|_| {
+        ApiError::validation(
+            "Invalid BTC/USD price URL",
+            vec!["ECASHMESH_BTC_USD_PRICE_URL".into()],
+        )
+    })?;
+    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ApiError::validation(
+            "BTC/USD price URL must use HTTPS without credentials",
+            vec!["ECASHMESH_BTC_USD_PRICE_URL".into()],
+        ));
+    }
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| ApiError::internal("market_price", error.to_string()))?
+        .get(parsed)
+        .send()
+        .await
+        .map_err(|error| {
+            ApiError::internal(
+                "market_price",
+                format!("BTC/USD quote request failed: {error}"),
+            )
+        })?
+        .error_for_status()
+        .map_err(|error| {
+            ApiError::internal(
+                "market_price",
+                format!("BTC/USD quote response failed: {error}"),
+            )
+        })?;
+    let payload: serde_json::Value = response.json().await.map_err(|error| {
+        ApiError::internal(
+            "market_price",
+            format!("BTC/USD quote was invalid JSON: {error}"),
+        )
+    })?;
+    let rate = payload
+        .pointer("/data/rates/USD")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| {
+            ApiError::internal("market_price", "BTC/USD quote has no usable USD rate")
+        })?;
+    Ok(Json(json!({
+        "btc_usd": rate,
+        "observed_at_unix_seconds": connectors::unix_now(),
+        "source": "display_only_market_reference",
+    })))
 }
 
 async fn rank(Json(request): Json<RankRequest>) -> Result<Json<RankResponse>, ApiError> {
@@ -249,6 +309,7 @@ async fn evaluate_using(
         candidate_connectors,
         source_connector,
         source_mint_url,
+        wallet_mint_urls,
         ..
     } = request;
 
@@ -271,9 +332,11 @@ async fn evaluate_using(
         &selected,
         source_connector,
         source_mint_url,
+        wallet_mint_urls,
         &batch.discovery,
         &destination_mint_urls,
         provider.allows_discovered_sources(),
+        provider.automatic_discovered_source_limit(),
     )?;
     let evaluation = match live::evaluate(service, &batch, sources, live_destination, amount).await
     {
