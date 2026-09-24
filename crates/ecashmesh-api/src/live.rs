@@ -11,12 +11,14 @@ use ecashmesh_cashu::{
     discovery::DiscoveryService,
 };
 use ecashmesh_core::{
-    Amount, AmountAwareEvidence, ConnectorCapabilities, ConnectorEvidence, ConnectorHealth,
-    ConnectorId, ConnectorRegistry, ConnectorSnapshot, ConnectorType, DiscoveredConnector,
-    Evidence, EvidenceState, EvidenceTimestamp, ExecutableEdge, GraphBuilder, GraphNode,
-    GraphSnapshotPublisher, HealthObservation, HealthState, LightningInvoice, RouteRanking,
-    RouteSearchConfig, RouteSearchRequest, ScalableRouter, SearchEndpoint, TransferMechanism,
+    Amount, AmountAwareEvidence, ConfidenceLevel, ConnectorCapabilities, ConnectorEvidence,
+    ConnectorHealth, ConnectorId, ConnectorRegistry, ConnectorSnapshot, ConnectorType,
+    DiscoveredConnector, Evidence, EvidenceSource, EvidenceState, EvidenceTimestamp,
+    ExecutableEdge, GraphBuilder, GraphNode, GraphSnapshotPublisher, HealthObservation,
+    HealthState, LightningInvoice, RouteRanking, RouteSearchConfig, RouteSearchRequest,
+    ScalableRouter, SearchEndpoint, TransferMechanism,
 };
+use ecashmesh_fedimint::{FederationObservation, FedimintQuote, FedimintService};
 use serde_json::{Value, json};
 
 use crate::connectors::{ConnectorBatch, unix_now};
@@ -68,14 +70,20 @@ pub(super) struct LiveEvaluation {
 }
 
 /// Quote and keyset-fee facts for a quoted source connector.
-pub(super) struct LiveFeeTerms {
-    /// Source connector that returned the NUT-05 quote.
-    pub source_connector: ConnectorId,
+pub(super) enum LiveFeeTerms {
     /// NUT-05 upper-bound reserve, not a final paid fee.
-    pub fee_reserve_sats: Amount,
-    /// NUT-02 keyset schedule. It cannot be totalled until actual proofs are
-    /// selected, so it is deliberately excluded from the quote estimate.
-    pub input_fees: Evidence<Vec<KeysetFee>>,
+    Cashu {
+        source_connector: ConnectorId,
+        fee_reserve_sats: Amount,
+        input_fees: Evidence<Vec<KeysetFee>>,
+    },
+    /// Explicit Fedimint fee components from a non-mutating host quote.
+    Fedimint {
+        source_connector: ConnectorId,
+        federation_fee_sats: Amount,
+        gateway_fee_sats: Option<Amount>,
+        destination_fee_sats: Option<Amount>,
+    },
 }
 
 /// A real-data failure that deliberately does not manufacture a candidate.
@@ -89,6 +97,7 @@ pub(super) struct LiveNoRoute {
 #[allow(clippy::too_many_lines)] // Keeps the full live feasibility chain and its exact no-route diagnostics together.
 pub(super) async fn evaluate(
     service: &Arc<DiscoveryService>,
+    fedimint: &Arc<FedimintService>,
     batch: &ConnectorBatch,
     sources: Vec<ConnectorSnapshot>,
     destination: LiveDestination,
@@ -255,6 +264,66 @@ pub(super) async fn evaluate(
         expiries.push(expiry);
     }
     for source in sources {
+        if source.connector_type == ConnectorType::Fedimint {
+            let Some(observation) = batch
+                .fedimint_observations
+                .iter()
+                .find(|observation| observation.snapshot.id == source.id)
+            else {
+                no_route_details.push(format!("{}: Fedimint observation is missing", source.id));
+                continue;
+            };
+            let quote = match fedimint
+                .quote(observation, invoice.as_str(), amount, unix_now())
+                .await
+            {
+                Ok(quote) => quote,
+                Err(error) => {
+                    quote_observations.push(fedimint_quote_json(observation, None, Some(&error)));
+                    no_route_details.push(format!(
+                        "{}: missing read-only Fedimint quote: {error}",
+                        source.id
+                    ));
+                    continue;
+                }
+            };
+            quote_observations.push(fedimint_quote_json(observation, Some(&quote), None));
+            if quote.payable == Some(false) {
+                no_route_details.push(format!(
+                    "{}: Fedimint quote reports invoice unavailable",
+                    source.id
+                ));
+                continue;
+            }
+            let mut source = source;
+            let total = quote.total_fee();
+            source.fee = Evidence::reported(
+                ecashmesh_core::FeeQuote::new(total),
+                EvidenceSource::Connector,
+                quote.observed_at,
+                ConfidenceLevel::Medium,
+            );
+            if let Some(balance) = quote.spendable_balance_sats.value().copied() {
+                source.liquidity = Evidence::reported(
+                    ecashmesh_core::LiquidityInfo::new(balance, None),
+                    EvidenceSource::Connector,
+                    quote.observed_at,
+                    ConfidenceLevel::Medium,
+                );
+            }
+            source_health.insert(source.id.clone(), health_observation(&observation.health));
+            if let Some(expiry) = quote.expires_at_unix_seconds {
+                expiries.push(expiry);
+            }
+            live_fee_terms.push(LiveFeeTerms::Fedimint {
+                source_connector: source.id.clone(),
+                federation_fee_sats: quote.federation_fee_sats,
+                gateway_fee_sats: quote.gateway_fee_sats,
+                destination_fee_sats: quote.destination_fee_sats,
+            });
+            live_sources.push(source);
+            continue;
+        }
         let Some(observation) = by_id.get(&source.id).copied() else {
             no_route_details.push(format!(
                 "{}: source metadata observation is missing",
@@ -295,7 +364,7 @@ pub(super) async fn evaluate(
             quote_evidence.observed_at,
             quote_evidence.confidence,
         );
-        live_fee_terms.push(LiveFeeTerms {
+        live_fee_terms.push(LiveFeeTerms::Cashu {
             source_connector: source.id.clone(),
             fee_reserve_sats: quote_evidence.value.fee_reserve_sats,
             input_fees: observation.input_fees.clone(),
@@ -410,7 +479,11 @@ pub(super) async fn evaluate(
         graph.add_edge(ExecutableEdge {
             from: source_compact,
             to: terminal_compact,
-            mechanism: TransferMechanism::CashuLightning,
+            mechanism: if source.connector_type == ConnectorType::Fedimint {
+                TransferMechanism::FedimintLightning
+            } else {
+                TransferMechanism::CashuLightning
+            },
             base_fee: fee,
             fee_parts_per_million: 0,
             // A quote proves this exact mechanism was quotable, but not that
@@ -466,6 +539,25 @@ pub(super) async fn evaluate(
             })
         })
         .collect::<Vec<_>>();
+    let mut mechanisms = live_sources
+        .iter()
+        .map(|source| match source.connector_type {
+            ConnectorType::Fedimint => "fedimint_lightning",
+            _ => "cashu_lightning",
+        })
+        .collect::<Vec<_>>();
+    mechanisms.sort_unstable();
+    mechanisms.dedup();
+    let route_shape = match (destination_type, mechanisms.as_slice()) {
+        ("cashu", ["cashu_lightning"]) => {
+            "Cashu source → Lightning invoice → Cashu destination quote"
+        }
+        ("cashu", _) => {
+            "Configured source → destination Lightning invoice → Cashu destination quote"
+        }
+        (_, ["cashu_lightning"]) => "Cashu source → Lightning invoice",
+        _ => "Configured Cashu/Fedimint source → Lightning invoice",
+    };
     Ok(LiveEvaluation {
         ranking: result.ranking,
         connectors: live_sources,
@@ -478,7 +570,7 @@ pub(super) async fn evaluate(
             "graph_version": result.graph_version,
             "connector_count": snapshot.connector_count(),
             "edge_count": snapshot.edge_count(),
-            "mechanisms": ["cashu_lightning"],
+            "mechanisms": mechanisms,
             "search": {
                 "candidates_generated": result.metrics.candidates_generated,
                 "nodes_explored": result.metrics.nodes_explored,
@@ -487,10 +579,7 @@ pub(super) async fn evaluate(
                 "feasibility_pruned": result.metrics.feasibility_pruned,
                 "cache_hit": result.metrics.cache_hit,
             },
-            "route_shape": match destination_type {
-                "cashu" => "Cashu source → Lightning invoice → Cashu destination quote",
-                _ => "Cashu source → Lightning invoice",
-            },
+            "route_shape": route_shape,
             "route_classification": "quote_backed",
             "execution": "No wallet proofs, funds, or payment instruction were supplied to EcashMesh",
         }),
@@ -550,6 +639,31 @@ fn melt_quote_json(
             })
         },
     )
+}
+
+fn fedimint_quote_json(
+    source: &FederationObservation,
+    quote: Option<&FedimintQuote>,
+    issue: Option<&str>,
+) -> Value {
+    json!({
+        "kind": "fedimint_lightning_fee_quote",
+        "connector": source.snapshot.id.as_str(),
+        "federation_id": source.config.federation_id,
+        "state": if quote.is_some() { "known" } else { "unknown" },
+        "observed_at_unix_seconds": quote.map(|quote| quote.observed_at.unix_seconds()),
+        "value": quote.map(|quote| json!({
+            "federation_fee_sats": quote.federation_fee_sats.sats(),
+            "gateway_fee_sats": quote.gateway_fee_sats.map(Amount::sats),
+            "destination_fee_sats": quote.destination_fee_sats.map(Amount::sats),
+            "fee_kind": "estimate",
+            "gateway_id": quote.selected_gateway_id,
+            "payable": quote.payable,
+            "spendable_balance_sats": quote.spendable_balance_sats.value().map(|amount| amount.sats()),
+            "expiry": quote.expires_at_unix_seconds,
+        })),
+        "issue": issue.map(|message| json!({"code": "READ_ONLY_QUOTE_UNAVAILABLE", "message": message})),
+    })
 }
 
 fn quote_json<T>(

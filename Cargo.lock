@@ -234,6 +234,7 @@ dependencies = [
  "base64",
  "ecashmesh-cashu",
  "ecashmesh-core",
+ "ecashmesh-fedimint",
  "reqwest",
  "serde",
  "serde_json",
@@ -261,6 +262,17 @@ name = "ecashmesh-core"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+]
+
+[[package]]
+name = "ecashmesh-fedimint"
+version = "0.1.0"
+dependencies = [
+ "ecashmesh-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

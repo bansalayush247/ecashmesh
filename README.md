@@ -20,6 +20,7 @@ only to the explicitly enabled real-payment boundary.
 | --- | --- |
 | `ecashmesh-core` | Protocol-independent source model, evidence/risk evaluation, deterministic ranking, explicit-mechanism graph search |
 | `ecashmesh-cashu` | Cashu discovery, quote normalization, and a write-only NUT-08 melt transport |
+| `ecashmesh-fedimint` | Read-only Fedimint clientd observations and non-mutating Lightning quote-bridge normalization |
 | `ecashmesh-api` | Thin HTTP boundary on port `5000` |
 | `reference-wallet` | React Native reference host integration; renders EcashMesh decisions only |
 
@@ -45,6 +46,8 @@ API (`ecashmesh-api`)
   │  validates/normalizes input and translates DTOs
   ├───────────────► Cashu adapter (`ecashmesh-cashu`)
   │                 public metadata + unpaid quote observations
+  ├───────────────► Fedimint adapter (`ecashmesh-fedimint`)
+  │                 clientd health/gateway cache + read-only fee quote bridge
   ▼
 Core (`ecashmesh-core`)
   evidence → source feasibility → bounded source selection → ranking → explanation
@@ -72,6 +75,47 @@ ECASHMESH_CASHU_MINTS='[{"id":"cashu:source-a","url":"https://mint-a.example"},{
 ECASHMESH_CASHU_DIRECTORIES='["https://your-directory.example/mints"]' \
 nix develop -c cargo run -p ecashmesh-api
 ```
+
+### Fedimint sources (read-only)
+
+Fedimint is an independent configured source, never a discovered Cashu mint.
+Configure the already-joined federation in a locally controlled
+`fedimint-clientd` and give EcashMesh its federation ID and clientd endpoint:
+
+```bash
+ECASHMESH_FEDIMINT_FEDERATIONS='[
+  {
+    "id":"fedimint:federation-a",
+    "label":"Federation A",
+    "federation_id":"<clientd federation id>",
+    "clientd_url":"http://127.0.0.1:3333",
+    "token":"<clientd bearer token>",
+    "quote_url":"http://127.0.0.1:3334/v1/fedimint/read-only-quote"
+  }
+]'
+```
+
+`clientd_url` is used only for `/health`, `/v2/admin/info`, and
+`/v2/ln/list-gateways`. The adapter never calls `/v2/ln/pay`, never joins from
+an invite, and never persists a Fedimint wallet. `quote_url` is deliberately a
+separate host-controlled read-only bridge because clientd's current REST API
+does not provide a non-mutating outgoing fee quote. It must call the host's
+`fedimint_ln_client 0.13.0-alpha` APIs (`list_gateways`, `send_fee_quote`, and,
+when a balance is intentionally shared, `spendable_amount`) and must not call
+`pay_bolt11_invoice`.
+
+The bridge receives:
+
+```json
+{"federation_id":"…","invoice":"ln…","amount_sats":1000}
+```
+
+and returns a non-mutating observation containing required
+`federation_fee_sats` and optional `gateway_fee_sats`,
+`destination_fee_sats`, `spendable_balance_sats`, `payable`,
+`selected_gateway_id`, and `expires_at_unix_seconds`. A missing bridge or quote
+means no Fedimint candidate is invented. `ECASHMESH_FEDIMINT_MAX_AGE_SECONDS`
+defaults to 300 seconds.
 
 Start the reference wallet:
 
@@ -233,9 +277,18 @@ Cashu adapter requests are bounded and do not use custody, tokens, proofs, or
 payment-execution endpoints. Discovery reads public metadata; live evaluation
 may request unpaid quotes only.
 
+Fedimint evaluation is also read-only. It exposes federation health, registered
+gateway count/announcements, gateway routing fees when advertised, and wallet
+balance only when clientd explicitly reports it. Gateway reachability is not
+liquidity, solvency, or payment reliability. A fee quote produces a
+`quote_backed` Fedimint → Lightning candidate; it is neither wallet-executable
+nor settled. For a Cashu destination the visible mechanism is
+`fedimint_lightning_destination_settlement`: the destination mint's invoice is
+an internal settlement detail, not a Lightning-hop route or a completed Cashu
+proof delivery. Fedimint destinations are currently unsupported.
+
 ## Future work
 
-- Read-only Fedimint and additional Lightning connector adapters
 - More source-backed evidence, health observations, and discovery providers
 - Persistent versioned graph snapshots, cache telemetry, and future graph sharding
 - More executable payment mechanisms after their safety and evidence boundaries

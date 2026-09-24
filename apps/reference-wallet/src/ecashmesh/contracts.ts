@@ -26,6 +26,9 @@ export const feeSchema = z
       })
       .nullable()
       .optional(),
+    federation_fee_sats: unsigned.nullable().optional(),
+    gateway_routing_fee_sats: unsigned.nullable().optional(),
+    lightning_destination_fee_sats: unsigned.nullable().optional(),
   })
   .passthrough();
 const reasonSchema = z
@@ -47,6 +50,10 @@ export const paymentSourceSchema = z
     // `route_id` remains an opaque execution-correlation token.
     route_id: z.string().min(1),
     source_id: z.string().min(1).optional(),
+    source_label: z.string().min(1).optional(),
+    gateway_count: unsigned.nullable().optional(),
+    available_gateway_count: unsigned.nullable().optional(),
+    gateway_status: z.enum(["online", "degraded", "unavailable", "unknown"]).nullable().optional(),
     protocol: z.enum(["cashu", "fedimint", "lightning"]).optional(),
     settlement_mechanism: z.string().min(1).optional(),
     executable: z.boolean().optional(),

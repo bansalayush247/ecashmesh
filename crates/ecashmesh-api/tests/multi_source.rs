@@ -11,7 +11,7 @@ fn cashu_destination(mint_url: &str) -> String {
     )
 }
 
-fn payment(destination: String, amount: u64) -> Value {
+fn payment(destination: &str, amount: u64) -> Value {
     json!({
         "amount": amount,
         "asset": "BTC",
@@ -76,7 +76,7 @@ fn live_cashu_source_selection_returns_two_independent_sources() {
 
     let (status, response) = server.post(
         "/v1/routes/evaluate",
-        &payment(cashu_destination(&destination.url), 100_000),
+        &payment(&cashu_destination(&destination.url), 100_000),
     );
 
     assert_eq!(status, 200, "{response}");
@@ -151,7 +151,7 @@ fn unavailable_source_is_excluded_without_fabricating_a_mint_bridge() {
 
     let (status, response) = server.post(
         "/v1/routes/evaluate",
-        &payment(cashu_destination(&destination.url), 100_000),
+        &payment(&cashu_destination(&destination.url), 100_000),
     );
 
     assert_eq!(status, 200, "{response}");

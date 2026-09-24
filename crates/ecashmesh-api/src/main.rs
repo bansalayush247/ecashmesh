@@ -322,12 +322,7 @@ async fn evaluate_using(
         .into_iter()
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
-    let Some(service) = provider.cashu_service() else {
-        return Err(ApiError::internal(
-            "provider_error",
-            "Cashu discovery provider is unavailable",
-        ));
-    };
+    let service = provider.cashu_service();
     let sources = connectors::select_live_sources(
         &selected,
         source_connector,
@@ -338,7 +333,15 @@ async fn evaluate_using(
         provider.allows_discovered_sources(),
         provider.automatic_discovered_source_limit(),
     )?;
-    let evaluation = match live::evaluate(service, &batch, sources, live_destination, amount).await
+    let evaluation = match live::evaluate(
+        service,
+        provider.fedimint_service(),
+        &batch,
+        sources,
+        live_destination,
+        amount,
+    )
+    .await
     {
         Ok(evaluation) => evaluation,
         Err(no_route) => {
@@ -384,6 +387,20 @@ async fn evaluate_using(
         evaluation.ranking,
     );
     response.apply_live_fee_terms(&evaluation.fee_terms, amount);
+    response.apply_destination_settlement(&destination.kind);
+    response.apply_source_labels(
+        &batch
+            .fedimint_observations
+            .iter()
+            .map(|observation| {
+                (
+                    observation.snapshot.id.to_string(),
+                    observation.config.label.clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    response.apply_fedimint_details(&batch.fedimint_observations);
     response.discovery = batch.discovery;
     response.connector_observations = batch.observations;
     response.live = Some(json!({
@@ -973,7 +990,7 @@ pub(crate) struct EvaluateResponse {
     pub(crate) live: Option<serde_json::Value>,
     pub(crate) connector_observations: Vec<serde_json::Value>,
     pub(crate) quote_id: String,
-    /// The source EcashMesh recommends for this payment target.
+    /// The source `EcashMesh` recommends for this payment target.
     pub(crate) recommended_source: EvaluatedRouteResponse,
     /// Other independently quote-backed payment sources, in rank order.
     pub(crate) alternative_sources: Vec<EvaluatedRouteResponse>,
@@ -1040,17 +1057,72 @@ impl EvaluateResponse {
         for route in
             std::iter::once(&mut self.recommended_source).chain(&mut self.alternative_sources)
         {
-            if let Some(terms) = terms
-                .iter()
-                .find(|terms| terms.source_connector.as_str() == route.connector)
-            {
-                route.fee = FeeResponse::live_reserve(terms, payment_amount);
+            if let Some(terms) = terms.iter().find(|terms| match terms {
+                live::LiveFeeTerms::Cashu {
+                    source_connector, ..
+                }
+                | live::LiveFeeTerms::Fedimint {
+                    source_connector, ..
+                } => source_connector.as_str() == route.connector,
+            }) {
+                route.fee = FeeResponse::live_terms(terms, payment_amount);
                 // A NUT-05 reserve gives an upper bound, not enough evidence
                 // to present a final-fee quality judgment.
                 route.fee_reasonableness = None;
             }
         }
         self.score_breakdown = ScoreBreakdownResponse::from_route(&self.recommended_source);
+        self.sync_legacy_route_fields();
+    }
+
+    fn apply_destination_settlement(&mut self, destination_kind: &str) {
+        for route in
+            std::iter::once(&mut self.recommended_source).chain(&mut self.alternative_sources)
+        {
+            route.settlement_mechanism = match (route.protocol, destination_kind) {
+                ("fedimint", "cashu") => "fedimint_lightning_destination_settlement",
+                ("fedimint", _) => "fedimint_lightning",
+                _ => route.settlement_mechanism,
+            };
+        }
+        self.sync_legacy_route_fields();
+    }
+
+    fn apply_source_labels(&mut self, labels: &[(String, String)]) {
+        for route in
+            std::iter::once(&mut self.recommended_source).chain(&mut self.alternative_sources)
+        {
+            if let Some((_, label)) = labels.iter().find(|(id, _)| *id == route.source_id) {
+                route.source_label = label.clone();
+            }
+        }
+        self.sync_legacy_route_fields();
+    }
+
+    fn apply_fedimint_details(
+        &mut self,
+        observations: &[ecashmesh_fedimint::FederationObservation],
+    ) {
+        for route in
+            std::iter::once(&mut self.recommended_source).chain(&mut self.alternative_sources)
+        {
+            let Some(observation) = observations
+                .iter()
+                .find(|observation| observation.snapshot.id.as_str() == route.source_id)
+            else {
+                continue;
+            };
+            let gateways = observation.gateways.value();
+            route.gateway_count = gateways.map(Vec::len);
+            route.available_gateway_count = gateways
+                .map(|gateways| gateways.iter().filter(|gateway| gateway.available).count());
+            route.gateway_status = Some(match observation.health.value() {
+                Some(ConnectorHealth::Healthy) => "online",
+                Some(ConnectorHealth::Degraded) => "degraded",
+                Some(ConnectorHealth::Unavailable) => "unavailable",
+                None => "unknown",
+            });
+        }
         self.sync_legacy_route_fields();
     }
 
@@ -1066,13 +1138,18 @@ pub(crate) struct EvaluatedRouteResponse {
     pub(crate) route_id: String,
     /// Stable independent custody/payment source identifier.
     source_id: String,
+    /// Adapter-provided display label. It is never a payment identifier.
+    source_label: String,
+    gateway_count: Option<usize>,
+    available_gateway_count: Option<usize>,
+    gateway_status: Option<&'static str>,
     /// Protocol providing the selected source.
     protocol: &'static str,
     /// Adapter-declared native settlement capability used for this target.
     settlement_mechanism: &'static str,
     /// Kept for wire compatibility. A quote alone never proves wallet execution.
     executable: bool,
-    /// What EcashMesh actually established about this route.
+    /// What `EcashMesh` actually established about this route.
     route_classification: &'static str,
     pub(crate) connector: String,
     path: Vec<String>,
@@ -1100,6 +1177,10 @@ impl EvaluatedRouteResponse {
         Self {
             route_id: deterministic_route_id(quote_id, &path),
             source_id: connector.clone(),
+            source_label: connector.clone(),
+            gateway_count: None,
+            available_gateway_count: None,
+            gateway_status: None,
             protocol: protocol_for_connector(&connector),
             settlement_mechanism: settlement_mechanism_for_connector(&connector),
             executable: false,
@@ -1149,6 +1230,9 @@ struct FeeResponse {
     fee_rate_basis_points: Option<u64>,
     estimate_kind: &'static str,
     input_fee_schedule: Option<InputFeeScheduleResponse>,
+    federation_fee_sats: Option<u64>,
+    gateway_routing_fee_sats: Option<u64>,
+    lightning_destination_fee_sats: Option<u64>,
 }
 
 impl FeeResponse {
@@ -1172,20 +1256,58 @@ impl FeeResponse {
                 "unknown"
             },
             input_fee_schedule: None,
+            federation_fee_sats: None,
+            gateway_routing_fee_sats: None,
+            lightning_destination_fee_sats: None,
         }
     }
 
-    fn live_reserve(terms: &live::LiveFeeTerms, payment_amount: Amount) -> Self {
-        let reserve = terms.fee_reserve_sats.sats();
-        Self {
-            amount: Some(reserve),
-            asset: "sats",
-            freshness: "fresh",
-            estimated_fee_sats: Some(reserve),
-            fee_reserve_sats: Some(reserve),
-            fee_rate_basis_points: fee_rate_basis_points(terms.fee_reserve_sats, payment_amount),
-            estimate_kind: "reserve_estimate",
-            input_fee_schedule: Some(InputFeeScheduleResponse::from_evidence(&terms.input_fees)),
+    fn live_terms(terms: &live::LiveFeeTerms, payment_amount: Amount) -> Self {
+        match terms {
+            live::LiveFeeTerms::Cashu {
+                fee_reserve_sats,
+                input_fees,
+                ..
+            } => {
+                let reserve = fee_reserve_sats.sats();
+                Self {
+                    amount: Some(reserve),
+                    asset: "sats",
+                    freshness: "fresh",
+                    estimated_fee_sats: Some(reserve),
+                    fee_reserve_sats: Some(reserve),
+                    fee_rate_basis_points: fee_rate_basis_points(*fee_reserve_sats, payment_amount),
+                    estimate_kind: "reserve_estimate",
+                    input_fee_schedule: Some(InputFeeScheduleResponse::from_evidence(input_fees)),
+                    federation_fee_sats: None,
+                    gateway_routing_fee_sats: None,
+                    lightning_destination_fee_sats: None,
+                }
+            }
+            live::LiveFeeTerms::Fedimint {
+                federation_fee_sats,
+                gateway_fee_sats,
+                destination_fee_sats,
+                ..
+            } => {
+                let total = federation_fee_sats
+                    .checked_add(gateway_fee_sats.unwrap_or(Amount::ZERO))
+                    .and_then(|fee| fee.checked_add(destination_fee_sats.unwrap_or(Amount::ZERO)))
+                    .unwrap_or(*federation_fee_sats);
+                Self {
+                    amount: Some(total.sats()),
+                    asset: "sats",
+                    freshness: "fresh",
+                    estimated_fee_sats: Some(total.sats()),
+                    fee_reserve_sats: None,
+                    fee_rate_basis_points: fee_rate_basis_points(total, payment_amount),
+                    estimate_kind: "estimated",
+                    input_fee_schedule: None,
+                    federation_fee_sats: Some(federation_fee_sats.sats()),
+                    gateway_routing_fee_sats: gateway_fee_sats.map(Amount::sats),
+                    lightning_destination_fee_sats: destination_fee_sats.map(Amount::sats),
+                }
+            }
         }
     }
 }
@@ -1709,7 +1831,7 @@ fn settlement_mechanism_for_connector(connector: &str) -> &'static str {
     if connector.starts_with("cashu:") {
         "cashu_lightning"
     } else if connector.starts_with("fedimint:") {
-        "fedimint_gateway"
+        "fedimint_lightning"
     } else {
         "lightning_direct"
     }
@@ -1764,7 +1886,7 @@ mod tests {
 
     #[test]
     fn live_fee_reserve_is_an_estimate_with_a_correct_fee_rate() {
-        let terms = live::LiveFeeTerms {
+        let terms = live::LiveFeeTerms::Cashu {
             source_connector: ConnectorId::new("cashu:source").unwrap(),
             fee_reserve_sats: Amount::from_sats(2),
             input_fees: Evidence::reported(
@@ -1780,7 +1902,7 @@ mod tests {
                 ConfidenceLevel::High,
             ),
         };
-        let fee = FeeResponse::live_reserve(&terms, Amount::from_sats(100));
+        let fee = FeeResponse::live_terms(&terms, Amount::from_sats(100));
         assert_eq!(fee.amount, Some(2));
         assert_eq!(fee.estimated_fee_sats, Some(2));
         assert_eq!(fee.fee_reserve_sats, Some(2));

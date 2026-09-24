@@ -10,24 +10,26 @@ use ecashmesh_cashu::{
     discovery::{DiscoveryReport, DiscoveryService, DiscoverySource, MintHint},
 };
 use ecashmesh_core::{Amount, ConnectorId, ConnectorSnapshot, EvidenceTimestamp};
+use ecashmesh_fedimint::{FederationObservation, FedimintService};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{ApiError, EvidenceStateResponse, connector_health_code};
 
 #[derive(Clone)]
-pub(super) enum Provider {
-    Cashu {
-        service: Arc<DiscoveryService>,
-        allow_discovered_sources: bool,
-        automatic_discovered_source_limit: usize,
-    },
+pub(super) struct Provider {
+    cashu: Arc<DiscoveryService>,
+    fedimint: Arc<FedimintService>,
+    allow_discovered_sources: bool,
+    automatic_discovered_source_limit: usize,
 }
 
 pub(super) struct ConnectorBatch {
     pub connectors: Vec<ConnectorSnapshot>,
     /// Protocol observations retained for quote-backed route construction.
     pub live_observations: Vec<CashuObservation>,
+    /// Independent Fedimint observations collected through the Fedimint adapter.
+    pub fedimint_observations: Vec<FederationObservation>,
     pub observations: Vec<Value>,
     pub expires_at_unix_seconds: u64,
     pub discovery: DiscoveryReport,
@@ -96,6 +98,7 @@ pub(super) fn select(
 /// Narrows live candidates to an explicitly configured source when supplied.
 /// The absence of a source selector leaves the already-selected live sources
 /// intact; it never adds fixtures or undiscovered connectors.
+#[allow(clippy::too_many_arguments)] // Request selectors and discovery policy are independent API inputs.
 pub(super) fn select_live_sources(
     selected: &[ConnectorSnapshot],
     source_connector: Option<String>,
@@ -116,11 +119,11 @@ pub(super) fn select_live_sources(
         .map_err(|error| ApiError::validation("source_mint_url is invalid", vec![error]))?;
     let selected_source_mint_urls = selected_source_mint_urls
         .into_iter()
-        .map(|url| ecashmesh_cashu::discovery::canonical_mint_url(&url))
-        .collect::<Result<BTreeSet<_>, _>>()
-        .map_err(|error| {
-            ApiError::validation("wallet_mint_urls contains an invalid mint URL", vec![error])
-        })?;
+        // Discovery already records invalid/untrusted wallet hints as
+        // inspectable evidence. Do not turn one rejected hint into a second
+        // validation failure after collection.
+        .filter_map(|url| ecashmesh_cashu::discovery::canonical_mint_url(&url).ok())
+        .collect::<BTreeSet<_>>();
     let source_from_url = source_mint_url.as_ref().and_then(|url| {
         discovery
             .mints
@@ -154,7 +157,7 @@ pub(super) fn select_live_sources(
                     matches!(hint.source, DiscoverySource::Seed | DiscoverySource::Wallet)
                 })
         })
-        .map(|mint| mint.connector_id())
+        .map(ecashmesh_cashu::discovery::DiscoveredMint::connector_id)
         .collect::<BTreeSet<_>>();
     let mut discovered_sources = discovery
         .mints
@@ -163,7 +166,7 @@ pub(super) fn select_live_sources(
             !destination_mint_urls.contains(&mint.canonical_url)
                 && !explicit_sources.contains(&mint.connector_id())
         })
-        .map(|mint| mint.connector_id())
+        .map(ecashmesh_cashu::discovery::DiscoveredMint::connector_id)
         .collect::<Vec<_>>();
     if automatic_discovered_source_limit > 0 {
         discovered_sources.truncate(automatic_discovered_source_limit);
@@ -187,8 +190,13 @@ pub(super) fn select_live_sources(
     let narrowed = narrowed
         .into_iter()
         .filter(|connector| {
-            allowed_sources.contains(&connector.id)
+            // Cashu sources must be owned/configured mint observations. A
+            // configured Fedimint federation is already an independent wallet
+            // source and is never discovered from a Cashu directory.
+            (connector.connector_type != ecashmesh_core::ConnectorType::Cashu
+                || allowed_sources.contains(&connector.id))
                 && (selected_source_mint_urls.is_empty()
+                    || connector.connector_type != ecashmesh_core::ConnectorType::Cashu
                     || discovery.mints.iter().any(|mint| {
                         mint.connector_id() == connector.id
                             && selected_source_mint_urls.contains(&mint.canonical_url)
@@ -196,12 +204,10 @@ pub(super) fn select_live_sources(
         })
         .collect::<Vec<_>>();
     if narrowed.is_empty() {
-        return Err(ApiError::validation(
-            "No eligible wallet source mint is available",
-            vec![
-                "Destination mints and directory-only discoveries are not source candidates".into(),
-            ],
-        ));
+        // Let the live evaluator return a structured no-route result. This is
+        // particularly important when all submitted wallet hints were rejected
+        // as untrusted rather than syntactically invalid.
+        return Ok(Vec::new());
     }
     Ok(narrowed)
 }
@@ -245,8 +251,17 @@ impl Provider {
                 if automatic_discovered_source_limit > 3 {
                     return Err("ECASHMESH_CASHU_AUTO_SOURCE_LIMIT may not exceed 3".into());
                 }
-                Ok(Self::Cashu {
-                    service: Arc::new(DiscoveryService::new(seeds, directories, allowed, ttl)?),
+                let federations =
+                    std::env::var("ECASHMESH_FEDIMINT_FEDERATIONS").unwrap_or_else(|_| "[]".into());
+                let federations = serde_json::from_str(&federations)
+                    .map_err(|error| format!("ECASHMESH_FEDIMINT_FEDERATIONS: {error}"))?;
+                let fedimint_ttl = std::env::var("ECASHMESH_FEDIMINT_MAX_AGE_SECONDS")
+                    .unwrap_or_else(|_| "300".into())
+                    .parse::<u64>()
+                    .map_err(|_| "ECASHMESH_FEDIMINT_MAX_AGE_SECONDS must be an integer")?;
+                Ok(Self {
+                    cashu: Arc::new(DiscoveryService::new(seeds, directories, allowed, ttl)?),
+                    fedimint: Arc::new(FedimintService::new(federations, fedimint_ttl)?),
                     allow_discovered_sources,
                     automatic_discovered_source_limit,
                 })
@@ -256,28 +271,21 @@ impl Provider {
     }
 
     #[must_use]
-    pub const fn cashu_service(&self) -> Option<&Arc<DiscoveryService>> {
-        match self {
-            Self::Cashu { service, .. } => Some(service),
-        }
+    pub const fn cashu_service(&self) -> &Arc<DiscoveryService> {
+        &self.cashu
+    }
+
+    #[must_use]
+    pub const fn fedimint_service(&self) -> &Arc<FedimintService> {
+        &self.fedimint
     }
 
     pub const fn allows_discovered_sources(&self) -> bool {
-        match self {
-            Self::Cashu {
-                allow_discovered_sources,
-                ..
-            } => *allow_discovered_sources,
-        }
+        self.allow_discovered_sources
     }
 
     pub const fn automatic_discovered_source_limit(&self) -> usize {
-        match self {
-            Self::Cashu {
-                automatic_discovered_source_limit,
-                ..
-            } => *automatic_discovered_source_limit,
-        }
+        self.automatic_discovered_source_limit
     }
 
     pub async fn collect(
@@ -285,38 +293,78 @@ impl Provider {
         amount: Amount,
         hints: Vec<MintHint>,
     ) -> Result<ConnectorBatch, ApiError> {
-        match self {
-            Self::Cashu { service, .. } => {
-                let state = service
-                    .collect(hints)
-                    .await
-                    .map_err(|error| ApiError::validation("Mint discovery failed", vec![error]))?;
-                let observations = state.observations;
-                let evaluated_at = observations
+        {
+            let state = self
+                .cashu
+                .collect(hints)
+                .await
+                .map_err(|error| ApiError::validation("Mint discovery failed", vec![error]))?;
+            let observations = state.observations;
+            let evaluated_at = observations
+                .iter()
+                .map(|observation| observation.evaluated_at)
+                .max()
+                .unwrap_or_else(|| EvidenceTimestamp::from_unix_seconds(unix_now()));
+            let fedimint_observations = self.fedimint.collect(amount, unix_now()).await;
+            let mut connectors = observations
+                .iter()
+                .map(|observation| observation.routing_snapshot(amount))
+                .collect::<Vec<_>>();
+            connectors.extend(
+                fedimint_observations
                     .iter()
-                    .map(|observation| observation.evaluated_at)
-                    .max()
-                    .unwrap_or_else(|| EvidenceTimestamp::from_unix_seconds(unix_now()));
-                Ok(ConnectorBatch {
-                    expires_at_unix_seconds: observations
-                        .iter()
-                        .map(|observation| observation.expires_at_unix_seconds)
-                        .min()
-                        .unwrap_or(evaluated_at.unix_seconds()),
-                    connectors: observations
-                        .iter()
-                        .map(|observation| observation.routing_snapshot(amount))
-                        .collect(),
-                    live_observations: observations.clone(),
-                    observations: observations
-                        .iter()
-                        .map(|observation| observation_json(observation, amount))
-                        .collect(),
-                    discovery: state.report,
-                })
-            }
+                    .map(|observation| observation.snapshot.clone()),
+            );
+            let mut protocol_observations = observations
+                .iter()
+                .map(|observation| observation_json(observation, amount))
+                .collect::<Vec<_>>();
+            protocol_observations
+                .extend(fedimint_observations.iter().map(fedimint_observation_json));
+            Ok(ConnectorBatch {
+                expires_at_unix_seconds: observations
+                    .iter()
+                    .map(|observation| observation.expires_at_unix_seconds)
+                    .chain(
+                        fedimint_observations
+                            .iter()
+                            .map(|observation| observation.expires_at_unix_seconds),
+                    )
+                    .min()
+                    .unwrap_or(evaluated_at.unix_seconds()),
+                connectors,
+                live_observations: observations.clone(),
+                fedimint_observations,
+                observations: protocol_observations,
+                discovery: state.report,
+            })
         }
     }
+}
+
+fn fedimint_observation_json(observation: &FederationObservation) -> Value {
+    json!({
+        "connector": observation.snapshot.id.as_str(),
+        "connector_type": "fedimint",
+        "label": observation.config.label,
+        "federation_id": observation.config.federation_id,
+        "client_api_version": ecashmesh_fedimint::FEDIMINT_CLIENT_API_VERSION,
+        "evaluated_at_unix_seconds": observation.evaluated_at.unix_seconds(),
+        "expires_at_unix_seconds": observation.expires_at_unix_seconds,
+        "health": EvidenceStateResponse::from_core(&observation.health, |value| json!(connector_health_code(*value))),
+        "source_balance": EvidenceStateResponse::from_core(&observation.balance_sats, |value| json!({"sats": value.sats()})),
+        "network": EvidenceStateResponse::from_core(&observation.network, |value| json!(value)),
+        "registered_gateways": EvidenceStateResponse::from_core(&observation.gateways, |value| json!(value)),
+        "gateway_count": observation.gateways.value().map(Vec::len),
+        "lightning_support": true,
+        "issues": observation.issues,
+        "limitations": [
+            "Gateway cache and health are evidence, not liquidity, solvency, or payment reliability",
+            "Source balance is unknown unless the configured clientd returns wallet info",
+            "A route requires an explicit non-mutating quote bridge; EcashMesh never calls /v2/ln/pay",
+            "Read-only evaluation; no payment execution or Fedimint destination support is available"
+        ]
+    })
 }
 
 fn env_urls(name: &str) -> Result<Vec<String>, String> {

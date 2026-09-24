@@ -87,6 +87,17 @@ function Settlement({ source }: { source: PaymentSource }) {
               ? "Not wallet executable"
               : "Execution capability unknown"}
       </Text>
+      {source.protocol === "fedimint" && (
+        <>
+          <Text style={local.pathLabel}>
+            Gateway status: {source.gateway_status ?? "unknown"}
+          </Text>
+          <Text style={local.pathLabel}>
+            Gateways: {source.available_gateway_count ?? "unknown"}/
+            {source.gateway_count ?? "unknown"} available
+          </Text>
+        </>
+      )}
     </View>
   );
 }
@@ -191,7 +202,7 @@ function RouteCard({
           <ConnectorMark connector={route.connector} />
           <View style={{ flex: 1, gap: 3 }}>
             <Text selectable style={local.routeName}>
-              {compactId(route.connector)}
+              {route.source_label ?? compactId(route.connector)}
             </Text>
             <Text style={styles.small}>
               {sats(route.fee.amount)} ·{" "}
@@ -259,7 +270,7 @@ export function DecisionView({
             <ConnectorMark connector={recommended.connector} />
             <View style={{ flex: 1, gap: 3 }}>
               <Text selectable style={local.routeName}>
-                {compactId(recommended.connector)}
+                {recommended.source_label ?? compactId(recommended.connector)}
               </Text>
               <Settlement source={recommended} />
             </View>
@@ -541,6 +552,13 @@ export function RouteDetails({
               label="Fee reasonableness"
               value={feeReasonableness(route.fee_reasonableness)}
             />
+            {route.protocol === "fedimint" && (
+              <>
+                <Row label="Federation fee" value={sats(route.fee.federation_fee_sats ?? null)} />
+                <Row label="Gateway routing fee" value={sats(route.fee.gateway_routing_fee_sats ?? null)} />
+                <Row label="Lightning destination fee" value={sats(route.fee.lightning_destination_fee_sats ?? null)} />
+              </>
+            )}
             {route.fee.input_fee_schedule && (
               <Row
                 label="NUT-02 keyset input fees"
