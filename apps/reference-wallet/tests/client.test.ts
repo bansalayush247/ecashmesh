@@ -94,6 +94,25 @@ test("explicit connector selection passes through without choosing connectors", 
   await client.evaluateRoute({ ...payment, candidateConnectors: candidates });
 });
 
+test("user-authorized Fedimint connector IDs are forwarded without clientd credentials", async () => {
+  const client = createEcashMeshClient({
+    baseUrl: "http://local",
+    fetch: async (_, options) => {
+      const body = JSON.parse(String(options?.body)) as Record<string, unknown>;
+      assert.deepEqual(body.federation_connector_ids, [
+        "fedimint:bitcoin-principles",
+      ]);
+      assert.equal(JSON.stringify(body).includes("clientd"), false);
+      assert.equal(JSON.stringify(body).includes("token"), false);
+      return json(decision);
+    },
+  });
+  await client.evaluateRoute({
+    ...payment,
+    federationConnectorIds: ["fedimint:bitcoin-principles"],
+  });
+});
+
 test("live Cashu input is forwarded without client-side destination parsing", async () => {
   const livePayment = collectPayment(
     "100000",

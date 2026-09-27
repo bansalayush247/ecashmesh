@@ -504,7 +504,9 @@ pub(super) async fn evaluate(
                 amount,
                 sources: source_endpoints,
                 destinations: vec![SearchEndpoint::Connector(terminal_compact)],
-                top_k: 3,
+                // One independent native-settlement candidate per live source.
+                // Preserve every viable alternative for registry comparison.
+                top_k: live_sources.len().max(1),
             },
             &registry,
             EvidenceTimestamp::from_unix_seconds(unix_now()),

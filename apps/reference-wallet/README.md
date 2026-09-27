@@ -2,7 +2,7 @@
 
 A minimal React Native host demonstrating **Existing wallet → payment-source
 selection → EcashMesh explanation → Host confirmation**.
-Pocket contains only a home and a send flow. By default it has no custody, key
+Pocket contains home, source management and a send flow. By default it has no custody, key
 handling, token storage, accounts, balances, portfolio, history, or real
 execution. Its opt-in regtest adapter is the exception: it stores disposable
 regtest proofs locally in IndexedDB and settles directly with the selected mint;
@@ -32,6 +32,72 @@ npm run web
 
 Open <http://localhost:8081>. This is the React Native client rendered through
 React Native Web; the API runs on port **5000**.
+
+## Nostr-authorized source discovery (read-only)
+
+See the [complete source-registry guide](../../docs/source-registry.md) for the
+data model, versioning/conflicts, security, exact commands and 5+3 source demo.
+Home's **Manage payment sources** opens **My Sources / Discover**. Add, remove,
+enable, disable, refresh and inspect arbitrarily many Cashu/Fedimint references.
+Discover reads signed NIP-87 `38172`/`38173` announcements; only explicit Add
+authorizes a source. Public discovery never establishes ownership or solvency.
+
+Connect either a browser signer with
+NIP-44 decryption or a `bunker://` NIP-46 remote-signer URI. The app asks only
+for public-key access, NIP-44 encryption/decryption, and application registry
+signing. NIP-60 import reads `kind:17375` wallet metadata. It never asks for an `nsec`, never reads
+`kind:7375` proof events, and never sends encrypted/decrypted NIP-60 content to
+the API or to a relay.
+
+**Save to Nostr** explicitly encrypts and signs NIP-78 `30078` with
+`d=ecashmesh.source-registry.v1`. Reconnect after reload to restore the latest
+valid registry, including disabled/removed sources. No plaintext relay fallback
+exists: use explicit **Save locally** when signer encryption is unavailable.
+
+The discovered Cashu mint URLs become enabled, user-authorized source profiles.
+When the user evaluates a target, their public mint URLs are sent as existing
+`wallet_mint_urls`; the Rust API uses its normal live Cashu adapter for
+`/v1/info`, `/v1/keysets`, `/v1/keys`, and unpaid quotes. A discovered mint is
+not a balance claim and is not executable in this reference wallet.
+
+Fedimint is added explicitly in the same panel. Enter a display name, 64-digit
+federation ID, and the non-secret connector ID configured on the local API (for
+example `fedimint:bitcoin-principles`). The browser sends only that connector ID
+as `federation_connector_ids`; the API's local environment retains the clientd
+endpoint, bearer token, and optional read-only quote bridge. Do not paste those
+secrets into the browser.
+
+Configure a relay set in `.env.local` if desired, then restart Expo:
+
+```sh
+EXPO_PUBLIC_NOSTR_RELAYS='["wss://relay.damus.io","wss://relay.primal.net"]' \
+npm run web
+```
+
+The app first checks the user's NIP-61/`kind:10019` relay tags, falls back to
+their NIP-65 relay list, and finally uses the configured bootstrap set. Relay
+failure, no wallet event, invalid signatures, malformed metadata, and failed
+decryption are shown in the source panel without creating a source.
+
+For API-only inspection of public source evidence, this is safe to run with
+mint URLs and connector IDs only—never include proofs, Nostr secrets, clientd
+tokens, or invites:
+
+```sh
+curl -sS -X POST http://127.0.0.1:5000/v1/connectors/discover \
+  -H 'content-type: application/json' \
+  -d '{
+    "amount": 1000,
+    "asset": "BTC",
+    "destination": {"type": "lightning", "value": "lnbc1example"},
+    "payment_intent": "send",
+    "wallet_mint_urls": ["https://your-cashu-mint.example"],
+    "federation_connector_ids": ["fedimint:bitcoin-principles"]
+  }'
+```
+
+`/v1/connectors/discover` provides observations only. Use a valid payment target
+with `/v1/routes/evaluate` to obtain quote-backed candidates and rankings.
 
 EcashMesh has no fixture fallback. Paste a real whole-satoshi BOLT11 invoice,
 or select **Cashu request** and provide a NUT-18 `creqA...` request or
@@ -80,9 +146,11 @@ clients are not subject to browser CORS.
 
 ## Try the flow
 
-1. Choose **Send payment** on the Pocket home.
+1. Manage payment sources on Home; import or explicitly add your source references.
+   Then choose **Send payment**.
 2. Choose a destination type and paste a real BOLT11 invoice or Cashu request.
-3. Choose **EcashMesh Source Selection**. The SDK evaluates available sources.
+3. Leave **Automatic — compare all enabled sources**, then choose **Find best payment source**.
+   Optional source buttons constrain comparison; no selection compares all enabled authorized sources.
 4. Inspect the recommendation, ranked alternatives, scores, fees, time estimates,
    liquidity/reliability/freshness signals, risks, and server-authored explanations.
 5. Open the source settlement view to see connector capabilities and individual evidence states,
@@ -91,18 +159,19 @@ clients are not subject to browser CORS.
    its confirmation screen. Live regtest shows **Confirm real regtest payment**
    and requires a host custody
    adapter with genuine Cashu proofs before it can settle.
-7. Read **Payment complete**, then return to Pocket.
+7. Read-only live mode cannot complete payments. Only the isolated regtest custody
+   workflow can display Payment complete after actual settlement.
 
 Other checks:
 
-| Input or action                            | Expected result                                                        |
-| ------------------------------------------ | ---------------------------------------------------------------------- |
-| 10000 sats, inspect `cashu:cheap-stale`    | Stale evidence and alternative weaknesses; warnings remain if selected |
-| 500000 sats                                | `NO_VIABLE_ROUTE`; edit input and retry                                |
-| 0, fractional amount, or empty destination | Validation error                                                       |
-| Stop the API, evaluate or confirm          | Recoverable connection error; no invented recommendation or success    |
-| Back during evaluation                     | Cancel; late responses cannot replace an edited payment                |
-| Repeat identical payment                   | Same server ordering, scores, explanation, and IDs                     |
+| Input or action                            | Expected result                                                     |
+| ------------------------------------------ | ------------------------------------------------------------------- |
+| Source metadata is stale or unavailable    | Inspect diagnostics; no invented fresh evidence                     |
+| No enabled source has a compatible quote   | `NO_VIABLE_ROUTE` with excluded-source reasons                      |
+| 0, fractional amount, or empty destination | Validation error                                                    |
+| Stop the API, evaluate or confirm          | Recoverable connection error; no invented recommendation or success |
+| Back during evaluation                     | Cancel; late responses cannot replace an edited payment             |
+| Repeat identical payment                   | Same server ordering, scores, explanation, and IDs                  |
 
 The normal API returns `NO_VIABLE_ROUTE` when nothing is feasible. The UI also
 handles an explicitly null recommendation with an empty state; automated tests

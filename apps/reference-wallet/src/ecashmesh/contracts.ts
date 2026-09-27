@@ -53,7 +53,10 @@ export const paymentSourceSchema = z
     source_label: z.string().min(1).optional(),
     gateway_count: unsigned.nullable().optional(),
     available_gateway_count: unsigned.nullable().optional(),
-    gateway_status: z.enum(["online", "degraded", "unavailable", "unknown"]).nullable().optional(),
+    gateway_status: z
+      .enum(["online", "degraded", "unavailable", "unknown"])
+      .nullable()
+      .optional(),
     protocol: z.enum(["cashu", "fedimint", "lightning"]).optional(),
     settlement_mechanism: z.string().min(1).optional(),
     executable: z.boolean().optional(),
@@ -130,6 +133,7 @@ export const decisionSchema = z
         .passthrough(),
     ),
     connector_observations: z.array(z.unknown()).optional(),
+    excluded_sources: z.array(z.unknown()).optional(),
     live: z.unknown().optional(),
     explanation: z
       .object({
@@ -169,6 +173,10 @@ export type PaymentInput = {
   sourceConnector?: string;
   sourceMintUrl?: string;
   walletMintUrls?: string[];
+  /** Existing local API Fedimint connector IDs selected by the user. */
+  federationConnectorIds?: string[];
+  federationIdentities?: Record<string, string>;
+  strictSourceRegistry?: boolean;
 };
 
 export const paymentStatusSchema = z
@@ -180,7 +188,13 @@ export const paymentStatusSchema = z
     route_id: z.string().min(1),
     amount_sats: unsigned,
     fee_reserve_sats: unsigned,
-    status: z.enum(["prepared", "pending", "settled", "failed", "recovery_required"]),
+    status: z.enum([
+      "prepared",
+      "pending",
+      "settled",
+      "failed",
+      "recovery_required",
+    ]),
     settled: z.boolean(),
     source_mint_url: z.string(),
   })
@@ -202,6 +216,16 @@ export function paymentToWire(payment: PaymentInput) {
       : {}),
     ...(payment.walletMintUrls?.length
       ? { wallet_mint_urls: payment.walletMintUrls }
+      : {}),
+    ...(payment.federationConnectorIds !== undefined
+      ? { federation_connector_ids: payment.federationConnectorIds }
+      : {}),
+    ...(payment.strictSourceRegistry
+      ? {
+          strict_source_registry: true,
+          wallet_mint_urls: payment.walletMintUrls ?? [],
+          federation_identities: payment.federationIdentities ?? {},
+        }
       : {}),
   };
 }

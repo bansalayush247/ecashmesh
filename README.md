@@ -16,13 +16,13 @@ only to the explicitly enabled real-payment boundary.
 
 ## Components
 
-| Component | Responsibility |
-| --- | --- |
-| `ecashmesh-core` | Protocol-independent source model, evidence/risk evaluation, deterministic ranking, explicit-mechanism graph search |
-| `ecashmesh-cashu` | Cashu discovery, quote normalization, and a write-only NUT-08 melt transport |
-| `ecashmesh-fedimint` | Read-only Fedimint clientd observations and non-mutating Lightning quote-bridge normalization |
-| `ecashmesh-api` | Thin HTTP boundary on port `5000` |
-| `reference-wallet` | React Native reference host integration; renders EcashMesh decisions only |
+| Component            | Responsibility                                                                                                      |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `ecashmesh-core`     | Protocol-independent source model, evidence/risk evaluation, deterministic ranking, explicit-mechanism graph search |
+| `ecashmesh-cashu`    | Cashu discovery, quote normalization, and a write-only NUT-08 melt transport                                        |
+| `ecashmesh-fedimint` | Read-only Fedimint clientd observations and non-mutating Lightning quote-bridge normalization                       |
+| `ecashmesh-api`      | Thin HTTP boundary on port `5000`                                                                                   |
+| `reference-wallet`   | React Native reference host integration; renders EcashMesh decisions only                                           |
 
 The supported live Cashu settlement mechanism is deliberately explicit:
 
@@ -61,9 +61,33 @@ demo first collects a bounded read-only mint snapshot for its evaluation.
 
 Requirements are provided by Nix, including Rust and Node.js.
 
+### Nostr source registry and automatic comparison
+
+Start here: [complete multi-source demo and architecture](docs/source-registry.md).
+Home → **Manage payment sources** provides My Sources / Discover, NIP-60 imports,
+NIP-87 discovery, add/remove/enable/disable/refresh/details, and explicit encrypted
+NIP-78 Save to Nostr / restore. Send defaults to **Automatic — compare all enabled
+sources**. Recommendations, all viable alternatives and excluded-source reasons
+come from the API; disabled sources and empty registries never fall back to seeds.
+
+```sh
+# Terminal 1, repository root
+ROUTING_MODE=live ECASHMESH_ENABLE_REAL_PAYMENTS=false \
+  nix develop -c cargo run -p ecashmesh-api
+
+# Terminal 2, repository root
+nix develop -c sh -c 'cd apps/reference-wallet && npm ci && npm run web'
+```
+
+Open `http://localhost:8081`, connect your signer, import/add sources and save.
+Nostr sync stores references only—not proofs, balances or clientd credentials.
+Fedimint still needs a locally configured adapter and an actual read-only quote
+bridge to rank; adding a profile does not create either. See the guide for exact
+relay configuration, the 5-Cashu/3-Fedimint test example and offline fixture gallery.
+
 ### Live Cashu discovery
 
-Configure two or three wallet/source mints explicitly. These URLs are source
+Configure any number of wallet/source mints explicitly. These URLs are source
 claims, not a public-mint recommendation; use mints you have independently
 reviewed. Destination mints come only from the pasted Cashu request and are
 never promoted to sources.
@@ -107,7 +131,7 @@ when a balance is intentionally shared, `spendable_amount`) and must not call
 The bridge receives:
 
 ```json
-{"federation_id":"…","invoice":"ln…","amount_sats":1000}
+{ "federation_id": "…", "invoice": "ln…", "amount_sats": 1000 }
 ```
 
 and returns a non-mutating observation containing required
@@ -116,6 +140,54 @@ and returns a non-mutating observation containing required
 `selected_gateway_id`, and `expires_at_unix_seconds`. A missing bridge or quote
 means no Fedimint candidate is invented. `ECASHMESH_FEDIMINT_MAX_AGE_SECONDS`
 defaults to 300 seconds.
+
+### Show a multi-source comparison in the frontend
+
+The reference wallet's source registry controls candidate authorization. Add or
+import Cashu references and add local Fedimint connector references under Manage
+payment sources. Live adapter observations come from `/v1/connectors/discover`.
+Automatic compares all enabled references; configuring a server catalog alone
+does not authorize that source in the browser. A fresh non-mutating quote is
+still required before a federation can be ranked.
+
+Configure only sources that the host wallet actually controls or is explicitly
+authorised to use. The example values below are labels and placeholders, not
+public-mint recommendations:
+
+```bash
+export ECASHMESH_CASHU_MINTS='[
+  {"id":"cashu:wallet-mint-a","url":"https://your-cashu-mint-a.example"},
+  {"id":"cashu:wallet-mint-b","url":"https://your-cashu-mint-b.example"}
+]'
+
+export ECASHMESH_FEDIMINT_FEDERATIONS='[
+  {
+    "id":"fedimint:bitcoin-principles",
+    "label":"Bitcoin Principles",
+    "federation_id":"<bitcoin-principles-federation-id>",
+    "clientd_url":"http://127.0.0.1:3333",
+    "token":"<token-for-clientd-on-3333>",
+    "quote_url":"http://127.0.0.1:3334/v1/fedimint/read-only-quote"
+  },
+  {
+    "id":"fedimint:second-federation",
+    "label":"Second federation",
+    "federation_id":"<separately-joined-federation-id>",
+    "clientd_url":"http://127.0.0.1:3335",
+    "token":"<token-for-clientd-on-3335>",
+    "quote_url":"http://127.0.0.1:3336/v1/fedimint/read-only-quote"
+  }
+]'
+
+nix develop -c cargo run -p ecashmesh-api
+```
+
+Each federation needs a matching already-joined clientd configuration and (if
+it is to become eligible) a non-mutating quote bridge. The example uses separate
+local instances; a compatible multi-federation clientd may expose multiple IDs.
+Do not put a token in source control or paste it into the browser. A
+source card with zero gateways, an unhealthy client, or no bridge is useful
+diagnostic evidence, but it is not a payable route.
 
 Start the reference wallet:
 
@@ -146,9 +218,9 @@ test endpoints. It is not needed for public mainnet mints.
 2. Start the wallet and open `http://localhost:8081`.
 3. Select **Send payment**, then **Cashu request**, and paste a receiver-provided
    `creqA...` request or `cashu://request?...` URI for destination mint D.
-4. Optionally enter additional wallet source URLs, one per line. Select
-   **EcashMesh Source Selection**.
-5. Inspect **Live Cashu Route Discovery** and **Raw live observations**. Routes
+4. Add/import sources first under Manage payment sources. Leave Send's source
+   selector on Automatic and select **Find best payment source**.
+5. Inspect **Live source observations** and **Raw live observations**. Routes
    are labelled **Quote-backed — read-only**; a NUT-05 fee reserve is an upper
    bound, not a final fee. The confirmation screen has no mainnet send action.
 

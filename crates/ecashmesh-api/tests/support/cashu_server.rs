@@ -27,6 +27,15 @@ impl ApiServer {
     }
 
     pub fn start_with_sources(seeds: &Value, directories: &Value, allowed: &Value) -> Self {
+        Self::start_with_federations(seeds, directories, allowed, &json!([]))
+    }
+
+    pub fn start_with_federations(
+        seeds: &Value,
+        directories: &Value,
+        allowed: &Value,
+        federations: &Value,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
         drop(listener);
@@ -37,6 +46,7 @@ impl ApiServer {
             .env("ECASHMESH_CASHU_MINTS", seeds.to_string())
             .env("ECASHMESH_CASHU_DIRECTORIES", directories.to_string())
             .env("ECASHMESH_CASHU_ALLOWED_MINTS", allowed.to_string())
+            .env("ECASHMESH_FEDIMINT_FEDERATIONS", federations.to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -135,6 +145,10 @@ impl MockMint {
                     stream.read_exact(&mut request_body).unwrap();
                 }
                 let mut body = match first {
+                    "GET /health HTTP/1.1" => "{}",
+                    "GET /v2/admin/info HTTP/1.1" => r#"{"network":"bitcoin"}"#,
+                    "POST /v2/ln/list-gateways HTTP/1.1" => r#"[{"gateway_id":"fixture-gateway","fees":{"base_msat":1000,"proportional_millionths":100}}]"#,
+                    "POST /quote HTTP/1.1" => r#"{"federation_fee_sats":2,"gateway_fee_sats":2,"payable":true,"expires_at_unix_seconds":5000000000}"#,
                     "GET /v1/info HTTP/1.1" => {
                         include_str!("../../../ecashmesh-cashu/tests/fixtures/info.json")
                     }

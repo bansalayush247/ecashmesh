@@ -261,7 +261,9 @@ export function DecisionView({
         </View>
       </View>
       <View style={local.recommendation}>
-        <Text style={local.visuallyPresent}>Recommended quote-backed source</Text>
+        <Text style={local.visuallyPresent}>
+          Recommended quote-backed source
+        </Text>
         <View style={local.recommendedPill}>
           <Text style={local.recommendedText}>✦ Recommended</Text>
         </View>
@@ -332,9 +334,7 @@ export function DecisionView({
           />
         ))}
       </Section>
-      <Text style={styles.small}>
-        Quote expires: {decision.expires_at}.
-      </Text>
+      <Text style={styles.small}>Quote expires: {decision.expires_at}.</Text>
     </View>
   );
 }
@@ -500,7 +500,9 @@ export function RouteDetails({
                       key={key}
                       label={key}
                       evidence={
-                        evidence[key] ?? evidence.hop_reliability ?? evidence.connector_reliability
+                        evidence[key] ??
+                        evidence.hop_reliability ??
+                        evidence.connector_reliability
                       }
                     />
                   ))}
@@ -554,9 +556,18 @@ export function RouteDetails({
             />
             {route.protocol === "fedimint" && (
               <>
-                <Row label="Federation fee" value={sats(route.fee.federation_fee_sats ?? null)} />
-                <Row label="Gateway routing fee" value={sats(route.fee.gateway_routing_fee_sats ?? null)} />
-                <Row label="Lightning destination fee" value={sats(route.fee.lightning_destination_fee_sats ?? null)} />
+                <Row
+                  label="Federation fee"
+                  value={sats(route.fee.federation_fee_sats ?? null)}
+                />
+                <Row
+                  label="Gateway routing fee"
+                  value={sats(route.fee.gateway_routing_fee_sats ?? null)}
+                />
+                <Row
+                  label="Lightning destination fee"
+                  value={sats(route.fee.lightning_destination_fee_sats ?? null)}
+                />
               </>
             )}
             {route.fee.input_fee_schedule && (

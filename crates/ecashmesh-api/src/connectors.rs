@@ -98,16 +98,18 @@ pub(super) fn select(
 /// Narrows live candidates to an explicitly configured source when supplied.
 /// The absence of a source selector leaves the already-selected live sources
 /// intact; it never adds fixtures or undiscovered connectors.
-#[allow(clippy::too_many_arguments)] // Request selectors and discovery policy are independent API inputs.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Request selectors and discovery policy are independent API inputs.
 pub(super) fn select_live_sources(
     selected: &[ConnectorSnapshot],
     source_connector: Option<String>,
     source_mint_url: Option<String>,
     selected_source_mint_urls: Vec<String>,
+    federation_connector_ids: Vec<String>,
     discovery: &DiscoveryReport,
     destination_mint_urls: &[String],
     allow_discovered_sources: bool,
     automatic_discovered_source_limit: usize,
+    strict_registry: bool,
 ) -> Result<Vec<ConnectorSnapshot>, ApiError> {
     let source_connector = source_connector
         .filter(|value| !value.trim().is_empty())
@@ -124,6 +126,29 @@ pub(super) fn select_live_sources(
         // validation failure after collection.
         .filter_map(|url| ecashmesh_cashu::discovery::canonical_mint_url(&url).ok())
         .collect::<BTreeSet<_>>();
+    let federation_connector_ids = federation_connector_ids
+        .into_iter()
+        .map(|value| {
+            ConnectorId::new(&value).map_err(|error| {
+                ApiError::validation(
+                    "federation_connector_ids contains an invalid connector identifier",
+                    vec![error.to_string()],
+                )
+            })
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    for id in &federation_connector_ids {
+        let configured = selected.iter().any(|connector| {
+            connector.id == *id
+                && connector.connector_type == ecashmesh_core::ConnectorType::Fedimint
+        });
+        if !configured && !strict_registry {
+            return Err(ApiError::validation(
+                "federation_connector_ids contains an unavailable federation",
+                vec![id.to_string()],
+            ));
+        }
+    }
     let source_from_url = source_mint_url.as_ref().and_then(|url| {
         discovery
             .mints
@@ -195,7 +220,10 @@ pub(super) fn select_live_sources(
             // source and is never discovered from a Cashu directory.
             (connector.connector_type != ecashmesh_core::ConnectorType::Cashu
                 || allowed_sources.contains(&connector.id))
-                && (selected_source_mint_urls.is_empty()
+                && ((!strict_registry && federation_connector_ids.is_empty())
+                    || connector.connector_type != ecashmesh_core::ConnectorType::Fedimint
+                    || federation_connector_ids.contains(&connector.id))
+                && ((!strict_registry && selected_source_mint_urls.is_empty())
                     || connector.connector_type != ecashmesh_core::ConnectorType::Cashu
                     || discovery.mints.iter().any(|mint| {
                         mint.connector_id() == connector.id

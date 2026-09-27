@@ -349,18 +349,24 @@ fn parse_gateways(value: &Value) -> Vec<GatewayObservation> {
         .into_iter()
         .flatten()
         .map(|gateway| {
-            let fees = gateway.get("fees").or_else(|| gateway.get("routing_fees"));
+            // `fedimint-clientd` v0.4 wraps the actual announcement in `info`
+            // and adds federation-specific fields at the outer level. Accept a
+            // flat announcement too for compatible bridge implementations.
+            let info = gateway.get("info").unwrap_or(gateway);
+            let fees = info.get("fees").or_else(|| info.get("routing_fees"));
             GatewayObservation {
-                id: string_at(gateway, &["gateway_id", "gatewayId", "id"]),
-                api: string_at(gateway, &["api", "api_url", "apiUrl"]),
-                node_pub_key: string_at(gateway, &["node_pub_key", "nodePubKey"]),
+                id: string_at(info, &["gateway_id", "gatewayId", "id"]),
+                api: string_at(info, &["api", "api_url", "apiUrl"]),
+                node_pub_key: string_at(info, &["node_pub_key", "nodePubKey"]),
                 routing_fee_base_msat: number_at(fees, &["base_msat", "baseMsat"]),
                 routing_fee_ppm: number_at(
                     fees,
                     &["proportional_millionths", "ppm", "proportionalMillionths"],
                 ),
-                expires_at_unix_seconds: number_at(Some(gateway), &["expires_at", "expiresAt"]),
-                available: !gateway.get("available").is_some_and(|value| value == false),
+                // clientd's outer `ttl` is a duration, not a Unix timestamp,
+                // and must not be presented as an absolute expiry.
+                expires_at_unix_seconds: number_at(Some(info), &["expires_at", "expiresAt"]),
+                available: !info.get("available").is_some_and(|value| value == false),
             }
         })
         .collect()
@@ -458,11 +464,14 @@ mod tests {
     #[test]
     fn normalizes_gateway_fees_and_a_read_only_quote_without_payment_authority() {
         let gateways = parse_gateways(&json!([{
-            "gateway_id": "gateway-a",
-            "api": "https://gateway.example",
-            "node_pub_key": "02abcdef",
-            "fees": {"base_msat": 1000, "proportional_millionths": 500},
-            "expires_at": 5_000_000
+            "federation_id": "fedid",
+            "info": {
+                "gateway_id": "gateway-a",
+                "api": "https://gateway.example",
+                "node_pub_key": "02abcdef",
+                "fees": {"base_msat": 1000, "proportional_millionths": 500}
+            },
+            "ttl": {"secs": 516, "nanos": 0}
         }]));
         assert_eq!(gateways.len(), 1);
         assert_eq!(gateways[0].routing_fee_base_msat, Some(1_000));

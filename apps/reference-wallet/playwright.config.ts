@@ -2,6 +2,10 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  testIgnore:
+    process.env.EXPO_PUBLIC_SOURCE_FIXTURES === "true"
+      ? ["**/registry.spec.ts", "**/wallet.spec.ts"]
+      : "**/fixtures.spec.ts",
   fullyParallel: true,
   workers: 2,
   timeout: 30000,
@@ -20,6 +24,9 @@ export default defineConfig({
         ECASHMESH_API_ADDRESS: "127.0.0.1:15000",
         ECASHMESH_WEB_ORIGIN: "http://localhost:18081",
         ROUTING_MODE: "live",
+        ECASHMESH_CASHU_MINTS: "[]",
+        ECASHMESH_CASHU_DIRECTORIES: "[]",
+        ECASHMESH_FEDIMINT_FEDERATIONS: "[]",
       },
     },
     {
@@ -30,6 +37,7 @@ export default defineConfig({
         CI: "1",
         BROWSER: "none",
         EXPO_PUBLIC_ECASHMESH_API_URL: "http://127.0.0.1:15000",
+        EXPO_PUBLIC_NOSTR_RELAYS: '["wss://relay.test"]',
       },
     },
   ],

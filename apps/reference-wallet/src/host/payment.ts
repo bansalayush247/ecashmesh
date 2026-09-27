@@ -1,11 +1,18 @@
 import type { PaymentInput } from "../ecashmesh/contracts";
 import { EcashMeshError } from "../ecashmesh/transport";
+import {
+  enabledCashuMintUrls,
+  enabledFederationConnectorIds,
+  type PaymentSourceProfile,
+} from "../nostr/sourceRegistry";
 
 export function collectPayment(
   amountText: string,
   destination: string,
   destinationType: "lightning" | "cashu" = "lightning",
   sourceMintUrl?: string,
+  authorizedProfiles: readonly PaymentSourceProfile[] = [],
+  strictRegistry = false,
 ): PaymentInput {
   const amount = Number(amountText);
   if (
@@ -30,15 +37,46 @@ export function collectPayment(
     .split(/[\n,]/)
     .map((value) => value.trim())
     .filter(Boolean);
+  const walletMintUrls = [
+    ...new Set([
+      ...(strictRegistry ? [] : sourceMintUrls),
+      ...enabledCashuMintUrls(authorizedProfiles),
+    ]),
+  ];
   const trimmedDestination = destination.trim();
-  const cashuDestination = destinationType === "cashu" && /^https?:\/\//i.test(trimmedDestination)
-    ? `cashu://request?mint=${encodeURIComponent(trimmedDestination)}&amount_sats=${amount}`
-    : trimmedDestination;
+  const cashuDestination =
+    destinationType === "cashu" && /^https?:\/\//i.test(trimmedDestination)
+      ? `cashu://request?mint=${encodeURIComponent(trimmedDestination)}&amount_sats=${amount}`
+      : trimmedDestination;
   return {
     amount,
     asset: "BTC",
     destination: { type: destinationType, value: cashuDestination },
     paymentIntent: "send",
-    ...(sourceMintUrls.length ? { walletMintUrls: sourceMintUrls } : {}),
+    ...(strictRegistry
+      ? {
+          strictSourceRegistry: true,
+          federationIdentities: Object.fromEntries(
+            authorizedProfiles
+              .filter(
+                (p) =>
+                  p.enabled &&
+                  p.authorization === "user_authorized" &&
+                  p.protocol === "fedimint",
+              )
+              .map((p) => [p.id, p.endpoint]),
+          ),
+          walletMintUrls,
+          federationConnectorIds:
+            enabledFederationConnectorIds(authorizedProfiles),
+        }
+      : {}),
+    ...(walletMintUrls.length ? { walletMintUrls } : {}),
+    ...(enabledFederationConnectorIds(authorizedProfiles).length
+      ? {
+          federationConnectorIds:
+            enabledFederationConnectorIds(authorizedProfiles),
+        }
+      : {}),
   };
 }

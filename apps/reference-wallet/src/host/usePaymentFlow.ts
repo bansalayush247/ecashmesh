@@ -8,6 +8,7 @@ import type {
 import { EcashMeshError } from "../ecashmesh/transport";
 import { collectPayment } from "./payment";
 import type { RegtestCustody } from "./regtestCustody";
+import type { PaymentSourceProfile } from "../nostr/sourceRegistry";
 
 type Receipt = {
   status: string;
@@ -34,6 +35,7 @@ export type Screen =
 export function usePaymentFlow(
   ecashmesh: EcashMeshClient,
   regtestCustody?: RegtestCustody,
+  authorizedProfiles: readonly PaymentSourceProfile[] = [],
 ) {
   const [screen, setScreen] = useState<Screen>("home");
   const [amount, setAmount] = useState("100000");
@@ -42,6 +44,7 @@ export function usePaymentFlow(
     "lightning",
   );
   const [sourceMintUrl, setSourceMintUrl] = useState("");
+  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
   const [payment, setPayment] = useState<PaymentInput | null>(null);
   const [decision, setDecision] = useState<RouteDecision | null>(null);
   const [selected, setSelected] = useState<PaymentSource | null>(null);
@@ -74,6 +77,7 @@ export function usePaymentFlow(
     setDestination("");
     setDestinationType("lightning");
     setSourceMintUrl("");
+    setSelectedSourceIds([]);
     setScreen("home");
   }
 
@@ -86,6 +90,10 @@ export function usePaymentFlow(
         destination,
         destinationType,
         sourceMintUrl,
+        selectedSourceIds.length
+          ? authorizedProfiles.filter((p) => selectedSourceIds.includes(p.id))
+          : authorizedProfiles,
+        !regtestCustody,
       );
     } catch (error) {
       setError(asError(error));
@@ -171,6 +179,8 @@ export function usePaymentFlow(
   }
 
   return {
+    selectedSourceIds,
+    setSelectedSourceIds,
     screen,
     amount,
     setAmount,

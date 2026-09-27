@@ -16,6 +16,13 @@ import { createEcashMeshClient } from "./src/ecashmesh/client";
 import type { RouteDecision } from "./src/ecashmesh/contracts";
 import { useRegtestCustody } from "./src/host/useRegtestCustody";
 import { usePaymentFlow } from "./src/host/usePaymentFlow";
+import { useNostrSourceRegistry } from "./src/host/useNostrSourceRegistry";
+import {
+  SourceManager,
+  SourceSummary,
+  ExcludedSources,
+} from "./src/ui/SourceManager";
+import { SourceFixtureGallery } from "./src/ui/SourceFixtureGallery";
 import {
   Button,
   colors,
@@ -78,10 +85,17 @@ function useLiveBtcUsdRate() {
         const response = await fetch(`${baseUrl}/v1/market/btc-usd`);
         const payload: unknown = await response.json();
         const value =
-          typeof payload === "object" && payload !== null && "btc_usd" in payload
+          typeof payload === "object" &&
+          payload !== null &&
+          "btc_usd" in payload
             ? (payload as { btc_usd?: unknown }).btc_usd
             : null;
-        if (active && typeof value === "number" && Number.isFinite(value) && value > 0) {
+        if (
+          active &&
+          typeof value === "number" &&
+          Number.isFinite(value) &&
+          value > 0
+        ) {
           setRate(value);
         }
       } catch {
@@ -98,118 +112,29 @@ function useLiveBtcUsdRate() {
   return rate;
 }
 
-type MintSummary = { mintUrl: string; status: string; health: string };
-
-function useLiveMintSummaries(amountText: string) {
-  const [mints, setMints] = useState<MintSummary[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  useEffect(() => {
-    const amount = Number.parseInt(amountText, 10);
-    if (!Number.isSafeInteger(amount) || amount <= 0) return;
-    let active = true;
-    const load = async () => {
-      try {
-        const response = await fetch(`${baseUrl}/v1/connectors?amount=${amount}`);
-        const payload: unknown = await response.json();
-        if (!response.ok || typeof payload !== "object" || payload === null) {
-          throw new Error("Live source discovery is unavailable");
-        }
-        const observations = "observations" in payload && Array.isArray(payload.observations)
-          ? payload.observations
-          : [];
-        const summaries = observations.flatMap((value): MintSummary[] => {
-          if (typeof value !== "object" || value === null) return [];
-          const observation = value as Record<string, unknown>;
-          if (typeof observation.mint_url !== "string") return [];
-          const health = observation.health as Record<string, unknown> | undefined;
-          return [{
-            mintUrl: observation.mint_url,
-            status: typeof observation.data_status === "string" ? observation.data_status : "unknown",
-            health: typeof health?.value === "string" ? health.value : "unknown",
-          }];
-        });
-        if (active) {
-          setMints(summaries);
-          setError(null);
-          setLoaded(true);
-        }
-      } catch {
-        if (active) {
-          setMints([]);
-          setError("Live source discovery is unavailable. Check the local API connection.");
-          setLoaded(true);
-        }
-      }
-    };
-    void load();
-    const timer = setInterval(() => void load(), 30_000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [amountText]);
-  return { mints, error, loaded };
-}
-
-function selectedMintUrls(value: string) {
-  return value
-    .split(/[\n,]/)
-    .map((url) => url.trim())
-    .filter(Boolean);
-}
-
-function SourceMintPicker({
-  mints,
-  value,
-  onChange,
-}: {
-  mints: MintSummary[];
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  const selected = new Set(selectedMintUrls(value));
-  const toggle = (mintUrl: string) => {
-    const next = new Set(selected);
-    if (next.has(mintUrl)) next.delete(mintUrl);
-    else next.add(mintUrl);
-    onChange([...next].join("\n"));
-  };
-  return (
-    <Section title="Choose source mints">
-      <Text style={styles.small}>
-        Select one or more sources to compare.
-      </Text>
-      {mints.map((mint) => (
-        <Choice
-          key={mint.mintUrl}
-          title={mint.mintUrl}
-          copy={`Health: ${mint.health} · Metadata: ${mint.status}`}
-          icon="◈"
-          selected={selected.has(mint.mintUrl)}
-          onPress={() => toggle(mint.mintUrl)}
-        />
-      ))}
-    </Section>
-  );
-}
-
 function LiveObservations({ decision }: { decision: RouteDecision }) {
   const [expanded, setExpanded] = useState(false);
   const observations = decision.connector_observations ?? [];
-  const live = decision.live as { graph?: { destination?: Record<string, unknown> } } | undefined;
+  const recommended =
+    decision.recommended_source ?? decision.recommended_route ?? null;
+  const alternatives =
+    decision.alternative_sources ?? decision.alternatives ?? [];
+  const live = decision.live as
+    { graph?: { destination?: Record<string, unknown> } } | undefined;
   const destination = live?.graph?.destination;
   return (
-    <Section title="Live mint observations">
+    <Section title="Live source observations">
       <Text style={styles.small}>
-        LIVE READ-ONLY — No funds will move. Public Cashu mint data and unpaid
-        quotes only.
+        LIVE READ-ONLY — No funds will move. Public Cashu data, unpaid Cashu
+        quotes, and local Fedimint client status only.
       </Text>
       {destination && (
         <Surface>
           <Text style={local.custodyTitle}>Destination</Text>
           <Text style={styles.small}>
-            {typeof destination.type === "string" ? destination.type : "unknown"}
+            {typeof destination.type === "string"
+              ? destination.type
+              : "unknown"}
             {typeof destination.mint_url === "string"
               ? ` · ${destination.mint_url}`
               : ""}
@@ -220,25 +145,61 @@ function LiveObservations({ decision }: { decision: RouteDecision }) {
         </Surface>
       )}
       {observations.length === 0 ? (
-        <Text style={styles.small}>No mint observations were returned.</Text>
+        <Text style={styles.small}>No source observations were returned.</Text>
       ) : (
         observations.map((value, index) => {
           const observation = value as Record<string, unknown>;
-          const mintUrl = typeof observation.mint_url === "string"
-            ? observation.mint_url
-            : "Unknown mint";
-          const status = typeof observation.data_status === "string"
-            ? observation.data_status
-            : "unknown";
+          const isFederation = observation.connector_type === "fedimint";
+          const sourceName = isFederation
+            ? typeof observation.label === "string"
+              ? observation.label
+              : "Unnamed federation"
+            : typeof observation.mint_url === "string"
+              ? observation.mint_url
+              : "Unknown mint";
+          const status = isFederation
+            ? (() => {
+                const health = observation.health as
+                  Record<string, unknown> | undefined;
+                return typeof health?.value === "string"
+                  ? health.value
+                  : "unknown";
+              })()
+            : typeof observation.data_status === "string"
+              ? observation.data_status
+              : "unknown";
+          const connector =
+            typeof observation.connector === "string"
+              ? observation.connector
+              : null;
+          const route = connector
+            ? [recommended, ...alternatives].find(
+                (candidate) =>
+                  candidate?.connector === connector ||
+                  candidate?.source_id === connector,
+              )
+            : undefined;
+          const routeState = route
+            ? route === recommended
+              ? "Recommended quote-backed source"
+              : "Alternative quote-backed source"
+            : "Not ranked for this target — see excluded sources; catalog observations alone do not authorize a source";
           return (
-            <Surface key={`${mintUrl}-${index}`}>
-              <Text selectable style={styles.body}>{mintUrl}</Text>
-              <Text style={styles.small}>
-                /v1/info · /v1/keysets · /v1/keys: {status}
+            <Surface key={`${sourceName}-${index}`}>
+              <Text selectable style={styles.body}>
+                {sourceName}
               </Text>
               <Text style={styles.small}>
-                Role: discovered observation (not automatically a wallet source)
+                {isFederation
+                  ? `Fedimint client health: ${status} · Gateways: ${typeof observation.gateway_count === "number" ? observation.gateway_count : "unknown"}`
+                  : `/v1/info · /v1/keysets · /v1/keys: ${status}`}
               </Text>
+              <Text style={styles.small}>
+                {isFederation
+                  ? "Role: configured federation source (requires a read-only quote)"
+                  : "Role: discovered observation (not automatically a wallet source)"}
+              </Text>
+              <Text style={styles.small}>Route status: {routeState}</Text>
             </Surface>
           );
         })
@@ -270,7 +231,11 @@ function LiveObservations({ decision }: { decision: RouteDecision }) {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <ReferenceWallet />
+      {process.env.EXPO_PUBLIC_SOURCE_FIXTURES === "true" ? (
+        <SourceFixtureGallery />
+      ) : (
+        <ReferenceWallet />
+      )}
     </SafeAreaProvider>
   );
 }
@@ -373,12 +338,11 @@ function BottomNav() {
 
 function ReferenceWallet() {
   const btcUsdRate = useLiveBtcUsdRate();
-  const regtest = useRegtestCustody(
-    regtestCustodyEnabled,
-  );
-  const flow = usePaymentFlow(ecashmesh, regtest.custody);
+  const nostr = useNostrSourceRegistry(baseUrl);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const regtest = useRegtestCustody(regtestCustodyEnabled);
+  const flow = usePaymentFlow(ecashmesh, regtest.custody, nostr.profiles);
   const [fundAmount, setFundAmount] = useState("1000");
-  const liveSources = useLiveMintSummaries(flow.amount);
   const scroll = useRef<ScrollView>(null);
   useEffect(() => {
     scroll.current?.scrollTo({ y: 0, animated: false });
@@ -387,13 +351,55 @@ function ReferenceWallet() {
     const subscription = BackHandler.addEventListener(
       "hardwareBackPress",
       () => {
+        if (sourcesOpen) {
+          setSourcesOpen(false);
+          return true;
+        }
         if (flow.screen === "home") return false;
         flow.back();
         return true;
       },
     );
     return () => subscription.remove();
-  }, [flow.screen, flow.back]);
+  }, [flow.screen, flow.back, sourcesOpen]);
+  useEffect(() => {
+    const observations =
+      flow.decision?.connector_observations ??
+      flow.error?.diagnostics?.connector_observations;
+    const quotes =
+      (flow.decision?.live as { quote_observations?: unknown[] } | undefined)
+        ?.quote_observations ?? flow.error?.diagnostics?.quote_observations;
+    if (observations)
+      nostr.applyObservations(observations, quotes, [
+        flow.decision?.recommended_source,
+        ...(flow.decision?.alternative_sources ?? []),
+      ]);
+  }, [flow.decision, flow.error, nostr.applyObservations]);
+  const sourceKey = nostr.profiles
+    .map((p) => `${p.id}:${p.endpoint}:${p.enabled}`)
+    .join("|");
+  useEffect(() => {
+    if (sourceKey) void nostr.refresh();
+  }, [sourceKey, nostr.refresh]);
+  const localExclusions = nostr.profiles
+    .filter(
+      (p) =>
+        !p.enabled ||
+        p.authorization !== "user_authorized" ||
+        (flow.selectedSourceIds.length > 0 &&
+          !flow.selectedSourceIds.includes(p.id)),
+    )
+    .map((p) => ({
+      source_id: p.label,
+      protocol: p.protocol,
+      origin: p.origin,
+      route_classification: "excluded",
+      reason: !p.enabled
+        ? "Disabled by you"
+        : p.authorization !== "user_authorized"
+          ? "Not authorized"
+          : "Outside selected sources",
+    }));
 
   return (
     <SafeAreaView style={local.safe}>
@@ -408,7 +414,16 @@ function ReferenceWallet() {
           keyboardShouldPersistTaps="handled"
         >
           <View style={local.shell}>
-            {flow.screen === "home" && (
+            {sourcesOpen && (
+              <>
+                <ScreenHeader
+                  title="Payment Sources"
+                  onBack={() => setSourcesOpen(false)}
+                />
+                <SourceManager registry={nostr} />
+              </>
+            )}
+            {flow.screen === "home" && !sourcesOpen && (
               <>
                 <View style={local.homeHeader}>
                   <View style={local.avatar}>
@@ -434,6 +449,10 @@ function ReferenceWallet() {
                   custody={regtest}
                   amount={fundAmount}
                   setAmount={setFundAmount}
+                />
+                <SourceSummary
+                  registry={nostr}
+                  open={() => setSourcesOpen(true)}
                 />
                 <View style={local.quickActions}>
                   {[
@@ -462,7 +481,8 @@ function ReferenceWallet() {
                     </Text>
                     <Text style={local.promoTitle}>EcashMesh</Text>
                     <Text style={styles.small}>
-                      Choose the best payment source across Cashu, Fedimint and Lightning.
+                      Choose the best payment source across Cashu, Fedimint and
+                      Lightning.
                     </Text>
                   </View>
                   <Text style={local.promoArrow}>›</Text>
@@ -478,7 +498,7 @@ function ReferenceWallet() {
                   <Text style={styles.small}>
                     {regtest.enabled
                       ? "Balances are derived from proofs stored locally in this browser."
-                      : "EcashMesh discovers public mint data and unpaid quotes only; it does not read balances, proofs, or transaction history."}
+                      : "Nostr import does not read proofs or transaction history. Balances remain unknown without custody or explicit local connector evidence."}
                   </Text>
                 </Section>
                 <Button onPress={flow.edit}>Send payment</Button>
@@ -491,17 +511,14 @@ function ReferenceWallet() {
                 <ScreenHeader title="Send" onBack={flow.back} end="⌗" />
                 <View
                   accessibilityLabel="Routing mode: live"
-                  style={[
-                    local.modeNotice,
-                    local.liveNotice,
-                  ]}
+                  style={[local.modeNotice, local.liveNotice]}
                 >
                   <Text style={local.modeNoticeTitle}>
-                    Live Cashu Route Discovery
+                    Live Route Discovery
                   </Text>
                   <Text style={styles.small}>
-                    LIVE READ-ONLY · No funds will move. Public Cashu mint data
-                    and unpaid quotes only.
+                    LIVE READ-ONLY · No funds will move. Public Cashu mint data,
+                    unpaid quotes, and Fedimint client status only.
                   </Text>
                 </View>
                 <Text style={local.fieldLabel}>Amount</Text>
@@ -536,21 +553,51 @@ function ReferenceWallet() {
                     onPress={() => flow.setDestinationType("cashu")}
                   />
                 </View>
-                {liveSources.mints.length > 0 ? (
-                  <SourceMintPicker
-                    mints={liveSources.mints}
-                    value={flow.sourceMintUrl}
-                    onChange={flow.setSourceMintUrl}
-                  />
-                ) : (
-                  <Section title="Choose source mints">
+                <Section title="Payment source">
+                  <Button
+                    secondary={flow.selectedSourceIds.length > 0}
+                    onPress={() => flow.setSelectedSourceIds([])}
+                  >
+                    Automatic — compare all enabled sources
+                  </Button>
+                  <Text style={styles.small}>
+                    Optional: constrain comparison to one or more sources. No
+                    selection means all enabled, authorized sources; balances
+                    remain unknown.
+                  </Text>
+                  {nostr.profiles
+                    .filter(
+                      (p) => p.enabled && p.authorization === "user_authorized",
+                    )
+                    .map((profile) => (
+                      <Button
+                        key={profile.id}
+                        secondary={!flow.selectedSourceIds.includes(profile.id)}
+                        onPress={() =>
+                          flow.setSelectedSourceIds((ids) =>
+                            ids.includes(profile.id)
+                              ? ids.filter((id) => id !== profile.id)
+                              : [...ids, profile.id],
+                          )
+                        }
+                      >
+                        {`${profile.label} · ${profile.protocol}${flow.selectedSourceIds.includes(profile.id) ? " · Selected" : ""}`}
+                      </Button>
+                    ))}
+                  {!nostr.profiles.some((p) => p.enabled) &&
+                    !regtest.custody && (
+                      <Text style={styles.small}>
+                        No enabled sources. Add sources from Home → Manage
+                        payment sources.
+                      </Text>
+                    )}
+                  {regtest.custody && (
                     <Text style={styles.small}>
-                      {liveSources.error ?? (liveSources.loaded
-                        ? "No source mints are configured in the local API."
-                        : "Loading live source mint observations…")}
+                      Regtest custody uses the existing isolated regtest source
+                      configuration.
                     </Text>
-                  </Section>
-                )}
+                  )}
+                </Section>
                 <Text style={local.fieldLabel}>
                   {flow.destinationType === "cashu"
                     ? "Destination Cashu mint URL"
@@ -578,10 +625,10 @@ function ReferenceWallet() {
                 </View>
                 {flow.error && <ErrorNotice error={flow.error} />}
                 <Button onPress={() => void flow.evaluate()}>
-                  Compare selected sources
+                  Find best payment source
                 </Button>
                 <Text style={local.powered}>
-                  Powered by EcashMesh · live
+                  Powered by EcashMesh · LIVE · read-only evaluation
                 </Text>
               </>
             )}
@@ -608,13 +655,14 @@ function ReferenceWallet() {
                     : "Your available payment sources"}
                 </Heading>
                 {flow.busy && (
-                  <Loading
-                    label="Discovering live quote-backed sources…"
-                  />
+                  <Loading label="Discovering live quote-backed sources…" />
                 )}
                 {flow.error && (
                   <>
                     <ErrorNotice error={flow.error} />
+                    <ExcludedSources
+                      values={flow.error.diagnostics?.excluded_sources ?? []}
+                    />
                     <Button onPress={() => void flow.evaluate()}>
                       Retry evaluation
                     </Button>
@@ -628,8 +676,12 @@ function ReferenceWallet() {
                       select={flow.select}
                     />
                     <LiveObservations decision={flow.decision} />
+                    <ExcludedSources
+                      values={flow.decision.excluded_sources ?? []}
+                    />
                   </>
                 )}
+                {!flow.busy && <ExcludedSources values={localExclusions} />}
                 {!flow.busy && (
                   <Button secondary onPress={flow.edit}>
                     Edit payment
@@ -676,7 +728,11 @@ function ReferenceWallet() {
                                 : "◈ Cashu"}
                           </Text>
                           <Text style={styles.small}>
-                            Settlement: {humanize(flow.selected.settlement_mechanism ?? "adapter-declared")}
+                            Settlement:{" "}
+                            {humanize(
+                              flow.selected.settlement_mechanism ??
+                                "adapter-declared",
+                            )}
                           </Text>
                         </View>
                       </View>
@@ -735,19 +791,19 @@ function ReferenceWallet() {
                     </>
                   )}
                   {regtest.enabled && flow.busy ? (
-                    <Loading
-                      label="Preparing real regtest payment…"
-                    />
+                    <Loading label="Preparing real regtest payment…" />
                   ) : regtest.enabled ? (
                     <Button onPress={() => void flow.confirm()}>
                       Confirm real regtest payment
                     </Button>
                   ) : (
                     <Surface>
-                      <Text style={local.custodyTitle}>Read-only route evaluation</Text>
+                      <Text style={local.custodyTitle}>
+                        Read-only route evaluation
+                      </Text>
                       <Text style={styles.small}>
-                        This route is quote-backed only. EcashMesh did not receive
-                        proofs and cannot send a mainnet payment.
+                        This route is quote-backed only. EcashMesh did not
+                        receive proofs and cannot send a mainnet payment.
                       </Text>
                     </Surface>
                   )}
@@ -782,8 +838,14 @@ function ReferenceWallet() {
                   {flow.receipt.message}
                 </Heading>
                 <Surface>
-                  <Row label="Final fee" value={sats(flow.receipt.fee.amount)} />
-                  <Row label="Settlement source" value={flow.receipt.path[0] ?? "unknown"} />
+                  <Row
+                    label="Final fee"
+                    value={sats(flow.receipt.fee.amount)}
+                  />
+                  <Row
+                    label="Settlement source"
+                    value={flow.receipt.path[0] ?? "unknown"}
+                  />
                   <Row label="Execution ID" value={flow.receipt.route_id} />
                   <Row label="Payment ID" value={flow.receipt.payment_id} />
                 </Surface>

@@ -301,6 +301,7 @@ async fn evaluate_using(
                 )
             })?;
     let hints = request.discovery_hints(Some(&live_destination))?;
+    let registry_request = request.clone();
     let EvaluateRequest {
         amount,
         asset: _,
@@ -310,6 +311,8 @@ async fn evaluate_using(
         source_connector,
         source_mint_url,
         wallet_mint_urls,
+        federation_connector_ids,
+        strict_source_registry,
         ..
     } = request;
 
@@ -323,16 +326,31 @@ async fn evaluate_using(
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     let service = provider.cashu_service();
-    let sources = connectors::select_live_sources(
+    let mut sources = connectors::select_live_sources(
         &selected,
         source_connector,
         source_mint_url,
         wallet_mint_urls,
+        federation_connector_ids,
         &batch.discovery,
         &destination_mint_urls,
         provider.allows_discovered_sources(),
         provider.automatic_discovered_source_limit(),
+        strict_source_registry,
     )?;
+    // Local aliases must not silently resolve to a different federation after
+    // restoring a registry on another device.
+    sources.retain(|source| {
+        registry_request
+            .federation_identities
+            .get(source.id.as_str())
+            .is_none_or(|expected| {
+                batch.fedimint_observations.iter().any(|observation| {
+                    observation.snapshot.id == source.id
+                        && observation.config.federation_id == *expected
+                })
+            })
+    });
     let evaluation = match live::evaluate(
         service,
         provider.fedimint_service(),
@@ -345,7 +363,14 @@ async fn evaluate_using(
     {
         Ok(evaluation) => evaluation,
         Err(no_route) => {
-            return Err(ApiError::no_viable(
+            let diagnostics = source_diagnostics(
+                &registry_request,
+                &batch,
+                &[],
+                &no_route.quote_observations,
+                &destination_mint_urls,
+            );
+            let mut error = ApiError::no_viable(
                 "No viable live route found.",
                 no_route
                     .details
@@ -364,7 +389,13 @@ async fn evaluate_using(
                         })
                     }))
                     .collect(),
-            ));
+            );
+            error.diagnostics = Some(json!({
+                "excluded_sources": diagnostics,
+                "connector_observations": batch.observations,
+                "quote_observations": no_route.quote_observations,
+            }));
+            return Err(error);
         }
     };
     let quote_id = deterministic_id(
@@ -401,6 +432,17 @@ async fn evaluate_using(
             .collect::<Vec<_>>(),
     );
     response.apply_fedimint_details(&batch.fedimint_observations);
+    let ranked_ids = std::iter::once(&response.recommended_source)
+        .chain(&response.alternative_sources)
+        .map(|route| route.source_id.clone())
+        .collect::<Vec<_>>();
+    response.excluded_sources = source_diagnostics(
+        &registry_request,
+        &batch,
+        &ranked_ids,
+        &evaluation.quote_observations,
+        &destination_mint_urls,
+    );
     response.discovery = batch.discovery;
     response.connector_observations = batch.observations;
     response.live = Some(json!({
@@ -419,12 +461,114 @@ async fn evaluate_using(
     Ok(Json(response))
 }
 
+fn source_diagnostics(
+    request: &EvaluateRequest,
+    batch: &connectors::ConnectorBatch,
+    ranked: &[String],
+    quotes: &[serde_json::Value],
+    destinations: &[String],
+) -> Vec<serde_json::Value> {
+    let mut identities = Vec::new();
+    for raw_url in &request.wallet_mint_urls {
+        let url = ecashmesh_cashu::discovery::canonical_mint_url(raw_url)
+            .unwrap_or_else(|_| raw_url.clone());
+        let id = batch
+            .discovery
+            .mints
+            .iter()
+            .find(|mint| mint.canonical_url == url)
+            .map_or_else(|| url.clone(), |mint| mint.connector_id().to_string());
+        identities.push((id, "cashu", url));
+    }
+    identities.extend(
+        request
+            .federation_connector_ids
+            .iter()
+            .map(|id| (id.clone(), "fedimint", String::new())),
+    );
+    if !request.strict_source_registry {
+        identities.extend(batch.connectors.iter().map(|source| {
+            (
+                source.id.to_string(),
+                connector_type_code(source.connector_type),
+                String::new(),
+            )
+        }));
+    }
+    identities.sort();
+    identities.dedup();
+    identities
+        .into_iter()
+        .filter_map(|(id, protocol, endpoint)| {
+            if ranked.contains(&id) {
+                return None;
+            }
+            let observation = batch
+                .observations
+                .iter()
+                .find(|value| value["connector"] == id);
+            let quote = quotes.iter().find(|value| {
+                value["connector"] == id && value["kind"] != "destination_mint_quote"
+            });
+            let reason = if destinations.contains(&endpoint) {
+                "Destination is excluded from payment sources".to_owned()
+            } else if request
+                .federation_identities
+                .get(&id)
+                .is_some_and(|expected| {
+                    observation.is_some_and(|value| {
+                        value["federation_id"].as_str() != Some(expected.as_str())
+                    })
+                })
+            {
+                "Local connector refers to a different federation than the saved registry"
+                    .to_owned()
+            } else if observation.is_none() {
+                "Source is not configured locally or its URL was rejected by discovery policy"
+                    .to_owned()
+            } else if let Some(message) = quote.and_then(|value| value["issue"]["message"].as_str())
+            {
+                message.to_owned()
+            } else if quote.is_some_and(|value| value["value"]["payable"] == false) {
+                "Read-only quote reports this payment is unavailable".to_owned()
+            } else if let Some(message) =
+                observation.and_then(|value| value["send_unavailable_reason"].as_str())
+            {
+                message.to_owned()
+            } else {
+                "No current compatible quote-backed route; inspect source and quote evidence"
+                    .to_owned()
+            };
+            let status = if destinations.contains(&endpoint) {
+                "unsupported"
+            } else if observation.is_some_and(|value| value["health"]["freshness"] == "stale")
+                || quote.is_some_and(|value| value["state"] == "stale")
+                || reason.to_lowercase().contains("stale")
+            {
+                "stale"
+            } else if reason.to_lowercase().contains("disabled")
+                || reason.to_lowercase().contains("unsupported")
+            {
+                "unsupported"
+            } else {
+                "unavailable"
+            };
+            Some(
+                json!({"source_id": id, "protocol": protocol, "endpoint": endpoint,
+            "route_classification": status, "reason": reason,
+            "evidence": observation, "quote": quote, "wallet_executable": false}),
+            )
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: String,
     details: Vec<String>,
+    diagnostics: Option<serde_json::Value>,
 }
 
 impl ApiError {
@@ -434,6 +578,7 @@ impl ApiError {
             code,
             message: message.into(),
             details: Vec::new(),
+            diagnostics: None,
         }
     }
 
@@ -443,6 +588,7 @@ impl ApiError {
             code: "VALIDATION_ERROR",
             message: message.into(),
             details,
+            diagnostics: None,
         }
     }
 
@@ -452,6 +598,7 @@ impl ApiError {
             code: "NO_VIABLE_ROUTE",
             message: message.into(),
             details,
+            diagnostics: None,
         }
     }
 
@@ -461,6 +608,7 @@ impl ApiError {
             code,
             message: message.into(),
             details: Vec::new(),
+            diagnostics: None,
         }
     }
 
@@ -470,6 +618,7 @@ impl ApiError {
             code: "PAYMENT_SAFETY",
             message: message.into(),
             details: Vec::new(),
+            diagnostics: None,
         }
     }
 }
@@ -482,6 +631,7 @@ impl IntoResponse for ApiError {
                 "code": self.code,
                 "message": self.message,
                 "details": self.details,
+                "diagnostics": self.diagnostics,
             }})),
         )
             .into_response()
@@ -502,6 +652,15 @@ pub(crate) struct EvaluateRequest {
     source_mint_url: Option<String>,
     #[serde(default)]
     wallet_mint_urls: Vec<String>,
+    /// User-authorized Fedimint connector IDs. These are non-secret labels for
+    /// already-configured local adapters; clientd credentials never cross HTTP.
+    #[serde(default)]
+    federation_connector_ids: Vec<String>,
+    #[serde(default)]
+    federation_identities: std::collections::BTreeMap<String, String>,
+    /// Explicit empty registry means no authorized sources, never all seeds.
+    #[serde(default)]
+    strict_source_registry: bool,
     #[serde(default)]
     mint_urls: Vec<String>,
 }
@@ -984,6 +1143,7 @@ impl RankResponse {
 
 #[derive(Serialize)]
 pub(crate) struct EvaluateResponse {
+    excluded_sources: Vec<serde_json::Value>,
     pub(crate) mode: &'static str,
     discovery: ecashmesh_cashu::discovery::DiscoveryReport,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1033,6 +1193,7 @@ impl EvaluateResponse {
         );
         Self {
             mode: "live",
+            excluded_sources: Vec::new(),
             discovery: ecashmesh_cashu::discovery::DiscoveryReport::default(),
             connector_observations: Vec::new(),
             live: None,

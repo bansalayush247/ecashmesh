@@ -6,6 +6,11 @@ export class EcashMeshError extends Error {
     message: string,
     public readonly details: string[] = [],
     public readonly status?: number,
+    public readonly diagnostics?: {
+      excluded_sources?: unknown[];
+      connector_observations?: unknown[];
+      quote_observations?: unknown[];
+    },
   ) {
     super(message);
     this.name = "EcashMeshError";
@@ -23,6 +28,13 @@ const errorSchema = z.object({
     code: z.string(),
     message: z.string(),
     details: z.array(z.string()).optional(),
+    diagnostics: z
+      .object({
+        excluded_sources: z.array(z.unknown()).optional(),
+        connector_observations: z.array(z.unknown()).optional(),
+        quote_observations: z.array(z.unknown()).optional(),
+      })
+      .nullish(),
   }),
 });
 
@@ -68,6 +80,7 @@ export function createTransport(options: ClientOptions) {
             error.data.error.message,
             error.data.error.details ?? [],
             response.status,
+            error.data.error.diagnostics ?? undefined,
           );
         }
         throw new EcashMeshError(
