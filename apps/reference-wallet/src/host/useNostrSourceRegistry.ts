@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   browserSignerAvailable,
   connectBrowserSigner,
@@ -20,8 +20,29 @@ import {
 } from "../nostr/sourceRegistry";
 import { restoreRegistry, serializeRegistry } from "../nostr/registrySync";
 import type { Announcement } from "../nostr/discovery";
+import {
+  bindLocalFederation,
+  createFederationSetupClient,
+  type LocalConnection,
+  type SetupCatalog,
+} from "./federationSetup";
 
 export function useNostrSourceRegistry(baseUrl: string) {
+  const federationSetup = useMemo(
+    () => createFederationSetupClient(baseUrl),
+    [baseUrl],
+  );
+  const [localConnections, setLocalConnections] = useState<
+    SetupCatalog["sources"]
+  >([]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void federationSetup
+      .catalog(controller.signal)
+      .then((catalog) => setLocalConnections(catalog.sources))
+      .catch(() => {});
+    return () => controller.abort();
+  }, [federationSetup]);
   const [status, setStatus] = useState<
     "disconnected" | "connecting" | "connected" | "error"
   >("disconnected");
@@ -418,6 +439,16 @@ export function useNostrSourceRegistry(baseUrl: string) {
     }
   };
   return {
+    federationSetup,
+    localConnections,
+    bindLocalFederation: (local: LocalConnection) => {
+      const next = bindLocalFederation(profilesRef.current, local);
+      change(() => next);
+      setLocalConnections((current) => [
+        ...current.filter((c) => c.federation_id !== local.federation_id),
+        { ...local, connected: true },
+      ]);
+    },
     status,
     pubkey,
     profiles,

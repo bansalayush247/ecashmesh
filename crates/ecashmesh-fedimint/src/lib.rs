@@ -9,7 +9,10 @@
 
 mod bridge;
 
-use std::time::Duration;
+use std::{
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use ecashmesh_core::{
     Amount, ConfidenceLevel, ConnectorCapabilities, ConnectorEvidence, ConnectorHealth,
@@ -139,7 +142,9 @@ impl FedimintQuote {
 #[derive(Clone)]
 pub struct FedimintService {
     client: Client,
-    configs: Vec<FederationConfig>,
+    configs: Arc<RwLock<Vec<FederationConfig>>>,
+    catalog_host: Option<FederationConfig>,
+    joined_ids: Arc<RwLock<Vec<String>>>,
     max_age_seconds: u64,
 }
 
@@ -163,20 +168,133 @@ impl FedimintService {
             .map_err(|error| error.to_string())?;
         Ok(Self {
             client,
-            configs,
+            configs: Arc::new(RwLock::new(configs)),
+            catalog_host: None,
+            joined_ids: Arc::new(RwLock::new(Vec::new())),
             max_age_seconds,
         })
     }
 
     #[must_use]
-    pub fn configured(&self) -> &[FederationConfig] {
-        &self.configs
+    /// # Panics
+    /// Panics if the in-process catalog lock was poisoned by another panic.
+    pub fn configured(&self) -> Vec<FederationConfig> {
+        self.configs
+            .read()
+            .expect("federation catalog lock")
+            .clone()
+    }
+
+    /// Enables recovery of joined sources from an operator-selected local daemon.
+    /// No joining or wallet writes occur here.
+    ///
+    /// # Errors
+    /// Rejects unknown, non-loopback or unpatched backend configurations.
+    pub fn with_catalog_host(mut self, id: Option<&str>) -> Result<Self, String> {
+        if let Some(id) = id {
+            let host = self
+                .configured()
+                .into_iter()
+                .find(|c| c.id == id)
+                .ok_or("Setup connector is not configured")?;
+            let url = Url::parse(&host.clientd_url).map_err(|_| "Invalid setup clientd URL")?;
+            let loopback = url.host_str().is_some_and(|h| {
+                h == "localhost"
+                    || h.trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            });
+            if !loopback
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || host.quote_backend != QuoteBackend::ClientdV040
+            {
+                return Err("Federation setup requires a loopback clientd_v040 connector".into());
+            }
+            self.catalog_host = Some(host);
+        }
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn catalog_host(&self) -> Option<&FederationConfig> {
+        self.catalog_host.as_ref()
+    }
+
+    #[must_use]
+    /// # Panics
+    /// Panics if the joined-ID lock was poisoned by another panic.
+    pub fn is_joined_on_setup_host(&self, config: &FederationConfig) -> bool {
+        self.catalog_host
+            .as_ref()
+            .is_some_and(|host| host.clientd_url == config.clientd_url)
+            && self
+                .joined_ids
+                .read()
+                .expect("joined IDs lock")
+                .iter()
+                .any(|id| id == &config.federation_id)
+    }
+
+    /// Rebuilds connector references from clientd's persisted joined wallets.
+    ///
+    /// # Errors
+    /// Returns a sanitized error if the daemon cannot supply its joined catalog.
+    ///
+    /// # Panics
+    /// Panics if an in-process catalog lock was poisoned by another panic.
+    pub async fn refresh_joined_catalog(&self) -> Result<(), String> {
+        let Some(host) = &self.catalog_host else {
+            return Ok(());
+        };
+        let value = self
+            .get_clientd(host, "/v2/admin/info")
+            .await
+            .map_err(|_| "Cannot read local clientd's joined federations")?;
+        let entries = value
+            .as_object()
+            .ok_or("Invalid clientd federation catalog")?;
+        *self.joined_ids.write().expect("joined IDs lock") = entries
+            .keys()
+            .filter(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(|id| id.to_lowercase())
+            .collect();
+        let mut configs = self.configs.write().expect("federation catalog lock");
+        for (id, info) in entries {
+            if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
+            if configs
+                .iter()
+                .any(|c| c.federation_id.eq_ignore_ascii_case(id))
+            {
+                continue;
+            }
+            if configs.len() >= 32 {
+                return Err("Federation catalog limit reached (32)".into());
+            }
+            let mut config = host.clone();
+            config.id = format!("fedimint:{}", id.to_lowercase());
+            config.federation_id = id.to_lowercase();
+            config.label = info
+                .pointer("/meta/federation_name")
+                .and_then(Value::as_str)
+                .unwrap_or(id)
+                .chars()
+                .take(128)
+                .collect();
+            configs.push(config);
+        }
+        Ok(())
     }
 
     pub async fn collect(&self, now: u64) -> Vec<FederationObservation> {
-        let mut observations = Vec::with_capacity(self.configs.len());
-        for config in &self.configs {
-            observations.push(self.observe(config.clone(), now).await);
+        // Joining is separate and opt-in; this only restores already joined IDs.
+        let _ = self.refresh_joined_catalog().await;
+        let configs = self.configured();
+        let mut observations = Vec::with_capacity(configs.len());
+        for config in configs {
+            observations.push(self.observe(config, now).await);
         }
         observations
     }

@@ -23,6 +23,7 @@ use serde_json::json;
 use tower_http::cors::CorsLayer;
 
 mod connectors;
+mod federation_setup;
 mod live;
 mod payment;
 mod payment_mode;
@@ -32,6 +33,7 @@ use connectors::Provider;
 struct AppState {
     provider: Provider,
     payments: std::sync::Arc<payment::PaymentService>,
+    setup: std::sync::Arc<federation_setup::SetupService>,
 }
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:5000";
@@ -57,7 +59,19 @@ async fn main() {
 fn app(provider: Provider) -> Router {
     let payments = payment::PaymentService::from_env()
         .unwrap_or_else(|error| panic!("invalid payment safety configuration: {error}"));
-    let state = AppState { provider, payments };
+    assert!(
+        provider.fedimint_service().catalog_host().is_none()
+            || api_address()
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|a| a.ip().is_loopback()),
+        "Federation setup requires a loopback API bind address"
+    );
+    let setup = federation_setup::SetupService::new().expect("setup transport initialization");
+    let state = AppState {
+        provider,
+        payments,
+        setup,
+    };
     // Expo's local browser preview; native clients do not use browser CORS.
     let origins = std::env::var("ECASHMESH_WEB_ORIGIN").map_or_else(
         |_| {
@@ -82,13 +96,25 @@ fn app(provider: Provider) -> Router {
         .route("/v1/routes/evaluate", post(evaluate))
         .route("/v1/connectors", get(connector_observations))
         .route("/v1/connectors/discover", post(discover_connectors))
+        .route("/v1/federations/setup", get(federation_setup::catalog))
+        .route(
+            "/v1/federations/setup/preview",
+            post(federation_setup::preview),
+        )
+        .route(
+            "/v1/federations/setup/connect",
+            post(federation_setup::connect),
+        )
         .route("/v1/payments/prepare", post(payment::prepare))
         .with_state(state)
         .layer(
             CorsLayer::new()
                 .allow_origin(origins)
                 .allow_methods([Method::GET, Method::POST])
-                .allow_headers([CONTENT_TYPE]),
+                .allow_headers([
+                    CONTENT_TYPE,
+                    axum::http::HeaderName::from_static("x-ecashmesh-setup"),
+                ]),
         )
 }
 

@@ -378,6 +378,28 @@ mod tests {
                 .status(),
             422
         );
+        for endpoint in ["ecashmesh-connect-preview", "ecashmesh-connect"] {
+            let url = format!("http://{address}/v2/ln/{endpoint}");
+            assert_eq!(
+                http.post(&url)
+                    .json(&json!({}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                401
+            );
+            assert_eq!(
+                http.post(&url)
+                    .bearer_auth("synthetic-test-only")
+                    .json(&json!({}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                422
+            );
+        }
         let info = http
             .get(format!("http://{address}/v2/admin/info"))
             .bearer_auth("synthetic-test-only")

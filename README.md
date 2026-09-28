@@ -103,6 +103,10 @@ nix develop -c cargo run -p ecashmesh-api
 ### Fedimint sources (read-only)
 
 Fedimint is an independent configured source, never a discovered Cashu mint.
+Discovery saves a registry reference, not a local wallet connection. Use the
+explicit **Connect federation** flow after enabling the separately authorized
+[local setup integration](docs/federation-connection.md). Setup can create a
+clientd wallet; payment evaluation remains read-only.
 Configure the already-joined federation in a locally controlled
 `fedimint-clientd` and give EcashMesh its federation ID and clientd endpoint:
 

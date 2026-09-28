@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Text, TextInput, View } from "react-native";
+import { Modal, ScrollView, Text, TextInput, View } from "react-native";
 import { npubEncode } from "nostr-tools/nip19";
 import type { useNostrSourceRegistry } from "../host/useNostrSourceRegistry";
 import type { PaymentSourceProfile } from "../nostr/sourceRegistry";
 import { Button, Section, Surface, Row, styles, colors } from "./components";
+import { FederationConnect } from "./FederationConnect";
 
 export type Registry = ReturnType<typeof useNostrSourceRegistry>;
 export const originLabel = (origin: string) =>
@@ -197,6 +198,10 @@ export function SourceDetails({ profile }: { profile: PaymentSourceProfile }) {
 }
 
 export function SourceManager({ registry }: { registry: Registry }) {
+  const [connection, setConnection] = useState<{
+    federationId: string;
+    label: string;
+  } | null>(null);
   const [tab, setTab] = useState<"my" | "discover">("my");
   const [details, setDetails] = useState<string | null>(null);
   const [uri, setUri] = useState("");
@@ -344,6 +349,32 @@ export function SourceManager({ registry }: { registry: Registry }) {
                       Health: {profile.liveStatus} · Evidence:{" "}
                       {profile.evidenceFreshness}
                     </Text>
+                    {profile.protocol === "fedimint" && (
+                      <>
+                        <Text style={styles.small}>
+                          {registry.localConnections.some(
+                            (c) =>
+                              c.connector_id === profile.id &&
+                              c.federation_id === profile.endpoint &&
+                              c.connected,
+                          )
+                            ? "Connected locally — balance and quote readiness are evaluated separately"
+                            : "Saved to registry — local connection not verified"}
+                        </Text>
+                        <Button
+                          secondary
+                          disabled={registry.busy}
+                          onPress={() =>
+                            setConnection({
+                              federationId: profile.endpoint,
+                              label: profile.label,
+                            })
+                          }
+                        >
+                          Connect federation
+                        </Button>
+                      </>
+                    )}
                     <Button
                       secondary
                       disabled={registry.status === "connecting"}
@@ -469,10 +500,41 @@ export function SourceManager({ registry }: { registry: Registry }) {
                 >
                   {added ? "Added" : "Add"}
                 </Button>
+                {entry.protocol === "fedimint" && (
+                  <Button
+                    secondary
+                    disabled={registry.busy}
+                    onPress={() =>
+                      setConnection({
+                        federationId: entry.endpoint,
+                        label: entry.label,
+                      })
+                    }
+                  >
+                    Connect federation
+                  </Button>
+                )}
               </Surface>
             );
           })}
         </Section>
+      )}
+      {connection && (
+        <Modal
+          visible
+          animationType="slide"
+          onRequestClose={() => setConnection(null)}
+        >
+          <ScrollView contentContainerStyle={{ padding: 24 }}>
+            <FederationConnect
+              key={`${registry.pubkey}:${connection.federationId}`}
+              registry={registry}
+              federationId={connection.federationId}
+              label={connection.label}
+              close={() => setConnection(null)}
+            />
+          </ScrollView>
+        </Modal>
       )}
     </View>
   );

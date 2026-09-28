@@ -241,6 +241,15 @@ pub(super) fn select_live_sources(
 }
 
 impl Provider {
+    #[cfg(test)]
+    pub(super) fn for_setup_test(fedimint: FedimintService) -> Self {
+        Self {
+            cashu: Arc::new(DiscoveryService::new(vec![], vec![], vec![], 300).unwrap()),
+            fedimint: Arc::new(fedimint),
+            allow_discovered_sources: false,
+            automatic_discovered_source_limit: 0,
+        }
+    }
     pub fn from_env() -> Result<Self, String> {
         let mode = std::env::var("ROUTING_MODE").unwrap_or_else(|_| "live".into());
         match mode.as_str() {
@@ -289,7 +298,13 @@ impl Provider {
                     .map_err(|_| "ECASHMESH_FEDIMINT_MAX_AGE_SECONDS must be an integer")?;
                 Ok(Self {
                     cashu: Arc::new(DiscoveryService::new(seeds, directories, allowed, ttl)?),
-                    fedimint: Arc::new(FedimintService::new(federations, fedimint_ttl)?),
+                    fedimint: Arc::new(
+                        FedimintService::new(federations, fedimint_ttl)?.with_catalog_host(
+                            std::env::var("ECASHMESH_FEDIMINT_SETUP_CONNECTOR")
+                                .ok()
+                                .as_deref(),
+                        )?,
+                    ),
                     allow_discovered_sources,
                     automatic_discovered_source_limit,
                 })

@@ -122,6 +122,12 @@ extension, the source cannot quote. A clientd health
 response or registered gateway is not an outgoing fee quote. An empty local
 wallet remains unfunded, even when its Nostr source is enabled.
 
+To connect a discovered federation without hand-editing a new connector entry,
+enable the [explicit local connection flow](federation-connection.md). The API
+operator selects an existing local clientd host; the browser validates a pasted
+invite, asks for confirmation, and binds the joined connector to the source.
+This separate wallet-setup action is not read-only and does not import funds.
+
 Terminal 2, from the repository root:
 
 ```sh

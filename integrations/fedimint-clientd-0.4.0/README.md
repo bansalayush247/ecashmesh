@@ -45,9 +45,11 @@ git apply --check "$ECASHMESH_REPO/integrations/fedimint-clientd-0.4.0/routes.pa
 git apply "$ECASHMESH_REPO/integrations/fedimint-clientd-0.4.0/routes.patch"
 cp "$ECASHMESH_REPO/integrations/fedimint-clientd-0.4.0/readonly_quote.rs" \
   fedimint-clientd/src/router/handlers/ln/readonly_quote.rs
+cp "$ECASHMESH_REPO/integrations/fedimint-clientd-0.4.0/connect_federation.rs" \
+  fedimint-clientd/src/router/handlers/ln/connect_federation.rs
 nix develop
 cargo check --locked -p fedimint-clientd
-cargo test --locked -p fedimint-clientd readonly_quote
+cargo test --locked -p fedimint-clientd
 cargo build --locked --release -p fedimint-clientd
 ```
 
@@ -55,6 +57,10 @@ Use the **clientd** Nix shell (Rust 1.81), not EcashMesh's newer Rust shell:
 the old locked `metrics` dependency fails on recent Rust. Keep `Cargo.lock`
 unchanged. The normal `/v2` bearer middleware protects the new REST route.
 There is deliberately no WebSocket command or new payment endpoint.
+The separate `connect_federation.rs` extension adds invite-preview and explicitly
+confirmed wallet-join endpoints. **Unlike quote evaluation, joining writes
+clientd wallet state.** The EcashMesh API exposes this only after operator opt-in;
+see [the connection setup guide](../../docs/federation-connection.md).
 
 Do not run two clients against the same database. Deployment is a separate
 operator step: stop the old daemon, retain your existing wallet backup, then
