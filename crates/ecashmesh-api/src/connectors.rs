@@ -333,7 +333,7 @@ impl Provider {
                 .map(|observation| observation.evaluated_at)
                 .max()
                 .unwrap_or_else(|| EvidenceTimestamp::from_unix_seconds(unix_now()));
-            let fedimint_observations = self.fedimint.collect(amount, unix_now()).await;
+            let fedimint_observations = self.fedimint.collect(unix_now()).await;
             let mut connectors = observations
                 .iter()
                 .map(|observation| observation.routing_snapshot(amount))
@@ -376,7 +376,10 @@ fn fedimint_observation_json(observation: &FederationObservation) -> Value {
         "connector_type": "fedimint",
         "label": observation.config.label,
         "federation_id": observation.config.federation_id,
-        "client_api_version": ecashmesh_fedimint::FEDIMINT_CLIENT_API_VERSION,
+        "quote_backend": observation.config.quote_backend,
+        "client_api_version": if observation.config.quote_backend == ecashmesh_fedimint::QuoteBackend::ClientdV040 {
+            Some(ecashmesh_fedimint::FEDIMINT_CLIENT_API_VERSION)
+        } else { None },
         "evaluated_at_unix_seconds": observation.evaluated_at.unix_seconds(),
         "expires_at_unix_seconds": observation.expires_at_unix_seconds,
         "health": EvidenceStateResponse::from_core(&observation.health, |value| json!(connector_health_code(*value))),

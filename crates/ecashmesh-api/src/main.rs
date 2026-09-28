@@ -431,7 +431,7 @@ async fn evaluate_using(
             })
             .collect::<Vec<_>>(),
     );
-    response.apply_fedimint_details(&batch.fedimint_observations);
+    response.apply_fedimint_details(&batch.fedimint_observations, &evaluation.quote_observations);
     let ranked_ids = std::iter::once(&response.recommended_source)
         .chain(&response.alternative_sources)
         .map(|route| route.source_id.clone())
@@ -1263,6 +1263,7 @@ impl EvaluateResponse {
     fn apply_fedimint_details(
         &mut self,
         observations: &[ecashmesh_fedimint::FederationObservation],
+        quotes: &[serde_json::Value],
     ) {
         for route in
             std::iter::once(&mut self.recommended_source).chain(&mut self.alternative_sources)
@@ -1275,14 +1276,15 @@ impl EvaluateResponse {
             };
             let gateways = observation.gateways.value();
             route.gateway_count = gateways.map(Vec::len);
-            route.available_gateway_count = gateways
-                .map(|gateways| gateways.iter().filter(|gateway| gateway.available).count());
-            route.gateway_status = Some(match observation.health.value() {
-                Some(ConnectorHealth::Healthy) => "online",
-                Some(ConnectorHealth::Degraded) => "degraded",
-                Some(ConnectorHealth::Unavailable) => "unavailable",
-                None => "unknown",
+            let verified = quotes.iter().any(|quote| {
+                quote["connector"] == route.source_id
+                    && quote["value"]["native_evidence"]["gateway_identity_verified"] == true
             });
+            // Daemon health and cached announcements are not gateway probes.
+            // Only the selected gateway was probed; the total available count
+            // remains unknown even when one identity was verified.
+            route.available_gateway_count = None;
+            route.gateway_status = Some(if verified { "online" } else { "unknown" });
         }
         self.sync_legacy_route_fields();
     }
@@ -1446,15 +1448,13 @@ impl FeeResponse {
                 }
             }
             live::LiveFeeTerms::Fedimint {
+                total_fee_sats,
                 federation_fee_sats,
                 gateway_fee_sats,
                 destination_fee_sats,
                 ..
             } => {
-                let total = federation_fee_sats
-                    .checked_add(gateway_fee_sats.unwrap_or(Amount::ZERO))
-                    .and_then(|fee| fee.checked_add(destination_fee_sats.unwrap_or(Amount::ZERO)))
-                    .unwrap_or(*federation_fee_sats);
+                let total = *total_fee_sats;
                 Self {
                     amount: Some(total.sats()),
                     asset: "sats",

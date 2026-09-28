@@ -114,19 +114,21 @@ ECASHMESH_FEDIMINT_FEDERATIONS='[
     "federation_id":"<clientd federation id>",
     "clientd_url":"http://127.0.0.1:3333",
     "token":"<clientd bearer token>",
-    "quote_url":"http://127.0.0.1:3334/v1/fedimint/read-only-quote"
+    "quote_backend":"clientd_v040"
   }
 ]'
 ```
 
-`clientd_url` is used only for `/health`, `/v2/admin/info`, and
-`/v2/ln/list-gateways`. The adapter never calls `/v2/ln/pay`, never joins from
-an invite, and never persists a Fedimint wallet. `quote_url` is deliberately a
-separate host-controlled read-only bridge because clientd's current REST API
-does not provide a non-mutating outgoing fee quote. It must call the host's
-`fedimint_ln_client 0.13.0-alpha` APIs (`list_gateways`, `send_fee_quote`, and,
-when a balance is intentionally shared, `spendable_amount`) and must not call
-`pay_bolt11_invoice`.
+First build the [version-pinned read-only clientd extension](integrations/fedimint-clientd-0.4.0/README.md).
+Upstream clientd **0.4.0 / Fedimint 0.4.2** has no fee-quote endpoint and does
+not contain the newer `send_fee_quote` or `ClientHandle::fee_quote` APIs.
+The extension uses actual native note selection in a **non-committable**
+transaction and adds authenticated `/v2/ln/ecashmesh-quote`. This is explicitly
+an EcashMesh extension, not an assumed upstream endpoint. It supplies bound,
+short-lived msat fees, verified gateway identity and wallet-balance evidence.
+The adapter never calls `/v2/ln/pay`, joins a federation or persists its wallet.
+Keep clientd credentials server-side. Deployment requires rebuilding/restarting
+clientd; setting `quote_backend` alone cannot add the endpoint.
 
 The bridge receives:
 
@@ -134,12 +136,12 @@ The bridge receives:
 { "federation_id": "…", "invoice": "ln…", "amount_sats": 1000 }
 ```
 
-and returns a non-mutating observation containing required
-`federation_fee_sats` and optional `gateway_fee_sats`,
-`destination_fee_sats`, `spendable_balance_sats`, `payable`,
-`selected_gateway_id`, and `expires_at_unix_seconds`. A missing bridge or quote
-means no Fedimint candidate is invented. `ECASHMESH_FEDIMINT_MAX_AGE_SECONDS`
-defaults to 300 seconds.
+The versioned extension response is documented in the linked guide. Quotes
+are disabled by default; select `quote_backend: "clientd_v040"` only after
+installing the extension. The retired external backend, `quote_url`, and unused
+`invite` configuration are rejected. Remove those fields when migrating;
+EcashMesh does not join federations. A missing bridge or quote means no Fedimint
+candidate is invented. `ECASHMESH_FEDIMINT_MAX_AGE_SECONDS` defaults to 300 seconds.
 
 ### Show a multi-source comparison in the frontend
 
@@ -167,7 +169,7 @@ export ECASHMESH_FEDIMINT_FEDERATIONS='[
     "federation_id":"<bitcoin-principles-federation-id>",
     "clientd_url":"http://127.0.0.1:3333",
     "token":"<token-for-clientd-on-3333>",
-    "quote_url":"http://127.0.0.1:3334/v1/fedimint/read-only-quote"
+    "quote_backend":"clientd_v040"
   },
   {
     "id":"fedimint:second-federation",
@@ -175,7 +177,7 @@ export ECASHMESH_FEDIMINT_FEDERATIONS='[
     "federation_id":"<separately-joined-federation-id>",
     "clientd_url":"http://127.0.0.1:3335",
     "token":"<token-for-clientd-on-3335>",
-    "quote_url":"http://127.0.0.1:3336/v1/fedimint/read-only-quote"
+    "quote_backend":"clientd_v040"
   }
 ]'
 

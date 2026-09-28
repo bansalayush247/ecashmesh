@@ -50,6 +50,63 @@ fn strict_empty_registry_never_evaluates_seed_sources() {
 }
 
 #[test]
+fn native_bridge_competes_with_cashu_and_excludes_invalid_evidence() {
+    let cashu = MockMint::start("healthy");
+    for mode in [
+        "healthy",
+        "fed_insufficient",
+        "fed_stale",
+        "fed_unpatched",
+        "fed_unauthorized",
+        "fed_empty",
+    ] {
+        let fed = MockMint::start(mode);
+        let server = ApiServer::start_with_federations(
+            &json!([{"id":"cashu:source-a", "url":cashu.url}]),
+            &json!([]),
+            &json!([]),
+            &json!([{"id":"fedimint:native", "label":"Native", "federation_id":"11".repeat(32),
+                "clientd_url":fed.url, "quote_backend":"clientd_v040"}]),
+        );
+        let mut body = lightning_payment(100_000);
+        body.as_object_mut().unwrap().remove("candidate_connectors");
+        body["strict_source_registry"] = json!(true);
+        body["wallet_mint_urls"] = json!([cashu.url]);
+        body["federation_connector_ids"] = json!(["fedimint:native"]);
+        let (status, result) = server.post("/v1/routes/evaluate", &body);
+        assert_eq!(status, 200, "{result}");
+        let routes: Vec<_> = std::iter::once(&result["recommended_source"])
+            .chain(result["alternative_sources"].as_array().unwrap())
+            .collect();
+        let native = routes.iter().find(|route| route["protocol"] == "fedimint");
+        if mode == "healthy" {
+            let native = native.expect("native bridge participates in normal comparison");
+            assert_eq!(native["executable"], false);
+            assert_eq!(native["route_classification"], "quote_backed");
+            assert_eq!(native["gateway_status"], "online");
+            assert!(native["available_gateway_count"].is_null());
+            let evidence = result["live"]["quote_observations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|q| q["kind"] == "fedimint_lightning_fee_quote")
+                .unwrap();
+            assert_eq!(evidence["value"]["total_fee_sats"], 3);
+            assert_eq!(evidence["value"]["native_evidence"]["total_fee_msat"], 2002);
+        } else {
+            assert!(native.is_none(), "{result}");
+            assert!(
+                result["excluded_sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s["source_id"] == "fedimint:native")
+            );
+        }
+    }
+}
+
+#[test]
 fn missing_quote_bridge_survives_no_route_as_structured_diagnostics() {
     let fed = MockMint::start("healthy");
     let server = ApiServer::start_with_federations(
@@ -91,7 +148,7 @@ fn restored_alias_cannot_select_a_different_federation() {
         &json!([]),
         &json!([]),
         &json!([
-            {"id":"fedimint:alias", "label":"Local", "federation_id":"11".repeat(32), "clientd_url":fed.url, "quote_url":format!("{}quote",fed.url)}
+            {"id":"fedimint:alias", "label":"Local", "federation_id":"11".repeat(32), "clientd_url":fed.url, "quote_backend":"clientd_v040"}
         ]),
     );
     let mut body = lightning_payment(100_000);
@@ -131,7 +188,7 @@ fn automatic_five_cashu_three_fedimint_for_lightning_and_cashu_destination() {
         .collect();
     let federations: Vec<_> = feds.iter().enumerate().map(|(i, fed)| {
         let mut entry = json!({"id":format!("fedimint:source-{i}"),"label":format!("Fed {i}"),"federation_id":format!("{i:064x}"),"clientd_url":fed.url});
-        if i < 2 { entry["quote_url"] = json!(format!("{}quote",fed.url)); }
+        if i < 2 { entry["quote_backend"] = json!("clientd_v040"); }
         entry
     }).collect();
     let server = ApiServer::start_with_federations(

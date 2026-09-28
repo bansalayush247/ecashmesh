@@ -113,9 +113,14 @@ For Fedimint, configure `ECASHMESH_FEDIMINT_FEDERATIONS` in this API terminal
 [root README](../README.md#fedimint-sources-read-only). The browser needs only
 the matching federation ID, display label and connector ID. Tokens remain in
 the local API/clientd environment. Registry restore does not install clientd or
-transfer its wallet. Omit `quote_url` if no actual read-only bridge exists; that
-federation will show **No read-only Fedimint quote bridge is configured**. A
-clientd health response or registered gateway is not an outgoing fee quote.
+transfer its wallet. For the installed clientd 0.4.0 / Fedimint 0.4.2, build the
+[read-only extension](../integrations/fedimint-clientd-0.4.0/README.md) and select
+`quote_backend: "clientd_v040"`. Remove retired `quote_url` and `invite` fields
+from old configurations. It uses native note selection
+without committing any wallet changes. Without this explicitly enabled
+extension, the source cannot quote. A clientd health
+response or registered gateway is not an outgoing fee quote. An empty local
+wallet remains unfunded, even when its Nostr source is enabled.
 
 Terminal 2, from the repository root:
 
@@ -221,7 +226,8 @@ NIP-87 discovery separation, disabled/unauthorized filtering, empty strict
 selection, no-route diagnostics, 5+3 mixed native-settlement candidates,
 destination exclusion, and the mocked browser import/save/reload/restore flow.
 Public relay retention, actual extension prompts, NIP-46 remote wallets and
-native devices still require manual interoperability checks. External Fedimint
-quote bridges are not implemented by this change. Cashu-to-Cashu and all mainnet
+native devices still require manual interoperability checks. The version-pinned
+Fedimint extension is documented separately; mixed-route tests use mocked quote
+evidence, not funded live wallets. Cashu-to-Cashu and all mainnet
 payments remain evaluation-only. Existing opt-in regtest custody/execution is
 unchanged; it is the separate exception to the read-only wallet boundary.

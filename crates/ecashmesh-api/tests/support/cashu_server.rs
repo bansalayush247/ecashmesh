@@ -100,6 +100,7 @@ pub struct MockMint {
 }
 
 impl MockMint {
+    #[allow(clippy::too_many_lines)] // One HTTP fixture allowlist covers Cashu and clientd; unexpected writes panic.
     pub fn start(mode: &'static str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -140,15 +141,14 @@ impl MockMint {
                     })
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(0);
+                let mut request_body = vec![0_u8; content_length];
                 if content_length > 0 {
-                    let mut request_body = vec![0_u8; content_length];
                     stream.read_exact(&mut request_body).unwrap();
                 }
                 let mut body = match first {
-                    "GET /health HTTP/1.1" => "{}",
+                    "GET /health HTTP/1.1" | "POST /v2/ln/ecashmesh-quote HTTP/1.1" => "{}",
                     "GET /v2/admin/info HTTP/1.1" => r#"{"network":"bitcoin"}"#,
                     "POST /v2/ln/list-gateways HTTP/1.1" => r#"[{"gateway_id":"fixture-gateway","fees":{"base_msat":1000,"proportional_millionths":100}}]"#,
-                    "POST /quote HTTP/1.1" => r#"{"federation_fee_sats":2,"gateway_fee_sats":2,"payable":true,"expires_at_unix_seconds":5000000000}"#,
                     "GET /v1/info HTTP/1.1" => {
                         include_str!("../../../ecashmesh-cashu/tests/fixtures/info.json")
                     }
@@ -168,6 +168,31 @@ impl MockMint {
                     other => panic!("Unexpected protocol operation: {other}"),
                 }
                 .to_owned();
+                if first == "POST /v2/ln/ecashmesh-quote HTTP/1.1" {
+                    use sha2::{Digest, Sha256};
+                    let req: Value = serde_json::from_slice(&request_body).unwrap();
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let mut evidence = json!({
+                        "schema":"ecashmesh-fedimint-quote-v1", "clientd_version":"0.4.0", "fedimint_version":"0.4.2",
+                        "federation_id":req["federation_id"], "invoice_digest":format!("{:x}", Sha256::digest(req["invoice"].as_str().unwrap().as_bytes())),
+                        "payment_hash":"11".repeat(32), "amount_msat":req["amount_sats"].as_u64().unwrap()*1000,
+                        "destination_pubkey":format!("02{}", "22".repeat(32)),
+                        "network":"bitcoin", "federation_fee_msat":1001, "gateway_fee_msat":1001, "destination_fee_msat":0,
+                        "total_fee_msat":2002, "wallet_balance_msat":1_000_000_000, "funding_feasible":true,
+                        "payable":null, "gateway_liquidity":"unknown", "selected_gateway_id":format!("02{}", "11".repeat(32)),
+                        "gateway_identity_verified":true, "observed_at_unix_seconds":now, "expires_at_unix_seconds":now+30
+                    });
+                    if mode == "fed_insufficient" {
+                        evidence["wallet_balance_msat"] = json!(0);
+                    }
+                    if mode == "fed_stale" {
+                        evidence["expires_at_unix_seconds"] = json!(now);
+                    }
+                    body = evidence.to_string();
+                }
                 if first.contains("/directory ") {
                     body = json!([{"url":directory_url}]).to_string();
                 }
@@ -183,6 +208,16 @@ impl MockMint {
                     || (mode == "quote_unavailable" && first.starts_with("POST /v1/"))
                 {
                     503
+                } else if first == "POST /v2/ln/ecashmesh-quote HTTP/1.1" && mode == "fed_unpatched"
+                {
+                    404
+                } else if first == "POST /v2/ln/ecashmesh-quote HTTP/1.1"
+                    && mode == "fed_unauthorized"
+                {
+                    401
+                } else if first == "POST /v2/ln/ecashmesh-quote HTTP/1.1" && mode == "fed_empty" {
+                    body = json!({"error_code":"INSUFFICIENT_BALANCE"}).to_string();
+                    422
                 } else {
                     200
                 };

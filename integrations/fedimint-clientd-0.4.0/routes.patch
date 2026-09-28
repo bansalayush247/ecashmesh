@@ -1,0 +1,24 @@
+diff --git a/fedimint-clientd/src/router/handlers/ln/mod.rs b/fedimint-clientd/src/router/handlers/ln/mod.rs
+--- a/fedimint-clientd/src/router/handlers/ln/mod.rs
++++ b/fedimint-clientd/src/router/handlers/ln/mod.rs
+@@ -16,6 +16,7 @@ pub mod invoice;
+ pub mod invoice_external_pubkey_tweaked;
+ pub mod list_gateways;
+ pub mod pay;
++pub mod readonly_quote;
+ 
+ pub async fn get_invoice(req: &LnPayRequest) -> anyhow::Result<Bolt11Invoice> {
+     let info = req.payment_info.trim();
+diff --git a/fedimint-clientd/src/main.rs b/fedimint-clientd/src/main.rs
+--- a/fedimint-clientd/src/main.rs
++++ b/fedimint-clientd/src/main.rs
+@@ -273,7 +273,8 @@
+             post(ln::claim_external_receive_tweaked::handle_rest),
+         )
+         .route("/pay", post(ln::pay::handle_rest))
+-        .route("/list-gateways", post(ln::list_gateways::handle_rest));
++        .route("/list-gateways", post(ln::list_gateways::handle_rest))
++        .route("/ecashmesh-quote", post(ln::readonly_quote::handle_rest));
+ 
+     let onchain_router = Router::new()
+         .route(

@@ -80,6 +80,7 @@ pub(super) enum LiveFeeTerms {
     /// Explicit Fedimint fee components from a non-mutating host quote.
     Fedimint {
         source_connector: ConnectorId,
+        total_fee_sats: Amount,
         federation_fee_sats: Amount,
         gateway_fee_sats: Option<Amount>,
         destination_fee_sats: Option<Amount>,
@@ -288,13 +289,6 @@ pub(super) async fn evaluate(
                 }
             };
             quote_observations.push(fedimint_quote_json(observation, Some(&quote), None));
-            if quote.payable == Some(false) {
-                no_route_details.push(format!(
-                    "{}: Fedimint quote reports invoice unavailable",
-                    source.id
-                ));
-                continue;
-            }
             let mut source = source;
             let total = quote.total_fee();
             source.fee = Evidence::reported(
@@ -317,6 +311,7 @@ pub(super) async fn evaluate(
             }
             live_fee_terms.push(LiveFeeTerms::Fedimint {
                 source_connector: source.id.clone(),
+                total_fee_sats: total,
                 federation_fee_sats: quote.federation_fee_sats,
                 gateway_fee_sats: quote.gateway_fee_sats,
                 destination_fee_sats: quote.destination_fee_sats,
@@ -659,6 +654,8 @@ fn fedimint_quote_json(
             "gateway_fee_sats": quote.gateway_fee_sats.map(Amount::sats),
             "destination_fee_sats": quote.destination_fee_sats.map(Amount::sats),
             "fee_kind": "estimate",
+            "total_fee_sats": quote.total_fee().sats(),
+            "native_evidence": quote.native_evidence,
             "gateway_id": quote.selected_gateway_id,
             "payable": quote.payable,
             "spendable_balance_sats": quote.spendable_balance_sats.value().map(|amount| amount.sats()),

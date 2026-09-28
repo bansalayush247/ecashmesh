@@ -2,11 +2,12 @@
 //!
 //! The adapter deliberately has no payment method.  It reads a configured
 //! `fedimint-clientd` instance for health, federation identity, gateway cache,
-//! and (when explicitly enabled) wallet balance.  `fedimint-clientd` does not
-//! expose a non-mutating outgoing fee quote endpoint, so fee evaluation uses a
-//! separately configured read-only bridge.  That bridge is expected to call
-//! `LightningClientModule::{list_gateways,send_fee_quote,spendable_amount}` on
-//! the host-owned client and must never call `pay_bolt11_invoice`.
+//! and wallet balance. `fedimint-clientd` does not
+//! expose a non-mutating outgoing fee quote endpoint upstream. The opt-in
+//! `EcashMesh` extension performs native note selection in a non-committable
+//! database transaction.
+
+mod bridge;
 
 use std::time::Duration;
 
@@ -19,11 +20,23 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// Version of the Fedimint Rust client API documented by this adapter.
-pub const FEDIMINT_CLIENT_API_VERSION: &str = "fedimint_ln_client 0.13.0-alpha";
+/// Audited version used by the optional clientd extension, not an inferred
+/// version of every configured daemon.
+pub const FEDIMINT_CLIENT_API_VERSION: &str =
+    "fedimint 0.4.2 / clientd 0.4.0 (EcashMesh extension)";
+
+/// Backend selection is explicit: upstream clientd has no quote endpoint.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuoteBackend {
+    #[default]
+    Disabled,
+    ClientdV040,
+}
 
 /// One independently configured Fedimint federation source.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FederationConfig {
     /// Stable `EcashMesh` identity. Must start with `fedimint:`.
     pub id: String,
@@ -36,14 +49,9 @@ pub struct FederationConfig {
     /// Optional clientd bearer token. Never emitted in observations.
     #[serde(default)]
     pub token: Option<String>,
-    /// URL of a host-controlled, read-only quote bridge. It is required to
-    /// produce a quote-backed route and is never inferred from `clientd_url`.
+    /// Quote access is disabled until the operator selects an installed bridge.
     #[serde(default)]
-    pub quote_url: Option<String>,
-    /// Optional invite retained only as configuration provenance. `EcashMesh`
-    /// does not join federations or persist client state from it.
-    #[serde(default)]
-    pub invite: Option<String>,
+    pub quote_backend: QuoteBackend,
 }
 
 impl FederationConfig {
@@ -61,9 +69,6 @@ impl FederationConfig {
             return Err("Fedimint label and federation_id must not be empty".into());
         }
         validate_url(&self.clientd_url, "clientd_url")?;
-        if let Some(url) = &self.quote_url {
-            validate_url(url, "quote_url")?;
-        }
         Ok(())
     }
 }
@@ -102,12 +107,16 @@ pub struct GatewayObservation {
     pub routing_fee_base_msat: Option<u64>,
     pub routing_fee_ppm: Option<u64>,
     pub expires_at_unix_seconds: Option<u64>,
-    pub available: bool,
+    /// Explicit gateway availability, if reported; cache presence is unknown.
+    pub available: Option<bool>,
 }
 
 /// A non-mutating payment quote supplied by the configured bridge.
 #[derive(Clone, Debug)]
 pub struct FedimintQuote {
+    total_fee_sats: Amount,
+    /// Exact, versioned bridge evidence required for every accepted quote.
+    pub native_evidence: Value,
     pub federation_fee_sats: Amount,
     pub gateway_fee_sats: Option<Amount>,
     pub destination_fee_sats: Option<Amount>,
@@ -121,11 +130,7 @@ pub struct FedimintQuote {
 impl FedimintQuote {
     #[must_use]
     pub fn total_fee(&self) -> Amount {
-        self.gateway_fee_sats
-            .unwrap_or(Amount::ZERO)
-            .checked_add(self.destination_fee_sats.unwrap_or(Amount::ZERO))
-            .and_then(|fee| fee.checked_add(self.federation_fee_sats))
-            .unwrap_or(self.federation_fee_sats)
+        self.total_fee_sats
     }
 }
 
@@ -153,6 +158,7 @@ impl FedimintService {
         }
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| error.to_string())?;
         Ok(Self {
@@ -167,20 +173,15 @@ impl FedimintService {
         &self.configs
     }
 
-    pub async fn collect(&self, amount: Amount, now: u64) -> Vec<FederationObservation> {
+    pub async fn collect(&self, now: u64) -> Vec<FederationObservation> {
         let mut observations = Vec::with_capacity(self.configs.len());
         for config in &self.configs {
-            observations.push(self.observe(config.clone(), amount, now).await);
+            observations.push(self.observe(config.clone(), now).await);
         }
         observations
     }
 
-    async fn observe(
-        &self,
-        config: FederationConfig,
-        _amount: Amount,
-        now: u64,
-    ) -> FederationObservation {
+    async fn observe(&self, config: FederationConfig, now: u64) -> FederationObservation {
         let timestamp = EvidenceTimestamp::from_unix_seconds(now);
         let mut issues = Vec::new();
         let health_url = join_url(&config.clientd_url, "/health");
@@ -201,7 +202,7 @@ impl FedimintService {
                 )
             }
             Err(error) => {
-                issues.push(format!("clientd health failed: {error}"));
+                issues.push(format!("clientd health failed: {}", error.without_url()));
                 Evidence::reported(
                     ConnectorHealth::Unavailable,
                     EvidenceSource::Observer,
@@ -273,8 +274,8 @@ impl FedimintService {
     ///
     /// # Errors
     ///
-    /// Returns an error when no bridge is configured, it fails, or it omits
-    /// the required federation fee observation.
+    /// Returns an error when no bridge is configured, it fails, or its versioned
+    /// evidence fails invoice binding, freshness, funding or fee validation.
     pub async fn quote(
         &self,
         observation: &FederationObservation,
@@ -282,16 +283,18 @@ impl FedimintService {
         amount: Amount,
         now: u64,
     ) -> Result<FedimintQuote, String> {
-        let url = observation
-            .config
-            .quote_url
-            .as_ref()
-            .ok_or("No read-only Fedimint quote bridge is configured")?;
+        let config = &observation.config;
+        let url = match config.quote_backend {
+            QuoteBackend::Disabled => {
+                return Err("No read-only Fedimint quote bridge is configured".into());
+            }
+            QuoteBackend::ClientdV040 => join_url(&config.clientd_url, "/v2/ln/ecashmesh-quote"),
+        };
         let request = json!({"federation_id": observation.config.federation_id, "invoice": invoice, "amount_sats": amount.sats()});
         let value = self
-            .post_url(url, observation.config.token.as_deref(), request)
+            .post_url(&url, observation.config.token.as_deref(), request)
             .await?;
-        parse_quote(&value, EvidenceTimestamp::from_unix_seconds(now))
+        bridge::parse(&value, &config.federation_id, invoice, amount, now)
     }
 
     async fn get_clientd(&self, config: &FederationConfig, path: &str) -> Result<Value, String> {
@@ -302,12 +305,12 @@ impl FedimintService {
         request
             .send()
             .await
-            .map_err(|error| error.to_string())?
+            .map_err(|error| error.without_url().to_string())?
             .error_for_status()
-            .map_err(|error| error.to_string())?
+            .map_err(|error| error.without_url().to_string())?
             .json()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.without_url().to_string())
     }
     async fn post_clientd(
         &self,
@@ -327,15 +330,37 @@ impl FedimintService {
         if let Some(token) = token {
             request = request.bearer_auth(token);
         }
-        request
+        let response = request
             .send()
             .await
-            .map_err(|error| error.to_string())?
-            .error_for_status()
-            .map_err(|error| error.to_string())?
+            .map_err(|error| error.without_url().to_string())?;
+        let status = response.status();
+        if !status.is_success() {
+            if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+                let value: Value = response.json().await.unwrap_or(Value::Null);
+                return Err(match value.get("error_code").and_then(Value::as_str) {
+                    Some("INSUFFICIENT_BALANCE") => {
+                        "Insufficient Fedimint wallet balance including note fees"
+                    }
+                    Some("INVALID_INVOICE") => {
+                        "Fedimint rejected an expired, invalid, amountless or wrong-network invoice"
+                    }
+                    Some("UNSUPPORTED_PAYMENT") => {
+                        "Fedimint bridge does not support this payment or module"
+                    }
+                    Some("GATEWAY_UNAVAILABLE") => "No usable verified Fedimint gateway",
+                    _ => "Read-only Fedimint quote unavailable",
+                }
+                .into());
+            }
+            return Err(format!(
+                "Read-only Fedimint endpoint returned HTTP {status}"
+            ));
+        }
+        response
             .json()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.without_url().to_string())
     }
 }
 
@@ -366,7 +391,7 @@ fn parse_gateways(value: &Value) -> Vec<GatewayObservation> {
                 // clientd's outer `ttl` is a duration, not a Unix timestamp,
                 // and must not be presented as an absolute expiry.
                 expires_at_unix_seconds: number_at(Some(info), &["expires_at", "expiresAt"]),
-                available: !info.get("available").is_some_and(|value| value == false),
+                available: info.get("available").and_then(Value::as_bool),
             }
         })
         .collect()
@@ -420,49 +445,13 @@ fn parse_wallet_info(
         });
     (balance, network)
 }
-fn parse_quote(value: &Value, timestamp: EvidenceTimestamp) -> Result<FedimintQuote, String> {
-    let federation_fee_sats = value
-        .get("federation_fee_sats")
-        .and_then(Value::as_u64)
-        .ok_or("quote bridge omitted federation_fee_sats")?;
-    let balance = value
-        .get("spendable_balance_sats")
-        .and_then(Value::as_u64)
-        .map_or(Evidence::Unknown, |amount| {
-            Evidence::reported(
-                Amount::from_sats(amount),
-                EvidenceSource::Connector,
-                timestamp,
-                ConfidenceLevel::Medium,
-            )
-        });
-    Ok(FedimintQuote {
-        federation_fee_sats: Amount::from_sats(federation_fee_sats),
-        gateway_fee_sats: value
-            .get("gateway_fee_sats")
-            .and_then(Value::as_u64)
-            .map(Amount::from_sats),
-        destination_fee_sats: value
-            .get("destination_fee_sats")
-            .and_then(Value::as_u64)
-            .map(Amount::from_sats),
-        payable: value.get("payable").and_then(Value::as_bool),
-        spendable_balance_sats: balance,
-        selected_gateway_id: value
-            .get("selected_gateway_id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        observed_at: timestamp,
-        expires_at_unix_seconds: value.get("expires_at_unix_seconds").and_then(Value::as_u64),
-    })
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_gateway_fees_and_a_read_only_quote_without_payment_authority() {
+    fn normalizes_gateway_fees_without_inventing_availability() {
         let gateways = parse_gateways(&json!([{
             "federation_id": "fedid",
             "info": {
@@ -476,21 +465,7 @@ mod tests {
         assert_eq!(gateways.len(), 1);
         assert_eq!(gateways[0].routing_fee_base_msat, Some(1_000));
         assert_eq!(gateways[0].routing_fee_ppm, Some(500));
-
-        let quote = parse_quote(
-            &json!({
-                "federation_fee_sats": 2,
-                "gateway_fee_sats": 3,
-                "destination_fee_sats": 1,
-                "payable": true,
-                "selected_gateway_id": "gateway-a"
-            }),
-            EvidenceTimestamp::from_unix_seconds(5_000_000),
-        )
-        .expect("a bridge quote with a federation fee is valid");
-        assert_eq!(quote.total_fee().sats(), 6);
-        assert!(quote.spendable_balance_sats.is_unknown());
-        assert_eq!(quote.payable, Some(true));
+        assert_eq!(gateways[0].available, None);
     }
 
     #[test]
@@ -501,9 +476,24 @@ mod tests {
             federation_id: "fedid".into(),
             clientd_url: "http://127.0.0.1:3333".into(),
             token: None,
-            quote_url: None,
-            invite: None,
+            quote_backend: QuoteBackend::Disabled,
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_retired_configuration_and_requires_explicit_bridge_selection() {
+        let value = json!({"id":"fedimint:test", "label":"Test", "federation_id":"11".repeat(32), "clientd_url":"http://127.0.0.1:3333"});
+        let config: FederationConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(config.quote_backend, QuoteBackend::Disabled);
+        for (key, retired) in [
+            ("quote_url", json!("http://127.0.0.1:3334/quote")),
+            ("quote_backend", json!("external")),
+            ("invite", json!("obsolete")),
+        ] {
+            let mut invalid = value.clone();
+            invalid[key] = retired;
+            assert!(serde_json::from_value::<FederationConfig>(invalid).is_err());
+        }
     }
 }
