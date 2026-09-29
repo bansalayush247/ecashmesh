@@ -1,11 +1,8 @@
 //! Fedimint protocol adapter for read-only `EcashMesh` source evaluation.
 //!
-//! The adapter deliberately has no payment method.  It reads a configured
-//! `fedimint-clientd` instance for health, federation identity, gateway cache,
-//! and wallet balance. `fedimint-clientd` does not
-//! expose a non-mutating outgoing fee quote endpoint upstream. The opt-in
-//! `EcashMesh` extension performs native note selection in a non-committable
-//! database transaction.
+//! The adapter deliberately has no payment method. It reads health, federation
+//! identity, gateway cache, wallet balance, and non-mutating fee quotes from
+//! the local Fedimint v0.12.1 bridge.
 
 mod bridge;
 
@@ -23,18 +20,19 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// Audited version used by the optional clientd extension, not an inferred
-/// version of every configured daemon.
+/// Audited version used by the local bridge.
 pub const FEDIMINT_CLIENT_API_VERSION: &str =
-    "fedimint 0.4.2 / clientd 0.4.0 (EcashMesh extension)";
+    "fedimint 0.12.1 / EcashMesh local multi-federation bridge";
 
-/// Backend selection is explicit: upstream clientd has no quote endpoint.
+/// Backend selection is explicit: a quote is unavailable until the local
+/// bridge is configured.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum QuoteBackend {
     #[default]
     Disabled,
-    ClientdV040,
+    /// Local, authenticated, loopback-only bridge backed by Fedimint 0.12.1.
+    LocalV0121Bridge,
 }
 
 /// One independently configured Fedimint federation source.
@@ -45,11 +43,11 @@ pub struct FederationConfig {
     pub id: String,
     /// Display-only operator label.
     pub label: String,
-    /// Federation ID already joined in the configured clientd instance.
+    /// Federation ID already joined in the local bridge.
     pub federation_id: String,
-    /// Base URL for a locally controlled `fedimint-clientd` REST instance.
-    pub clientd_url: String,
-    /// Optional clientd bearer token. Never emitted in observations.
+    /// Base URL for the local Fedimint bridge.
+    pub bridge_url: String,
+    /// Optional bridge bearer token. Never emitted in observations.
     #[serde(default)]
     pub token: Option<String>,
     /// Quote access is disabled until the operator selects an installed bridge.
@@ -71,7 +69,7 @@ impl FederationConfig {
         if self.label.trim().is_empty() || self.federation_id.trim().is_empty() {
             return Err("Fedimint label and federation_id must not be empty".into());
         }
-        validate_url(&self.clientd_url, "clientd_url")?;
+        validate_url(&self.bridge_url, "bridge_url")?;
         Ok(())
     }
 }
@@ -185,7 +183,7 @@ impl FedimintService {
             .clone()
     }
 
-    /// Enables recovery of joined sources from an operator-selected local daemon.
+    /// Enables recovery of joined sources from an operator-selected local bridge.
     /// No joining or wallet writes occur here.
     ///
     /// # Errors
@@ -197,7 +195,7 @@ impl FedimintService {
                 .into_iter()
                 .find(|c| c.id == id)
                 .ok_or("Setup connector is not configured")?;
-            let url = Url::parse(&host.clientd_url).map_err(|_| "Invalid setup clientd URL")?;
+            let url = Url::parse(&host.bridge_url).map_err(|_| "Invalid setup bridge URL")?;
             let loopback = url.host_str().is_some_and(|h| {
                 h == "localhost"
                     || h.trim_matches(['[', ']'])
@@ -207,9 +205,11 @@ impl FedimintService {
             if !loopback
                 || url.query().is_some()
                 || url.fragment().is_some()
-                || host.quote_backend != QuoteBackend::ClientdV040
+                || host.quote_backend != QuoteBackend::LocalV0121Bridge
             {
-                return Err("Federation setup requires a loopback clientd_v040 connector".into());
+                return Err(
+                    "Federation setup requires a loopback local_v0121_bridge connector".into(),
+                );
             }
             self.catalog_host = Some(host);
         }
@@ -227,7 +227,7 @@ impl FedimintService {
     pub fn is_joined_on_setup_host(&self, config: &FederationConfig) -> bool {
         self.catalog_host
             .as_ref()
-            .is_some_and(|host| host.clientd_url == config.clientd_url)
+            .is_some_and(|host| host.bridge_url == config.bridge_url)
             && self
                 .joined_ids
                 .read()
@@ -236,10 +236,10 @@ impl FedimintService {
                 .any(|id| id == &config.federation_id)
     }
 
-    /// Rebuilds connector references from clientd's persisted joined wallets.
+    /// Rebuilds connector references from the bridge's persisted joined clients.
     ///
     /// # Errors
-    /// Returns a sanitized error if the daemon cannot supply its joined catalog.
+    /// Returns a sanitized error if the bridge cannot supply its joined catalog.
     ///
     /// # Panics
     /// Panics if an in-process catalog lock was poisoned by another panic.
@@ -248,18 +248,22 @@ impl FedimintService {
             return Ok(());
         };
         let value = self
-            .get_clientd(host, "/v2/admin/info")
+            .get_bridge(host, "/v2/admin/info")
             .await
-            .map_err(|_| "Cannot read local clientd's joined federations")?;
+            .map_err(|_| "Cannot read local bridge's joined federations")?;
         let entries = value
             .as_object()
-            .ok_or("Invalid clientd federation catalog")?;
+            .ok_or("Invalid bridge federation catalog")?;
         *self.joined_ids.write().expect("joined IDs lock") = entries
             .keys()
             .filter(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
             .map(|id| id.to_lowercase())
             .collect();
         let mut configs = self.configs.write().expect("federation catalog lock");
+        // The catalog host is a transport configuration, never a federation.
+        // Once the bridge responded, do not expose its sentinel connector as
+        // a source alongside the real joined federations.
+        configs.retain(|config| config.id != host.id);
         for (id, info) in entries {
             if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
                 continue;
@@ -302,7 +306,7 @@ impl FedimintService {
     async fn observe(&self, config: FederationConfig, now: u64) -> FederationObservation {
         let timestamp = EvidenceTimestamp::from_unix_seconds(now);
         let mut issues = Vec::new();
-        let health_url = join_url(&config.clientd_url, "/health");
+        let health_url = join_url(&config.bridge_url, "/health");
         let health = match self.client.get(health_url).send().await {
             Ok(response) if response.status().is_success() => Evidence::reported(
                 ConnectorHealth::Healthy,
@@ -311,7 +315,7 @@ impl FedimintService {
                 ConfidenceLevel::Low,
             ),
             Ok(response) => {
-                issues.push(format!("clientd health returned {}", response.status()));
+                issues.push(format!("bridge health returned {}", response.status()));
                 Evidence::reported(
                     ConnectorHealth::Unavailable,
                     EvidenceSource::Observer,
@@ -320,7 +324,7 @@ impl FedimintService {
                 )
             }
             Err(error) => {
-                issues.push(format!("clientd health failed: {}", error.without_url()));
+                issues.push(format!("bridge health failed: {}", error.without_url()));
                 Evidence::reported(
                     ConnectorHealth::Unavailable,
                     EvidenceSource::Observer,
@@ -330,7 +334,7 @@ impl FedimintService {
             }
         };
         let gateway_response = self
-            .post_clientd(
+            .post_bridge(
                 &config,
                 "/v2/ln/list-gateways",
                 json!({"federationId": config.federation_id}),
@@ -348,7 +352,7 @@ impl FedimintService {
                 Evidence::Unknown
             }
         };
-        let info = self.get_clientd(&config, "/v2/admin/info").await;
+        let info = self.get_bridge(&config, "/v2/admin/info").await;
         let (balance_sats, network) = match info {
             Ok(value) => parse_wallet_info(&value, &config.federation_id, timestamp),
             Err(error) => {
@@ -388,7 +392,7 @@ impl FedimintService {
     }
 
     /// Requests a quote from the explicit read-only bridge; this method has no
-    /// fallback to `/v2/ln/pay` and cannot instruct clientd to spend.
+    /// fallback to `/v2/ln/pay` and cannot instruct the bridge to spend.
     ///
     /// # Errors
     ///
@@ -406,7 +410,9 @@ impl FedimintService {
             QuoteBackend::Disabled => {
                 return Err("No read-only Fedimint quote bridge is configured".into());
             }
-            QuoteBackend::ClientdV040 => join_url(&config.clientd_url, "/v2/ln/ecashmesh-quote"),
+            QuoteBackend::LocalV0121Bridge => {
+                join_url(&config.bridge_url, "/v2/ln/ecashmesh-quote")
+            }
         };
         let request = json!({"federation_id": observation.config.federation_id, "invoice": invoice, "amount_sats": amount.sats()});
         let value = self
@@ -415,8 +421,8 @@ impl FedimintService {
         bridge::parse(&value, &config.federation_id, invoice, amount, now)
     }
 
-    async fn get_clientd(&self, config: &FederationConfig, path: &str) -> Result<Value, String> {
-        let mut request = self.client.get(join_url(&config.clientd_url, path));
+    async fn get_bridge(&self, config: &FederationConfig, path: &str) -> Result<Value, String> {
+        let mut request = self.client.get(join_url(&config.bridge_url, path));
         if let Some(token) = &config.token {
             request = request.bearer_auth(token);
         }
@@ -430,14 +436,14 @@ impl FedimintService {
             .await
             .map_err(|error| error.without_url().to_string())
     }
-    async fn post_clientd(
+    async fn post_bridge(
         &self,
         config: &FederationConfig,
         path: &str,
         body: Value,
     ) -> Result<Value, String> {
         self.post_url(
-            &join_url(&config.clientd_url, path),
+            &join_url(&config.bridge_url, path),
             config.token.as_deref(),
             body,
         )
@@ -492,7 +498,7 @@ fn parse_gateways(value: &Value) -> Vec<GatewayObservation> {
         .into_iter()
         .flatten()
         .map(|gateway| {
-            // `fedimint-clientd` v0.4 wraps the actual announcement in `info`
+            // Some bridge-compatible responses wrap the announcement in `info`.
             // and adds federation-specific fields at the outer level. Accept a
             // flat announcement too for compatible bridge implementations.
             let info = gateway.get("info").unwrap_or(gateway);
@@ -506,7 +512,7 @@ fn parse_gateways(value: &Value) -> Vec<GatewayObservation> {
                     fees,
                     &["proportional_millionths", "ppm", "proportionalMillionths"],
                 ),
-                // clientd's outer `ttl` is a duration, not a Unix timestamp,
+                // The outer `ttl` is a duration, not a Unix timestamp,
                 // and must not be presented as an absolute expiry.
                 expires_at_unix_seconds: number_at(Some(info), &["expires_at", "expiresAt"]),
                 available: info.get("available").and_then(Value::as_bool),
@@ -569,7 +575,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_gateway_fees_without_inventing_availability() {
+    fn zero_gateway_response_stays_empty() {
+        assert!(parse_gateways(&json!([])).is_empty());
+        assert!(parse_gateways(&json!(null)).is_empty());
+    }
+
+    #[test]
+    fn one_gateway_response_parses_without_inventing_availability() {
         let gateways = parse_gateways(&json!([{
             "federation_id": "fedid",
             "info": {
@@ -581,6 +593,8 @@ mod tests {
             "ttl": {"secs": 516, "nanos": 0}
         }]));
         assert_eq!(gateways.len(), 1);
+        assert_eq!(gateways[0].id.as_deref(), Some("gateway-a"));
+        assert_eq!(gateways[0].api.as_deref(), Some("https://gateway.example"));
         assert_eq!(gateways[0].routing_fee_base_msat, Some(1_000));
         assert_eq!(gateways[0].routing_fee_ppm, Some(500));
         assert_eq!(gateways[0].available, None);
@@ -592,7 +606,7 @@ mod tests {
             id: "cashu:not-a-federation".into(),
             label: "Wrong protocol".into(),
             federation_id: "fedid".into(),
-            clientd_url: "http://127.0.0.1:3333".into(),
+            bridge_url: "http://127.0.0.1:3333".into(),
             token: None,
             quote_backend: QuoteBackend::Disabled,
         };
@@ -601,7 +615,7 @@ mod tests {
 
     #[test]
     fn rejects_retired_configuration_and_requires_explicit_bridge_selection() {
-        let value = json!({"id":"fedimint:test", "label":"Test", "federation_id":"11".repeat(32), "clientd_url":"http://127.0.0.1:3333"});
+        let value = json!({"id":"fedimint:test", "label":"Test", "federation_id":"11".repeat(32), "bridge_url":"http://127.0.0.1:3333"});
         let config: FederationConfig = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(config.quote_backend, QuoteBackend::Disabled);
         for (key, retired) in [

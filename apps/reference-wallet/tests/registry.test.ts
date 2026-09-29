@@ -20,6 +20,7 @@ import {
   manualCashuProfile,
   addFederationProfile,
   mergeProfiles,
+  pendingFederationProfile,
   type PaymentSourceProfile,
 } from "../src/nostr/sourceRegistry";
 import { parseNip60WalletMetadata } from "../src/nostr/nip60";
@@ -88,12 +89,12 @@ test("signed NIP-78 registry is encrypted to connected identity and restores wit
   assert.equal(restored?.[0]?.evidenceFreshness, "unknown");
 });
 
-test("projection never sends proofs, private keys, clientd tokens or federation credentials to Nostr or API", async () => {
+test("projection never sends proofs, private keys, bridge tokens or federation credentials to Nostr or API", async () => {
   const secrets = [
     "proof-secret-test",
     "proof-C-test",
     "nsec1test",
-    "clientd-token-test",
+    "bridge-token-test",
     "federation-private-test",
     "wallet-private-test",
   ];
@@ -282,6 +283,10 @@ test("automatic five Cashu plus three Fedimint forwards all eligible identities 
           label: `Fed ${i}`,
         })[0]!,
     ),
+    pendingFederationProfile({
+      federationId: "ff".repeat(32),
+      label: "Pending federation",
+    }),
   ];
   for (const type of ["lightning", "cashu"] as const) {
     const wire = paymentToWire(
@@ -296,6 +301,12 @@ test("automatic five Cashu plus three Fedimint forwards all eligible identities 
     );
     assert.equal(wire.wallet_mint_urls?.length, 5);
     assert.equal(wire.federation_connector_ids?.length, 3);
+    assert.equal(
+      Object.keys(wire.federation_identities ?? {}).some((id) =>
+        id.startsWith("fedimint:pending:"),
+      ),
+      false,
+    );
     assert.ok(!wire.wallet_mint_urls?.includes("https://destination.example"));
     assert.equal(wire.strict_source_registry, true);
   }

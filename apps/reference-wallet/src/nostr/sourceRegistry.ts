@@ -34,6 +34,10 @@ export type PaymentSourceProfile = {
   observation?: Record<string, unknown>;
 };
 
+/** A placeholder is a user-selected federation, not a connector the API may use. */
+export const isPendingFederationProfile = (profile: PaymentSourceProfile) =>
+  profile.protocol === "fedimint" && profile.id.startsWith("fedimint:pending:");
+
 export function canonicalMintUrl(raw: string): string | null {
   if (raw.length > 2048 || /[\\\x00-\x1f]/.test(raw)) return null;
   try {
@@ -130,6 +134,40 @@ export function addFederationProfile(
   return mergeProfiles(profiles, [profile]);
 }
 
+/**
+ * Adds a federation selected from discovery before it has been joined locally.
+ * The temporary ID is intentionally excluded from payment requests. It is
+ * replaced with the API-owned connector ID after the local bridge confirms it.
+ */
+export function pendingFederationProfile(input: {
+  label?: string;
+  federationId: string;
+  origin?: SourceOrigin;
+}): PaymentSourceProfile {
+  const federationId = input.federationId.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/i.test(federationId)) {
+    throw new Error("Federation ID must be a 64-character hexadecimal ID.");
+  }
+  const label =
+    input.label?.trim() ||
+    `Federation ${federationId.slice(0, 7)}…${federationId.slice(-5)}`;
+  return {
+    id: `fedimint:pending:${federationId}`,
+    protocol: "fedimint",
+    label,
+    origin: input.origin ?? "explicit_user_config",
+    endpoint: federationId,
+    authorization: "user_authorized",
+    // The user has enabled this source preference, but its pending identity is
+    // deliberately excluded from payment requests until the bridge confirms the
+    // matching connector.
+    enabled: true,
+    liveStatus: "unknown",
+    evidenceFreshness: "unknown",
+    routeStatus: "discovered",
+  };
+}
+
 export function mergeProfiles(
   current: readonly PaymentSourceProfile[],
   incoming: readonly PaymentSourceProfile[],
@@ -190,7 +228,8 @@ export function enabledFederationConnectorIds(
       (profile) =>
         profile.enabled &&
         profile.authorization === "user_authorized" &&
-        profile.protocol === "fedimint",
+        profile.protocol === "fedimint" &&
+        !isPendingFederationProfile(profile),
     )
     .map((profile) => profile.id);
 }

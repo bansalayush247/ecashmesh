@@ -6,6 +6,7 @@ import {
   cashuProfilesFromNip60,
   enabledCashuMintUrls,
   enabledFederationConnectorIds,
+  pendingFederationProfile,
   setProfileEnabled,
 } from "../src/nostr/sourceRegistry";
 
@@ -54,7 +55,7 @@ test("NIP-60 malformed or proof-shaped payloads are rejected", () => {
   );
 });
 
-test("explicit Fedimint profiles contain no clientd credential and can be disabled", () => {
+test("explicit Fedimint profiles contain no bridge credential and can be disabled", () => {
   const federation = addFederationProfile([], {
     connectorId: "fedimint:bitcoin-principles",
     label: "Bitcoin Principles",
@@ -71,6 +72,19 @@ test("explicit Fedimint profiles contain no clientd credential and can be disabl
     ).includes('enabled":false'),
     true,
   );
+});
+
+test("an added federation cannot enter automatic comparison before local connection", () => {
+  const id = "1bcb64e68ef0b3de3ad96cb98b43a2fd972a9ffa0fb6f0e26aaee69d1d463b97";
+  const profile = pendingFederationProfile({
+    federationId: id,
+  });
+  assert.equal(profile.endpoint, id);
+  assert.equal(profile.protocol, "fedimint");
+  assert.equal(profile.enabled, true);
+  assert.match(profile.label, /^Federation 1bcb64e…63b97$/);
+  assert.deepEqual(enabledFederationConnectorIds([profile]), []);
+  assert.equal(JSON.stringify(profile).includes("invite"), false);
 });
 
 test("enabled Cashu source URLs are the only Cashu data forwarded for evaluation", () => {

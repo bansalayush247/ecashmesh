@@ -51,7 +51,7 @@ impl SetupService {
         if service.catalog_host().is_none() {
             return Err(fail(
                 "SETUP_DISABLED",
-                "The API operator must set ECASHMESH_FEDIMINT_SETUP_CONNECTOR and restart the API.",
+                "The API operator must set ECASHMESH_FEDIMINT_BRIDGE_URL and ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE, then restart the API.",
             ));
         }
         let origin = headers.get("origin").and_then(|v| v.to_str().ok());
@@ -79,20 +79,20 @@ impl SetupService {
             .ok_or_else(|| fail("SETUP_DISABLED", "Local setup is disabled"))?;
         let mut req = self
             .client
-            .post(format!("{}{path}", host.clientd_url.trim_end_matches('/')))
+            .post(format!("{}{path}", host.bridge_url.trim_end_matches('/')))
             .json(&body);
         if let Some(token) = &host.token {
             req = req.bearer_auth(token);
         }
-        let response = req.send().await.map_err(|_| fail("SETUP_UNCERTAIN", "Clientd did not respond. Refresh connection status before retrying; a join may have completed."))?;
+        let response = req.send().await.map_err(|_| fail("SETUP_UNCERTAIN", "The local bridge did not respond. Refresh connection status before retrying; a join may have completed."))?;
         if !response.status().is_success() {
             let message = match response.status().as_u16() {
-                404 => "Install the clientd connection extension and restart clientd.",
+                404 => "The local bridge does not expose this setup endpoint.",
                 401 | 403 => {
-                    "Clientd rejected the backend credential. Check the API configuration."
+                    "The local bridge rejected the backend credential. Check the API configuration."
                 }
                 _ => {
-                    "Clientd rejected setup. Verify the invite matches this federation and uses public secure guardian endpoints."
+                    "The local bridge rejected setup. Verify the invite matches this federation and uses public secure guardian endpoints."
                 }
             };
             return Err(fail("SETUP_REJECTED", message));
@@ -100,7 +100,7 @@ impl SetupService {
         response
             .json()
             .await
-            .map_err(|_| fail("SETUP_REJECTED", "Invalid clientd setup response"))
+            .map_err(|_| fail("SETUP_REJECTED", "Invalid bridge setup response"))
     }
 }
 
@@ -113,6 +113,21 @@ fn fail(code: &'static str, message: &str) -> ApiError {
 pub(super) struct PreviewRequest {
     federation_id: String,
     invite_code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct IdentifyRequest {
+    invite_code: String,
+}
+
+impl IdentifyRequest {
+    fn validate(&self) -> Result<(), ApiError> {
+        if self.invite_code.len() > 4096 || !self.invite_code.starts_with("fed1") {
+            return Err(fail("INVALID_INVITE", "Enter a valid fed1 invite code"));
+        }
+        Ok(())
+    }
 }
 
 impl PreviewRequest {
@@ -139,7 +154,7 @@ pub(super) async fn catalog(State(state): State<AppState>) -> Result<Json<Value>
     service.refresh_joined_catalog().await.map_err(|_| {
         fail(
             "SETUP_UNAVAILABLE",
-            "Cannot read the local clientd catalog. Check clientd and the API credential.",
+            "Cannot read the local bridge catalog. Check the bridge and the API credential.",
         )
     })?;
     Ok(Json(json!({
@@ -193,6 +208,50 @@ pub(super) async fn preview(
         json!({"confirmation_token":token,"federation_id":federation_id,"host_label":service.catalog_host().map(|c| &c.label),"expires_in_seconds":120,
         "warning":"Joining may create a new local wallet. It does not import another wallet's balance, guarantee trust, or execute a payment."}),
     ))
+}
+
+/// Parses an invite through the local bridge without joining. This
+/// lets the UI create/reconcile the correct source before confirmation.
+pub(super) async fn identify(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<IdentifyRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let service = state.provider.fedimint_service();
+    state.setup.authorize(&headers, service)?;
+    req.validate()?;
+    let result = state
+        .setup
+        .call(
+            service,
+            "/v2/ln/ecashmesh-connect-identify",
+            json!({"invite_code":req.invite_code}),
+        )
+        .await?;
+    let federation_id = result["federation_id"]
+        .as_str()
+        .filter(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| fail("INVALID_INVITE", "Invalid bridge invite response"))?
+        .to_lowercase();
+    let label = service
+        .configured()
+        .into_iter()
+        .find(|c| c.federation_id == federation_id)
+        .map_or_else(
+            || {
+                format!(
+                    "Federation {}…{}",
+                    &federation_id[..7],
+                    &federation_id[59..]
+                )
+            },
+            |c| c.label,
+        );
+    Ok(Json(json!({
+        "federation_id": federation_id,
+        "label": label,
+        "host_label": service.catalog_host().map(|c| &c.label),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -256,7 +315,7 @@ pub(super) async fn connect(
             "Unexpected joined federation ID. Refresh local status.",
         ));
     }
-    service.refresh_joined_catalog().await.map_err(|_| fail("SETUP_UNCERTAIN", "Clientd joined, but catalog refresh failed. Refresh connection status; do not create another wallet."))?;
+    service.refresh_joined_catalog().await.map_err(|_| fail("SETUP_UNCERTAIN", "The bridge joined, but catalog refresh failed. Refresh connection status; do not create another wallet."))?;
     let config = service
         .configured()
         .into_iter()
@@ -280,11 +339,11 @@ fn ensure_capacity(service: &FedimintService, federation_id: &str) -> Result<(),
     {
         if service
             .catalog_host()
-            .is_some_and(|host| host.clientd_url != existing.clientd_url)
+            .is_some_and(|host| host.bridge_url != existing.bridge_url)
         {
             return Err(fail(
                 "SETUP_REJECTED",
-                "This federation is configured on another clientd. Use that local connector.",
+                "This federation is configured on another local bridge. Use that bridge.",
             ));
         }
     } else if configs.len() >= 32 {
@@ -357,9 +416,9 @@ mod tests {
             id: "fedimint:host".into(),
             label: "Host".into(),
             federation_id: "11".repeat(32),
-            clientd_url: url,
+            bridge_url: url,
             token: Some("synthetic-backend-secret".into()),
-            quote_backend: QuoteBackend::ClientdV040,
+            quote_backend: QuoteBackend::LocalV0121Bridge,
         };
         let service = FedimintService::new(vec![config], 300)
             .unwrap()
@@ -455,6 +514,12 @@ mod tests {
             .with_catalog_host(Some("fedimint:host"))
             .unwrap();
         restarted.refresh_joined_catalog().await.unwrap();
+        assert!(
+            restarted
+                .configured()
+                .iter()
+                .all(|config| config.id != "fedimint:host")
+        );
         let joined = restarted
             .configured()
             .into_iter()
@@ -462,7 +527,7 @@ mod tests {
             .unwrap();
         assert!(restarted.is_joined_on_setup_host(&joined));
         let catalog = catalog(State(state)).await.unwrap().0.to_string();
-        assert!(!catalog.contains("backend-secret") && !catalog.contains("clientd_url"));
+        assert!(!catalog.contains("backend-secret") && !catalog.contains("bridge_url"));
         task.abort();
     }
 

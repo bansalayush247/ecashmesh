@@ -100,7 +100,7 @@ pub struct MockMint {
 }
 
 impl MockMint {
-    #[allow(clippy::too_many_lines)] // One HTTP fixture allowlist covers Cashu and clientd; unexpected writes panic.
+    #[allow(clippy::too_many_lines)] // One HTTP fixture allowlist covers Cashu and the bridge; unexpected writes panic.
     pub fn start(mode: &'static str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -176,7 +176,7 @@ impl MockMint {
                         .unwrap()
                         .as_secs();
                     let mut evidence = json!({
-                        "schema":"ecashmesh-fedimint-quote-v1", "clientd_version":"0.4.0", "fedimint_version":"0.4.2",
+                        "schema":"ecashmesh-fedimint-quote-v2", "fedimint_version":"0.12.1",
                         "federation_id":req["federation_id"], "invoice_digest":format!("{:x}", Sha256::digest(req["invoice"].as_str().unwrap().as_bytes())),
                         "payment_hash":"11".repeat(32), "amount_msat":req["amount_sats"].as_u64().unwrap()*1000,
                         "destination_pubkey":format!("02{}", "22".repeat(32)),

@@ -30,7 +30,7 @@ are not copied into the registry and no federation join is performed.
 type StoredRegistry = {
   version: 1;
   sources: Array<{
-    id: string; // Cashu local registry identity, or local fedimint: connector alias
+    id: string; // Cashu local identity, API-owned fedimint connector, or pending federation placeholder
     protocol: "cashu" | "fedimint";
     label: string;
     origin: "nostr_nip60" | "nostr_nip87" | "explicit_user_config";
@@ -71,8 +71,10 @@ metadata even though it is not a spending credential.
 
 - Home: added/enabled counts, Cashu/Fedimint counts, Nostr status, registry sync
   state and last sync; Manage payment sources opens the full page.
-- My Sources: protocol groups, origin, enable/disable, remove, refresh, details,
-  manual Cashu/Fedimint forms, browser/remote signer connection, import and save.
+- My Sources: protocol groups, compact connection/quote status, enable/disable,
+  remove, refresh, details, manual Cashu/federation forms, browser/remote signer
+  connection, import and save. Normal federation setup never asks for a
+  connector ID.
 - Discover: signed public announcements, publisher/network/endpoint, Add/Added.
   Searching alone never adds or enables a source. Add authorizes inspection,
   not spending or access to funds.
@@ -108,23 +110,19 @@ cargo run -p ecashmesh-api
 ```
 
 Public Cashu URLs can be supplied by NIP-60 or explicit Add; seeds are optional.
-For Fedimint, configure `ECASHMESH_FEDIMINT_FEDERATIONS` in this API terminal
-**before** starting the API, using the already-joined local clientd setup in the
-[root README](../README.md#fedimint-sources-read-only). The browser needs only
-the matching federation ID, display label and connector ID. Tokens remain in
-the local API/clientd environment. Registry restore does not install clientd or
-transfer its wallet. For the installed clientd 0.4.0 / Fedimint 0.4.2, build the
-[read-only extension](../integrations/fedimint-clientd-0.4.0/README.md) and select
-`quote_backend: "clientd_v040"`. Remove retired `quote_url` and `invite` fields
-from old configurations. It uses native note selection
-without committing any wallet changes. Without this explicitly enabled
-extension, the source cannot quote. A clientd health
-response or registered gateway is not an outgoing fee quote. An empty local
-wallet remains unfunded, even when its Nostr source is enabled.
+For Fedimint, configure `ECASHMESH_FEDIMINT_BRIDGE_URL` and
+`ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE` before starting the API, following the
+[root README](../README.md#fedimint-sources-read-only). The browser selects a
+federation by its display name/ID; after explicit local confirmation the backend
+supplies the matching connector ID. Tokens remain in the local API/bridge
+environment. Registry restore does not install the bridge or transfer its
+wallet. A bridge health response or registered gateway is not an outgoing fee
+quote. An empty local wallet remains unfunded, even when its Nostr source is
+enabled.
 
 To connect a discovered federation without hand-editing a new connector entry,
 enable the [explicit local connection flow](federation-connection.md). The API
-operator selects an existing local clientd host; the browser validates a pasted
+operator selects an existing local bridge; the browser validates a pasted
 invite, asks for confirmation, and binds the joined connector to the source.
 This separate wallet-setup action is not read-only and does not import funds.
 
@@ -153,10 +151,11 @@ sync; read-only or older signers can still use local-only configuration.
    Existing NIP-60 mint URLs import; absence of a wallet event is a visible,
    non-fatal state. Nostr identity by itself does not imply a Cashu wallet.
 3. Open Discover → Search configured relays. Add chosen Cashu/Fedimint sources,
-   or use manual forms. Discovered federations still need matching local API
-   connectors; the default alias is `fedimint:<federation-id>`.
+   or use manual forms. Added federations are not connected or evaluated until
+   you choose Connect federation and confirm the local bridge action.
 4. Review My Sources. Disable sources you do not want compared. Refresh enabled
-   sources; inspect metadata, NUTs, keysets, input fees, health and gateways.
+   sources; inspect compact connection/evidence status and optional technical
+   details.
 5. Click Save to Nostr and approve the signer. Wait for Registry synced.
 6. Reload, reconnect the same identity and approve decryption. Verify enabled
    flags and removed sources restore. Temporary relay failure must not erase
@@ -210,7 +209,7 @@ No user nsec is requested or stored. NIP-46 uses an ephemeral communication key
 which is not the user's identity key. Decrypted NIP-60 metadata can contain a
 wallet private-key tag: it is transiently present during parsing, then discarded;
 only mint references enter application state. The feature never fetches proof
-events or sends wallet keys, proofs, clientd tokens, invite codes, payment
+events or sends wallet keys, proofs, bridge tokens, invite codes, payment
 authorization or federation private credentials to relays or the API. Registry
 events publish ciphertext plus public Nostr envelope metadata. Backend requests
 contain source references and payment inputs only. Avoid putting any secrets in

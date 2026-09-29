@@ -4,7 +4,10 @@ import {
   bindLocalFederation,
   createFederationSetupClient,
 } from "../src/host/federationSetup";
-import { addFederationProfile } from "../src/nostr/sourceRegistry";
+import {
+  addFederationProfile,
+  pendingFederationProfile,
+} from "../src/nostr/sourceRegistry";
 
 const id = "22".repeat(32);
 const local = {
@@ -32,6 +35,19 @@ test("binding a confirmed local connection replaces a discovered alias without d
   assert.throws(() =>
     bindLocalFederation(result, { ...local, federation_id: "33".repeat(32) }),
   );
+});
+
+test("binding an added pending federation makes that exact local connector eligible", () => {
+  const pending = pendingFederationProfile({
+    label: "Discovered",
+    federationId: id,
+    origin: "nostr_nip87",
+  });
+  const result = bindLocalFederation([pending], local);
+  assert.equal(result.length, 1);
+  assert.equal(result[0]!.id, local.connector_id);
+  assert.equal(result[0]!.enabled, true);
+  assert.equal(result[0]!.origin, "nostr_nip87");
 });
 
 test("setup preview is non-joining and only explicit connect sends confirmation; secrets never enter registry", async () => {
@@ -85,7 +101,7 @@ test("setup preview is non-joining and only explicit connect sends confirmation;
         !serialized.includes("confirmation_token"),
     );
     assert.ok(
-      !serialized.includes("token") && !serialized.includes("clientd_url"),
+      !serialized.includes("token") && !serialized.includes("bridge_url"),
     );
   } finally {
     globalThis.fetch = original;

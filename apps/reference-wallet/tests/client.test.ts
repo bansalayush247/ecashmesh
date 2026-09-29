@@ -94,7 +94,7 @@ test("explicit connector selection passes through without choosing connectors", 
   await client.evaluateRoute({ ...payment, candidateConnectors: candidates });
 });
 
-test("user-authorized Fedimint connector IDs are forwarded without clientd credentials", async () => {
+test("user-authorized Fedimint connector IDs are forwarded without bridge credentials", async () => {
   const client = createEcashMeshClient({
     baseUrl: "http://local",
     fetch: async (_, options) => {
@@ -102,7 +102,7 @@ test("user-authorized Fedimint connector IDs are forwarded without clientd crede
       assert.deepEqual(body.federation_connector_ids, [
         "fedimint:bitcoin-principles",
       ]);
-      assert.equal(JSON.stringify(body).includes("clientd"), false);
+      assert.equal(JSON.stringify(body).includes("bridge_token"), false);
       assert.equal(JSON.stringify(body).includes("token"), false);
       return json(decision);
     },

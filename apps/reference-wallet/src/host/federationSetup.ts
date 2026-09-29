@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   addFederationProfile,
+  isPendingFederationProfile,
   type PaymentSourceProfile,
 } from "../nostr/sourceRegistry";
 
@@ -22,6 +23,11 @@ export const setupPreviewSchema = z.object({
   expires_in_seconds: z.number().int().positive().max(120),
   warning: z.string(),
 });
+export const setupIdentifySchema = z.object({
+  federation_id: federationId,
+  label: z.string().min(1).max(128),
+  host_label: z.string(),
+});
 export const setupConnectionSchema = connection.extend({
   status: z.literal("connected"),
   funded: z.null(),
@@ -29,6 +35,7 @@ export const setupConnectionSchema = connection.extend({
 });
 export type SetupCatalog = z.infer<typeof setupCatalogSchema>;
 export type SetupPreview = z.infer<typeof setupPreviewSchema>;
+export type SetupIdentify = z.infer<typeof setupIdentifySchema>;
 export type LocalConnection = z.infer<typeof connection>;
 
 export function bindLocalFederation(
@@ -59,7 +66,14 @@ export function bindLocalFederation(
     {
       ...profile,
       origin: previous?.origin ?? profile.origin,
-      enabled: previous?.enabled ?? true,
+      // A pending entry is deliberately disabled before its local connection
+      // exists. Once the bridge confirms this exact federation, it can safely
+      // participate in automatic comparison. A user-disabled real connector
+      // remains disabled.
+      enabled:
+        previous && !isPendingFederationProfile(previous)
+          ? previous.enabled
+          : true,
     },
   ];
 }
@@ -89,6 +103,10 @@ export function createFederationSetupClient(baseUrl: string) {
   return {
     catalog: async (signal?: AbortSignal) =>
       setupCatalogSchema.parse(await request("", signal)),
+    identify: async (invite: string, signal?: AbortSignal) =>
+      setupIdentifySchema.parse(
+        await request("/identify", signal, { invite_code: invite.trim() }),
+      ),
     preview: async (id: string, invite: string, signal?: AbortSignal) => {
       const result = setupPreviewSchema.parse(
         await request("/preview", signal, {

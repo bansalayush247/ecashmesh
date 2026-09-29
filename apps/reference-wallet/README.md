@@ -63,8 +63,8 @@ not a balance claim and is not executable in this reference wallet.
 Fedimint is added explicitly in the same panel. Enter a display name, 64-digit
 federation ID, and the non-secret connector ID configured on the local API (for
 example `fedimint:bitcoin-principles`). The browser sends only that connector ID
-as `federation_connector_ids`; the API's local environment retains the clientd
-endpoint, bearer token, and optional read-only quote bridge. Do not paste those
+as `federation_connector_ids`; the API's local environment retains the bridge
+endpoint and bearer token. Do not paste those
 secrets into the browser.
 
 Configure a relay set in `.env.local` if desired, then restart Expo:
@@ -80,7 +80,7 @@ failure, no wallet event, invalid signatures, malformed metadata, and failed
 decryption are shown in the source panel without creating a source.
 
 For API-only inspection of public source evidence, this is safe to run with
-mint URLs and connector IDs only—never include proofs, Nostr secrets, clientd
+mint URLs and connector IDs only—never include proofs, Nostr secrets, bridge
 tokens, or invites:
 
 ```sh

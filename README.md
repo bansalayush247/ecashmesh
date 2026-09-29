@@ -20,7 +20,7 @@ only to the explicitly enabled real-payment boundary.
 | -------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `ecashmesh-core`     | Protocol-independent source model, evidence/risk evaluation, deterministic ranking, explicit-mechanism graph search |
 | `ecashmesh-cashu`    | Cashu discovery, quote normalization, and a write-only NUT-08 melt transport                                        |
-| `ecashmesh-fedimint` | Read-only Fedimint clientd observations and non-mutating Lightning quote-bridge normalization                       |
+| `ecashmesh-fedimint` | Read-only native Fedimint v0.12.1 bridge observations and Lightning quote normalization                             |
 | `ecashmesh-api`      | Thin HTTP boundary on port `5000`                                                                                   |
 | `reference-wallet`   | React Native reference host integration; renders EcashMesh decisions only                                           |
 
@@ -47,7 +47,7 @@ API (`ecashmesh-api`)
   ├───────────────► Cashu adapter (`ecashmesh-cashu`)
   │                 public metadata + unpaid quote observations
   ├───────────────► Fedimint adapter (`ecashmesh-fedimint`)
-  │                 clientd health/gateway cache + read-only fee quote bridge
+  │                 native client health/gateway cache + read-only fee quote bridge
   ▼
 Core (`ecashmesh-core`)
   evidence → source feasibility → bounded source selection → ranking → explanation
@@ -80,7 +80,7 @@ nix develop -c sh -c 'cd apps/reference-wallet && npm ci && npm run web'
 ```
 
 Open `http://localhost:8081`, connect your signer, import/add sources and save.
-Nostr sync stores references only—not proofs, balances or clientd credentials.
+Nostr sync stores references only—not proofs, balances, bridge tokens, or wallet credentials.
 Fedimint still needs a locally configured adapter and an actual read-only quote
 bridge to rank; adding a profile does not create either. See the guide for exact
 relay configuration, the 5-Cashu/3-Fedimint test example and offline fixture gallery.
@@ -104,48 +104,31 @@ nix develop -c cargo run -p ecashmesh-api
 
 Fedimint is an independent configured source, never a discovered Cashu mint.
 Discovery saves a registry reference, not a local wallet connection. Use the
-explicit **Connect federation** flow after enabling the separately authorized
-[local setup integration](docs/federation-connection.md). Setup can create a
-clientd wallet; payment evaluation remains read-only.
-Configure the already-joined federation in a locally controlled
-`fedimint-clientd` and give EcashMesh its federation ID and clientd endpoint:
+explicit **Connect federation** flow after starting the native
+[local bridge](docs/federation-connection.md). Setup can create a client
+namespace; payment evaluation remains read-only. Start one bridge for all
+joined federations, then configure the API with its loopback URL and token:
 
 ```bash
-ECASHMESH_FEDIMINT_FEDERATIONS='[
-  {
-    "id":"fedimint:federation-a",
-    "label":"Federation A",
-    "federation_id":"<clientd federation id>",
-    "clientd_url":"http://127.0.0.1:3333",
-    "token":"<clientd bearer token>",
-    "quote_backend":"clientd_v040"
-  }
-]'
+export ECASHMESH_FEDIMINT_BRIDGE_URL=http://127.0.0.1:3333
+export ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE="$HOME/.local/share/ecashmesh/fedimint-bridge/bridge-token"
+export ECASHMESH_ENABLE_REAL_PAYMENTS=false
+nix develop -c cargo run -p ecashmesh-api
 ```
 
-First build the [version-pinned read-only clientd extension](integrations/fedimint-clientd-0.4.0/README.md).
-Upstream clientd **0.4.0 / Fedimint 0.4.2** has no fee-quote endpoint and does
-not contain the newer `send_fee_quote` or `ClientHandle::fee_quote` APIs.
-The extension uses actual native note selection in a **non-committable**
-transaction and adds authenticated `/v2/ln/ecashmesh-quote`. This is explicitly
-an EcashMesh extension, not an assumed upstream endpoint. It supplies bound,
-short-lived msat fees, verified gateway identity and wallet-balance evidence.
-The adapter never calls `/v2/ln/pay`, joins a federation or persists its wallet.
-Keep clientd credentials server-side. Deployment requires rebuilding/restarting
-clientd; setting `quote_backend` alone cannot add the endpoint.
+The bridge uses native `LightningClientModule::send_fee_quote` and returns
+bound, short-lived msat fee, verified-gateway, and wallet-balance evidence. It
+has no payment endpoint. Keep its token server-side.
 
-The bridge receives:
+The API requests a quote with:
 
 ```json
 { "federation_id": "…", "invoice": "ln…", "amount_sats": 1000 }
 ```
 
-The versioned extension response is documented in the linked guide. Quotes
-are disabled by default; select `quote_backend: "clientd_v040"` only after
-installing the extension. The retired external backend, `quote_url`, and unused
-`invite` configuration are rejected. Remove those fields when migrating;
-EcashMesh does not join federations. A missing bridge or quote means no Fedimint
-candidate is invented. `ECASHMESH_FEDIMINT_MAX_AGE_SECONDS` defaults to 300 seconds.
+`ECASHMESH_FEDIMINT_MAX_AGE_SECONDS` defaults to 300 seconds. A missing bridge,
+verified HTTP(S) gateway, balance, or quote means no Fedimint candidate is
+invented.
 
 ### Show a multi-source comparison in the frontend
 
@@ -166,32 +149,14 @@ export ECASHMESH_CASHU_MINTS='[
   {"id":"cashu:wallet-mint-b","url":"https://your-cashu-mint-b.example"}
 ]'
 
-export ECASHMESH_FEDIMINT_FEDERATIONS='[
-  {
-    "id":"fedimint:bitcoin-principles",
-    "label":"Bitcoin Principles",
-    "federation_id":"<bitcoin-principles-federation-id>",
-    "clientd_url":"http://127.0.0.1:3333",
-    "token":"<token-for-clientd-on-3333>",
-    "quote_backend":"clientd_v040"
-  },
-  {
-    "id":"fedimint:second-federation",
-    "label":"Second federation",
-    "federation_id":"<separately-joined-federation-id>",
-    "clientd_url":"http://127.0.0.1:3335",
-    "token":"<token-for-clientd-on-3335>",
-    "quote_backend":"clientd_v040"
-  }
-]'
+export ECASHMESH_FEDIMINT_BRIDGE_URL=http://127.0.0.1:3333
+export ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE="$HOME/.local/share/ecashmesh/fedimint-bridge/bridge-token"
 
 nix develop -c cargo run -p ecashmesh-api
 ```
 
-Each federation needs a matching already-joined clientd configuration and (if
-it is to become eligible) a non-mutating quote bridge. The example uses separate
-local instances; a compatible multi-federation clientd may expose multiple IDs.
-Do not put a token in source control or paste it into the browser. A
+One bridge holds separate client database namespaces for all joined federations.
+Do not put its token in source control or paste it into the browser. A
 source card with zero gateways, an unhealthy client, or no bridge is useful
 diagnostic evidence, but it is not a payable route.
 
@@ -357,7 +322,7 @@ may request unpaid quotes only.
 
 Fedimint evaluation is also read-only. It exposes federation health, registered
 gateway count/announcements, gateway routing fees when advertised, and wallet
-balance only when clientd explicitly reports it. Gateway reachability is not
+balance reported by the local native client. Gateway reachability is not
 liquidity, solvency, or payment reliability. A fee quote produces a
 `quote_backed` Fedimint → Lightning candidate; it is neither wallet-executable
 nor settled. For a Cashu destination the visible mechanism is

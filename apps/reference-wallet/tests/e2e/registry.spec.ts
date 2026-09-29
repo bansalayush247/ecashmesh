@@ -175,7 +175,7 @@ test("NIP-60 import, encrypted NIP-78 save/restore, NIP-87 discovery and automat
     page.getByText("Public Federation", { exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Add", exact: true }),
+    page.getByRole("button", { name: "Add source", exact: true }),
   ).toHaveCount(2);
   await page.getByRole("button", { name: "Go back", exact: true }).click();
   await page.getByRole("button", { name: "Send payment" }).click();
@@ -228,5 +228,5 @@ test("manual sources work disconnected; removal, local persistence and safe form
   await page.getByRole("button", { name: "Remove source" }).click();
   await expect(page.getByText("Local Mint", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Add Fedimint source" }).click();
-  await expect(page.getByRole("alert")).toContainText("Check source fields");
+  await expect(page.getByRole("alert")).toContainText("Federation ID must");
 });

@@ -561,9 +561,9 @@ function ReferenceWallet() {
                     Automatic — compare all enabled sources
                   </Button>
                   <Text style={styles.small}>
-                    Optional: constrain comparison to one or more sources. No
-                    selection means all enabled, authorized sources; balances
-                    remain unknown.
+                    Automatic compares all enabled Cashu sources and locally
+                    connected Fedimint sources. Choose a source only to narrow
+                    this payment's comparison.
                   </Text>
                   {nostr.profiles
                     .filter(

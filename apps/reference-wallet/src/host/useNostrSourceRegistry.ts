@@ -15,6 +15,7 @@ import {
   canonicalMintUrl,
   manualCashuProfile,
   mergeProfiles,
+  pendingFederationProfile,
   setProfileEnabled,
   type PaymentSourceProfile,
 } from "../nostr/sourceRegistry";
@@ -69,6 +70,30 @@ export function useNostrSourceRegistry(baseUrl: string) {
     },
     [],
   );
+
+  // The bridge catalog is the authority for local membership. Rebind an
+  // already-added federation when that catalog identifies its real connector;
+  // discovery alone never creates a profile or joins a wallet.
+  useEffect(() => {
+    const connected = localConnections.filter((item) => item.connected);
+    if (!connected.length) return;
+    let next = profiles;
+    for (const local of connected) {
+      const profile = next.find(
+        (item) =>
+          item.protocol === "fedimint" &&
+          item.endpoint === local.federation_id &&
+          item.id !== local.connector_id,
+      );
+      if (!profile) continue;
+      next = bindLocalFederation(next, local);
+    }
+    if (next !== profiles) {
+      ++editRevision.current;
+      setProfiles(next);
+      setSyncStatus("Unsaved changes");
+    }
+  }, [localConnections, profiles]);
 
   const connect = useCallback(
     async (kind: "browser" | "nip46", uri?: string) => {
@@ -196,6 +221,17 @@ export function useNostrSourceRegistry(baseUrl: string) {
     },
     [change],
   );
+  const addDiscoveredFederation = useCallback(
+    (input: {
+      label?: string;
+      federationId: string;
+      origin?: "nostr_nip87";
+    }) => {
+      const source = pendingFederationProfile(input);
+      change((current) => mergeProfiles(current, [source]));
+    },
+    [change],
+  );
   const addCashu = useCallback(
     (url: string, label: string) => {
       const source = manualCashuProfile(url, label);
@@ -204,15 +240,15 @@ export function useNostrSourceRegistry(baseUrl: string) {
     [change],
   );
   const addAnnouncement = useCallback(
-    (entry: Announcement, connectorId?: string) => {
+    (entry: Announcement) => {
       const source =
         entry.protocol === "cashu"
           ? manualCashuProfile(entry.endpoint, entry.label)
-          : addFederationProfile([], {
-              connectorId: connectorId ?? "fedimint:" + entry.endpoint,
+          : pendingFederationProfile({
               label: entry.label,
               federationId: entry.endpoint,
-            })[0]!;
+              origin: "nostr_nip87",
+            });
       change((current) =>
         mergeProfiles(current, [{ ...source, origin: "nostr_nip87" }]),
       );
@@ -462,6 +498,7 @@ export function useNostrSourceRegistry(baseUrl: string) {
     disconnect,
     browserSignerAvailable: browserSignerAvailable(),
     addFederation,
+    addDiscoveredFederation,
     addCashu,
     addAnnouncement,
     applyObservations,

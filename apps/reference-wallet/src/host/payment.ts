@@ -3,6 +3,7 @@ import { EcashMeshError } from "../ecashmesh/transport";
 import {
   enabledCashuMintUrls,
   enabledFederationConnectorIds,
+  isPendingFederationProfile,
   type PaymentSourceProfile,
 } from "../nostr/sourceRegistry";
 
@@ -62,7 +63,8 @@ export function collectPayment(
                 (p) =>
                   p.enabled &&
                   p.authorization === "user_authorized" &&
-                  p.protocol === "fedimint",
+                  p.protocol === "fedimint" &&
+                  !isPendingFederationProfile(p),
               )
               .map((p) => [p.id, p.endpoint]),
           ),

@@ -1,13 +1,13 @@
-//! Strict wire boundary, independent of clientd transport or wallet custody.
+//! Strict wire boundary, independent of bridge transport or wallet custody.
 use super::{Amount, ConfidenceLevel, Evidence, EvidenceSource, EvidenceTimestamp, FedimintQuote};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 #[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct QuoteEvidence {
     schema: String,
-    clientd_version: String,
     fedimint_version: String,
     federation_id: String,
     invoice_digest: String,
@@ -42,10 +42,7 @@ pub(super) fn parse(
 ) -> Result<FedimintQuote, String> {
     let q: QuoteEvidence = serde_json::from_value(value.clone())
         .map_err(|_| "Incomplete read-only Fedimint evidence")?;
-    if q.schema != "ecashmesh-fedimint-quote-v1"
-        || q.clientd_version != "0.4.0"
-        || q.fedimint_version != "0.4.2"
-    {
+    if q.schema != "ecashmesh-fedimint-quote-v2" || q.fedimint_version != "0.12.1" {
         return Err("Unsupported Fedimint quote bridge version".into());
     }
     if q.federation_id != federation
@@ -126,7 +123,7 @@ mod tests {
 
     fn evidence() -> Value {
         json!({
-            "schema": "ecashmesh-fedimint-quote-v1", "clientd_version": "0.4.0", "fedimint_version": "0.4.2",
+            "schema": "ecashmesh-fedimint-quote-v2", "fedimint_version": "0.12.1",
             "federation_id": "fed-a", "invoice_digest": format!("{:x}", Sha256::digest(b"invoice")),
             "payment_hash": "11".repeat(32), "amount_msat": 1_000_000, "network": "bitcoin",
             "destination_pubkey": format!("02{}", "22".repeat(32)),
@@ -150,7 +147,40 @@ mod tests {
         assert_eq!(quote.spendable_balance_sats.value().unwrap().sats(), 2000);
         assert_eq!(
             quote.native_evidence["schema"],
-            "ecashmesh-fedimint-quote-v1"
+            "ecashmesh-fedimint-quote-v2"
+        );
+    }
+
+    #[test]
+    fn accepts_a_successful_read_only_fee_quote() {
+        let quote = parse_test(&evidence()).unwrap();
+
+        assert_eq!(quote.federation_fee_sats.sats(), 2);
+        assert_eq!(quote.gateway_fee_sats.unwrap().sats(), 2);
+        assert_eq!(quote.destination_fee_sats.unwrap().sats(), 0);
+        assert_eq!(quote.payable, None);
+        assert_eq!(quote.native_evidence["gateway_identity_verified"], true);
+    }
+
+    #[test]
+    fn rejects_gateway_verification_failure() {
+        let mut value = evidence();
+        value["gateway_identity_verified"] = json!(false);
+
+        assert_eq!(
+            parse_test(&value).unwrap_err(),
+            "Invalid Fedimint gateway evidence"
+        );
+    }
+
+    #[test]
+    fn rejects_insufficient_client_balance() {
+        let mut value = evidence();
+        value["wallet_balance_msat"] = json!(1_002_001);
+
+        assert_eq!(
+            parse_test(&value).unwrap_err(),
+            "Insufficient Fedimint wallet balance"
         );
     }
 

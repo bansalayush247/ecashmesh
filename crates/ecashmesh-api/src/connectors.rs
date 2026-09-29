@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     sync::Arc,
 };
 
@@ -10,7 +11,7 @@ use ecashmesh_cashu::{
     discovery::{DiscoveryReport, DiscoveryService, DiscoverySource, MintHint},
 };
 use ecashmesh_core::{Amount, ConnectorId, ConnectorSnapshot, EvidenceTimestamp};
-use ecashmesh_fedimint::{FederationObservation, FedimintService};
+use ecashmesh_fedimint::{FederationConfig, FederationObservation, FedimintService, QuoteBackend};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -290,8 +291,34 @@ impl Provider {
                 }
                 let federations =
                     std::env::var("ECASHMESH_FEDIMINT_FEDERATIONS").unwrap_or_else(|_| "[]".into());
-                let federations = serde_json::from_str(&federations)
+                let mut federations: Vec<FederationConfig> = serde_json::from_str(&federations)
                     .map_err(|error| format!("ECASHMESH_FEDIMINT_FEDERATIONS: {error}"))?;
+                let bridge_connector = std::env::var("ECASHMESH_FEDIMINT_BRIDGE_URL")
+                    .ok()
+                    .map(|bridge_url| {
+                        let token_path = std::env::var("ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE")
+                            .map_err(|_| "ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE is required with ECASHMESH_FEDIMINT_BRIDGE_URL")?;
+                        let token = fs::read_to_string(token_path)
+                            .map_err(|_| "Cannot read ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE")?
+                            .trim()
+                            .to_owned();
+                        if token.is_empty() {
+                            return Err("ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE is empty".to_owned());
+                        }
+                        Ok::<FederationConfig, String>(FederationConfig {
+                            id: "fedimint:local-bridge".into(),
+                            label: "Local Fedimint bridge".into(),
+                            federation_id: "0".repeat(64),
+                            bridge_url,
+                            token: Some(token),
+                            quote_backend: QuoteBackend::LocalV0121Bridge,
+                        })
+                    })
+                    .transpose()?;
+                if let Some(bridge) = bridge_connector {
+                    federations.retain(|config| config.id != bridge.id);
+                    federations.push(bridge);
+                }
                 let fedimint_ttl = std::env::var("ECASHMESH_FEDIMINT_MAX_AGE_SECONDS")
                     .unwrap_or_else(|_| "300".into())
                     .parse::<u64>()
@@ -302,6 +329,11 @@ impl Provider {
                         FedimintService::new(federations, fedimint_ttl)?.with_catalog_host(
                             std::env::var("ECASHMESH_FEDIMINT_SETUP_CONNECTOR")
                                 .ok()
+                                .or_else(|| {
+                                    std::env::var("ECASHMESH_FEDIMINT_BRIDGE_URL")
+                                        .ok()
+                                        .map(|_| "fedimint:local-bridge".into())
+                                })
                                 .as_deref(),
                         )?,
                     ),
@@ -392,7 +424,7 @@ fn fedimint_observation_json(observation: &FederationObservation) -> Value {
         "label": observation.config.label,
         "federation_id": observation.config.federation_id,
         "quote_backend": observation.config.quote_backend,
-        "client_api_version": if observation.config.quote_backend == ecashmesh_fedimint::QuoteBackend::ClientdV040 {
+        "client_api_version": if observation.config.quote_backend == ecashmesh_fedimint::QuoteBackend::LocalV0121Bridge {
             Some(ecashmesh_fedimint::FEDIMINT_CLIENT_API_VERSION)
         } else { None },
         "evaluated_at_unix_seconds": observation.evaluated_at.unix_seconds(),
@@ -406,8 +438,8 @@ fn fedimint_observation_json(observation: &FederationObservation) -> Value {
         "issues": observation.issues,
         "limitations": [
             "Gateway cache and health are evidence, not liquidity, solvency, or payment reliability",
-            "Source balance is unknown unless the configured clientd returns wallet info",
-            "A route requires an explicit non-mutating quote bridge; EcashMesh never calls /v2/ln/pay",
+            "Source balance is unknown unless the configured local bridge returns wallet info",
+            "A route requires the explicit non-mutating local bridge; EcashMesh never calls /v2/ln/pay",
             "Read-only evaluation; no payment execution or Fedimint destination support is available"
         ]
     })

@@ -29,6 +29,7 @@
               pkgs.cargo
               pkgs.cargo-watch
               pkgs.clippy
+              pkgs.cmake
               pkgs.git
               pkgs.nodejs_22
               pkgs.openssl

@@ -66,7 +66,7 @@ fn native_bridge_competes_with_cashu_and_excludes_invalid_evidence() {
             &json!([]),
             &json!([]),
             &json!([{"id":"fedimint:native", "label":"Native", "federation_id":"11".repeat(32),
-                "clientd_url":fed.url, "quote_backend":"clientd_v040"}]),
+                "bridge_url":fed.url, "quote_backend":"local_v0121_bridge"}]),
         );
         let mut body = lightning_payment(100_000);
         body.as_object_mut().unwrap().remove("candidate_connectors");
@@ -114,7 +114,7 @@ fn missing_quote_bridge_survives_no_route_as_structured_diagnostics() {
         &json!([]),
         &json!([]),
         &json!([
-            {"id":"fedimint:no-bridge", "label":"No bridge", "federation_id":"11".repeat(32), "clientd_url":fed.url}
+            {"id":"fedimint:no-bridge", "label":"No bridge", "federation_id":"11".repeat(32), "bridge_url":fed.url}
         ]),
     );
     let mut body = lightning_payment(100_000);
@@ -148,7 +148,7 @@ fn restored_alias_cannot_select_a_different_federation() {
         &json!([]),
         &json!([]),
         &json!([
-            {"id":"fedimint:alias", "label":"Local", "federation_id":"11".repeat(32), "clientd_url":fed.url, "quote_backend":"clientd_v040"}
+            {"id":"fedimint:alias", "label":"Local", "federation_id":"11".repeat(32), "bridge_url":fed.url, "quote_backend":"local_v0121_bridge"}
         ]),
     );
     let mut body = lightning_payment(100_000);
@@ -187,8 +187,8 @@ fn automatic_five_cashu_three_fedimint_for_lightning_and_cashu_destination() {
         .map(|(i, mint)| json!({"id":format!("cashu:source-{i}"),"url":mint.url}))
         .collect();
     let federations: Vec<_> = feds.iter().enumerate().map(|(i, fed)| {
-        let mut entry = json!({"id":format!("fedimint:source-{i}"),"label":format!("Fed {i}"),"federation_id":format!("{i:064x}"),"clientd_url":fed.url});
-        if i < 2 { entry["quote_backend"] = json!("clientd_v040"); }
+        let mut entry = json!({"id":format!("fedimint:source-{i}"),"label":format!("Fed {i}"),"federation_id":format!("{i:064x}"),"bridge_url":fed.url});
+        if i < 2 { entry["quote_backend"] = json!("local_v0121_bridge"); }
         entry
     }).collect();
     let server = ApiServer::start_with_federations(

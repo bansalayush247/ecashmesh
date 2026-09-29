@@ -8,15 +8,17 @@ export function FederationConnect({
   registry,
   federationId,
   label,
+  initialInvite = "",
   close,
 }: {
   registry: Registry;
   federationId: string;
   label: string;
+  initialInvite?: string;
   close: () => void;
 }) {
   const [catalog, setCatalog] = useState<SetupCatalog | null>(null);
-  const [invite, setInvite] = useState("");
+  const [invite, setInvite] = useState(initialInvite);
   const [preview, setPreview] = useState<SetupPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -91,14 +93,13 @@ export function FederationConnect({
       ) : catalog && !catalog.enabled ? (
         <Text style={styles.small}>
           Local setup is disabled. The API operator must set
-          ECASHMESH_FEDIMINT_SETUP_CONNECTOR to an existing patched clientd
-          connector ID, then restart the API. Tokens stay on the server.
+          ECASHMESH_FEDIMINT_BRIDGE_URL and
+          ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE, then restart the API. The token
+          stays on the server.
         </Text>
       ) : catalog ? (
         <>
-          <Text style={styles.small}>
-            Local clientd host: {catalog.host_label}
-          </Text>
+          <Text style={styles.small}>Local bridge: {catalog.host_label}</Text>
           <Text style={styles.small}>
             Paste the invite provided by the federation operator. It is used
             only for setup, never saved in your Nostr source registry.
@@ -137,7 +138,7 @@ export function FederationConnect({
               <Text style={styles.small}>
                 Invite matches this federation. Confirm joining through{" "}
                 {preview.host_label}. This may create a new wallet in your local
-                clientd database, with no imported balance. Confirmation expires
+                bridge database, with no imported balance. Confirmation expires
                 after two minutes.
               </Text>
               <Button

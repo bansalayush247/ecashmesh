@@ -102,6 +102,10 @@ fn app(provider: Provider) -> Router {
             post(federation_setup::preview),
         )
         .route(
+            "/v1/federations/setup/identify",
+            post(federation_setup::identify),
+        )
+        .route(
             "/v1/federations/setup/connect",
             post(federation_setup::connect),
         )
@@ -679,7 +683,7 @@ pub(crate) struct EvaluateRequest {
     #[serde(default)]
     wallet_mint_urls: Vec<String>,
     /// User-authorized Fedimint connector IDs. These are non-secret labels for
-    /// already-configured local adapters; clientd credentials never cross HTTP.
+    /// already-configured local adapters; bridge credentials never cross HTTP.
     #[serde(default)]
     federation_connector_ids: Vec<String>,
     #[serde(default)]

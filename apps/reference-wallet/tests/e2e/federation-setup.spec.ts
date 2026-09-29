@@ -11,7 +11,7 @@ test("federation setup validates first, confirms explicitly, and replaces the re
   );
   await page.route("**/v1/federations/setup", (route) =>
     route.fulfill({
-      json: { enabled: true, host_label: "Local clientd", sources: [] },
+      json: { enabled: true, host_label: "Local bridge", sources: [] },
     }),
   );
   await page.route("**/v1/federations/setup/preview", async (route) => {
@@ -24,7 +24,7 @@ test("federation setup validates first, confirms explicitly, and replaces the re
       json: {
         confirmation_token: "aa".repeat(32),
         federation_id: federation,
-        host_label: "Local clientd",
+        host_label: "Local bridge",
         expires_in_seconds: 120,
         warning: "Creates a local wallet; no imported funds",
       },
@@ -50,19 +50,11 @@ test("federation setup validates first, confirms explicitly, and replaces the re
   });
   await page.goto("/");
   await page.getByRole("button", { name: "Manage payment sources" }).click();
-  await page.getByLabel("Source name", { exact: true }).fill("Test federation");
   await page.getByLabel("Federation ID", { exact: true }).fill(federation);
-  await page
-    .getByLabel("Local Fedimint connector ID", { exact: true })
-    .fill(`fedimint:${federation}`);
   await page
     .getByRole("button", { name: "Add Fedimint source", exact: true })
     .click();
-  await expect(
-    page.getByText("Saved to registry — local connection not verified", {
-      exact: true,
-    }),
-  ).toBeVisible();
+  await expect(page.getByText(/Added · not connected/)).toBeVisible();
   await page
     .getByRole("button", { name: "Connect federation", exact: true })
     .click();
@@ -85,15 +77,10 @@ test("federation setup validates first, confirms explicitly, and replaces the re
   ).toBeVisible();
   expect(joins).toBe(1);
   await page.getByRole("button", { name: "Close setup", exact: true }).click();
-  await expect(
-    page.getByText(
-      "Connected locally — balance and quote readiness are evaluated separately",
-      { exact: true },
-    ),
-  ).toBeVisible();
+  await expect(page.getByText(/Connected/)).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Connect federation", exact: true }),
-  ).toHaveCount(1);
+  ).toHaveCount(0);
   const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }));
   expect(stored).not.toContain("synthetic-private-invite");
   expect(stored).not.toContain("confirmation_token");
