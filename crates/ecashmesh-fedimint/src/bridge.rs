@@ -1,5 +1,8 @@
 //! Strict wire boundary, independent of bridge transport or wallet custody.
-use super::{Amount, ConfidenceLevel, Evidence, EvidenceSource, EvidenceTimestamp, FedimintQuote};
+use super::{
+    Amount, ConfidenceLevel, Evidence, EvidenceSource, EvidenceTimestamp, FedimintGatewayCandidate,
+    FedimintGatewayEstimate, FedimintQuote,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -25,6 +28,45 @@ struct QuoteEvidence {
     gateway_liquidity: String,
     selected_gateway_id: String,
     gateway_identity_verified: bool,
+    observed_at_unix_seconds: u64,
+    expires_at_unix_seconds: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GatewayCandidateEvidence {
+    gateway_id: String,
+    gateway_url: String,
+    gateway_fee_msat: u64,
+    fee_base_msat: u64,
+    fee_ppm: u64,
+    #[serde(default)]
+    expiration_delta: Option<u64>,
+    #[serde(default)]
+    lightning_alias: Option<String>,
+    gateway_identity_verified: bool,
+    gateway_protocol: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GatewayEstimateEvidence {
+    schema: String,
+    fedimint_version: String,
+    federation_id: String,
+    invoice_digest: String,
+    payment_hash: String,
+    amount_msat: u64,
+    network: String,
+    gateway_fee_msat: u64,
+    federation_fee_msat: Option<u64>,
+    wallet_balance_msat: u64,
+    funding_feasible: Option<bool>,
+    payable: Option<bool>,
+    selected_gateway_id: String,
+    gateway_identity_verified: bool,
+    gateway_protocol: String,
+    gateway_candidates: Vec<GatewayCandidateEvidence>,
     observed_at_unix_seconds: u64,
     expires_at_unix_seconds: u64,
 }
@@ -116,6 +158,104 @@ pub(super) fn parse(
     })
 }
 
+pub(super) fn parse_gateway_estimate(
+    value: &Value,
+    federation: &str,
+    invoice: &str,
+    amount: Amount,
+    now: u64,
+) -> Result<FedimintGatewayEstimate, String> {
+    let q: GatewayEstimateEvidence = serde_json::from_value(value.clone())
+        .map_err(|_| "Incomplete Fedimint gateway estimate evidence")?;
+    if q.schema != "ecashmesh-fedimint-gateway-estimate-v1" || q.fedimint_version != "0.12.1" {
+        return Err("Unsupported Fedimint gateway estimate bridge version".into());
+    }
+    if q.federation_id != federation
+        || Some(q.amount_msat) != amount.sats().checked_mul(1_000)
+        || q.invoice_digest != format!("{:x}", Sha256::digest(invoice.as_bytes()))
+    {
+        return Err(
+            "Fedimint gateway estimate does not match requested federation, invoice or amount"
+                .into(),
+        );
+    }
+    if q.observed_at_unix_seconds > now.saturating_add(10)
+        || now.saturating_sub(q.observed_at_unix_seconds) > 30
+        || q.expires_at_unix_seconds <= now
+        || q.expires_at_unix_seconds <= q.observed_at_unix_seconds
+        || q.expires_at_unix_seconds > q.observed_at_unix_seconds.saturating_add(30)
+    {
+        return Err("Fedimint gateway estimate expired or has invalid freshness".into());
+    }
+    if !q.gateway_identity_verified
+        || q.selected_gateway_id.len() != 66
+        || !q.selected_gateway_id.bytes().all(|c| c.is_ascii_hexdigit())
+        || q.federation_fee_msat.is_some()
+        || q.funding_feasible.is_some()
+        || q.payable.is_some()
+        || q.wallet_balance_msat
+            .checked_add(q.gateway_fee_msat)
+            .is_none()
+        || !matches!(q.gateway_protocol.as_str(), "lnv1" | "lnv2")
+        || q.gateway_candidates.is_empty()
+        || q.payment_hash.len() != 64
+        || !q.payment_hash.bytes().all(|c| c.is_ascii_hexdigit())
+        || !matches!(
+            q.network.as_str(),
+            "bitcoin" | "testnet" | "signet" | "regtest"
+        )
+    {
+        return Err("Invalid Fedimint gateway estimate evidence".into());
+    }
+    let mut candidates = q
+        .gateway_candidates
+        .into_iter()
+        .map(|candidate| {
+            let expected_fee = candidate.fee_base_msat.checked_add(
+                q.amount_msat
+                    .saturating_mul(candidate.fee_ppm)
+                    .saturating_div(1_000_000),
+            );
+            let valid = candidate.gateway_identity_verified
+                && candidate.gateway_id.len() == 66
+                && candidate.gateway_id.bytes().all(|c| c.is_ascii_hexdigit())
+                && matches!(candidate.gateway_protocol.as_str(), "lnv1" | "lnv2")
+                && candidate.gateway_protocol == q.gateway_protocol
+                && candidate.gateway_url.starts_with("https://")
+                && expected_fee == Some(candidate.gateway_fee_msat);
+            valid.then_some(FedimintGatewayCandidate {
+                gateway_id: candidate.gateway_id,
+                gateway_url: candidate.gateway_url,
+                gateway_fee_sats: ceil_sats(candidate.gateway_fee_msat),
+                fee_base_msat: candidate.fee_base_msat,
+                fee_ppm: candidate.fee_ppm,
+                expiration_delta: candidate.expiration_delta,
+                gateway_protocol: candidate.gateway_protocol,
+                lightning_alias: candidate.lightning_alias,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or("Invalid Fedimint gateway candidate evidence")?;
+    candidates.sort_by(|left, right| {
+        left.gateway_fee_sats
+            .cmp(&right.gateway_fee_sats)
+            .then_with(|| left.gateway_url.cmp(&right.gateway_url))
+    });
+    if candidates[0].gateway_id != q.selected_gateway_id
+        || candidates[0].gateway_fee_sats != ceil_sats(q.gateway_fee_msat)
+    {
+        return Err("Fedimint gateway estimate selected candidate mismatch".into());
+    }
+    Ok(FedimintGatewayEstimate {
+        gateway_fee_sats: ceil_sats(q.gateway_fee_msat),
+        selected_gateway_id: q.selected_gateway_id,
+        gateway_protocol: q.gateway_protocol,
+        candidates,
+        observed_at: EvidenceTimestamp::from_unix_seconds(q.observed_at_unix_seconds),
+        expires_at_unix_seconds: q.expires_at_unix_seconds,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +300,58 @@ mod tests {
         assert_eq!(quote.destination_fee_sats.unwrap().sats(), 0);
         assert_eq!(quote.payable, None);
         assert_eq!(quote.native_evidence["gateway_identity_verified"], true);
+    }
+
+    #[test]
+    fn accepts_verified_gateway_estimate_without_execution_claims() {
+        let value = json!({
+            "schema": "ecashmesh-fedimint-gateway-estimate-v1", "fedimint_version": "0.12.1",
+            "federation_id": "fed-a", "invoice_digest": format!("{:x}", Sha256::digest(b"invoice")),
+            "payment_hash": "11".repeat(32), "amount_msat": 1_000_000, "network": "bitcoin",
+            "gateway_fee_msat": 1001, "federation_fee_msat": null,
+            "wallet_balance_msat": 2_000_000, "funding_feasible": null, "payable": null,
+            "selected_gateway_id": format!("02{}", "11".repeat(32)), "gateway_identity_verified": true,
+            "gateway_protocol":"lnv1", "gateway_candidates":[{
+                "gateway_id":format!("02{}", "11".repeat(32)), "gateway_url":"https://gateway.example/v1",
+                "gateway_fee_msat":1001, "fee_base_msat":1001, "fee_ppm":0,
+                "gateway_identity_verified":true, "gateway_protocol":"lnv1"
+            }],
+            "observed_at_unix_seconds": 100, "expires_at_unix_seconds": 130
+        });
+        let estimate =
+            parse_gateway_estimate(&value, "fed-a", "invoice", Amount::from_sats(1000), 100)
+                .unwrap();
+
+        assert_eq!(estimate.gateway_fee_sats.sats(), 2);
+        assert_eq!(
+            estimate.selected_gateway_id,
+            format!("02{}", "11".repeat(32))
+        );
+    }
+
+    #[test]
+    fn rejects_gateway_estimate_that_claims_funding() {
+        let mut value = json!({
+            "schema": "ecashmesh-fedimint-gateway-estimate-v1", "fedimint_version": "0.12.1",
+            "federation_id": "fed-a", "invoice_digest": format!("{:x}", Sha256::digest(b"invoice")),
+            "payment_hash": "11".repeat(32), "amount_msat": 1_000_000, "network": "bitcoin",
+            "gateway_fee_msat": 1001, "federation_fee_msat": null,
+            "wallet_balance_msat": 2_000_000, "funding_feasible": null, "payable": null,
+            "selected_gateway_id": format!("02{}", "11".repeat(32)), "gateway_identity_verified": true,
+            "gateway_protocol":"lnv1", "gateway_candidates":[{
+                "gateway_id":format!("02{}", "11".repeat(32)), "gateway_url":"https://gateway.example/v1",
+                "gateway_fee_msat":1001, "fee_base_msat":1001, "fee_ppm":0,
+                "gateway_identity_verified":true, "gateway_protocol":"lnv1"
+            }],
+            "observed_at_unix_seconds": 100, "expires_at_unix_seconds": 130
+        });
+        value["funding_feasible"] = json!(true);
+
+        assert_eq!(
+            parse_gateway_estimate(&value, "fed-a", "invoice", Amount::from_sats(1000), 100)
+                .unwrap_err(),
+            "Invalid Fedimint gateway estimate evidence"
+        );
     }
 
     #[test]

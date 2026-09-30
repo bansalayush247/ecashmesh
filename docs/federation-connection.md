@@ -1,63 +1,47 @@
-# Connect a discovered federation locally
+# Connect a federation
 
-Discover/Add saves a source preference. It never joins a federation, imports
-funds, establishes trust, or grants payment authority. **Connect federation**
-creates a client in the local Fedimint v0.12.1 bridge after an explicit preview
-and confirmation.
+Start the bridge and API using the [quick start](../README.md#start-the-demo).
+One bridge serves every joined federation.
 
-## One-time operator setup
+## Browser steps
 
-Run the native bridge on loopback. It creates one root mnemonic and one RocksDB
-database, with a separate Fedimint database namespace for each joined
-federation. The bridge token and mnemonic entropy stay in its data directory.
+1. Open **Manage payment sources**. Add the federation by ID, or use
+   **Discover → Connect from invite** to identify it.
+2. Select **Connect federation** on its source card.
+3. If already joined locally, select **Use existing local connection**.
+4. Otherwise paste its invite, validate it, and confirm the connection.
+5. Save the source list and compare a fresh invoice.
 
-```sh
-cd /path/to/ecashmesh
-nix develop -c cargo run --release -p ecashmesh-fedimint --bin fedimint-bridge
+Identifying or previewing does not join a wallet. Joining requires confirmation
+and contacts the federation. Confirmations expire after two minutes and are
+single-use. Closing the connection dialog does not delete an existing client.
+
+## Local state
+
+The default directory is:
+
+```text
+$HOME/.local/share/ecashmesh/fedimint-bridge/
+  client.db          One RocksDB with separate federation namespaces
+  catalog.json       Federation IDs and labels
+  bridge-token       Local API credential
+  mnemonic.entropy   One wallet root for the clients
 ```
 
-In another terminal, configure the API to use that bridge. The token file is
-created on the first bridge start; keep it local and do not expose it to the
-browser.
+Keep the bridge and API under the same home directory. Do not delete this
+folder to solve a connection error; it is wallet state. Do not put its contents
+in source control. The token and entropy files are protected local files.
 
-```sh
-export ECASHMESH_FEDIMINT_BRIDGE_URL=http://127.0.0.1:3333
-export ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE="$HOME/.local/share/ecashmesh/fedimint-bridge/bridge-token"
-export ECASHMESH_ENABLE_REAL_PAYMENTS=false
-nix develop -c cargo run -p ecashmesh-api
-```
+The API uses `ECASHMESH_FEDIMINT_BRIDGE_URL` and
+`ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE`; `scripts/demo.sh api` sets their defaults.
+The browser never receives either secret. The bridge listens on loopback only.
 
-`ECASHMESH_FEDIMINT_SETUP_CONNECTOR` is optional when
-`ECASHMESH_FEDIMINT_BRIDGE_URL` is set. Set it only when selecting an explicit
-configured bridge connector. The bridge listens only on a loopback address.
+## Fees and balances
 
-## Browser flow
+A joined federation can have an empty wallet. In comparison mode, a verified
+gateway estimate is enough to show its listed gateway fee. Native payment
+quotes use the client's actual notes and therefore require funding.
 
-1. Open **Payment Sources**, then select a discovered or saved federation.
-2. Select **Connect federation**. The API reads the local bridge catalog.
-3. If the federation is already joined, select **Use existing local connection**.
-4. Otherwise paste an invite from the federation operator and validate it.
-   Validation checks that its federation ID matches the selected source.
-5. Confirm the join. The bridge creates a new local client namespace and the
-   browser receives only the non-secret connector ID and federation ID.
-6. Refresh evidence and evaluate an invoice. A fresh, verified read-only quote
-   is required before the source can be route-backed.
-
-The browser registry stores source references and preferences only. It never
-stores invites, bridge tokens, mnemonics, private keys, proofs, or preimages.
-
-## Safety and persistence
-
-Preview does not create a wallet or contact guardians. Confirmation is
-single-use and expires after two minutes. Joining is serialized. A confirmed
-join persists in the bridge database; closing the UI, removing a source card,
-or changing a Nostr registry does not remove that client.
-
-The bridge may read federation configuration, cached gateway announcements,
-wallet balance, and native fee quotes. It has no payment endpoint and does not
-submit Lightning payments. A joined client can still be unfunded or have no
-verified HTTP(S) gateway, in which case it remains ineligible for routing.
-
-Only use invites from federations you intentionally trust. The local client
-contacts guardians named by the downloaded configuration, so use host-level
-network controls when stronger isolation is required.
+A missing or unreachable gateway remains unavailable. Discovery does not
+manufacture a fee, bypass verification or execute a payment. The bridge uses
+native Fedimint v0.12.1 APIs and has no payment endpoint.

@@ -1,3 +1,4 @@
+import { OptionDetails } from "./src/ui/OptionDetails";
 import { useEffect, useRef, useState } from "react";
 import {
   BackHandler,
@@ -6,6 +7,7 @@ import {
   Pressable,
   ScrollView,
   StatusBar,
+  Switch,
   StyleSheet,
   Text,
   TextInput,
@@ -26,11 +28,9 @@ import { SourceFixtureGallery } from "./src/ui/SourceFixtureGallery";
 import {
   Button,
   colors,
-  estimatedTime,
   ErrorNotice,
   feeEstimateLabel,
   feeRate,
-  feeReasonableness,
   Heading,
   humanize,
   Loading,
@@ -41,6 +41,8 @@ import {
   Surface,
 } from "./src/ui/components";
 import { DecisionView, Risks, RouteDetails } from "./src/ui/RouteDecision";
+import { Disclosure } from "./src/ui/components";
+import { RouteComparisonView } from "./src/ui/RouteComparison";
 
 const baseUrl =
   process.env.EXPO_PUBLIC_ECASHMESH_API_URL ??
@@ -314,28 +316,6 @@ function Choice({
   );
 }
 
-function BottomNav() {
-  return (
-    <View style={local.bottomNav}>
-      {[
-        ["⌂", "Home"],
-        ["◒", "Assets"],
-        ["◷", "Activity"],
-        ["⚙", "Settings"],
-      ].map(([icon, label], i) => (
-        <View key={label} style={local.navItem}>
-          <Text style={[local.navIcon, i === 0 && local.navActive]}>
-            {icon}
-          </Text>
-          <Text style={[local.navText, i === 0 && local.navTextActive]}>
-            {label}
-          </Text>
-        </View>
-      ))}
-    </View>
-  );
-}
-
 function ReferenceWallet() {
   const btcUsdRate = useLiveBtcUsdRate();
   const nostr = useNostrSourceRegistry(baseUrl);
@@ -425,102 +405,31 @@ function ReferenceWallet() {
             )}
             {flow.screen === "home" && !sourcesOpen && (
               <>
-                <View style={local.homeHeader}>
-                  <View style={local.avatar}>
-                    <Text style={local.avatarText}>A</Text>
-                  </View>
-                  <Text style={local.homeTitle}>My Wallet⌄</Text>
-                  <Text style={local.settings}>⚙</Text>
-                </View>
-                <View style={local.balanceCard}>
-                  <Text style={local.balanceLabel}>Total Balance ◉</Text>
-                  <Text style={local.balance}>
-                    {regtest.enabled
-                      ? `${regtest.balance.toLocaleString("en-US")} sats`
-                      : "Unavailable"}
-                  </Text>
-                  <Text style={local.balanceFiat}>
-                    {regtest.enabled
-                      ? "Regtest Cashu balance"
-                      : "No wallet custody connected"}
-                  </Text>
-                </View>
+                <Heading eyebrow="ECASHMESH" title="One payment. More options.">
+                  Compare fees across your Cashu mints and Fedimint federations.
+                </Heading>
+                <Button onPress={flow.edit}>Compare a payment</Button>
+                <Text style={styles.small}>
+                  Live fee estimates. No money moves.
+                </Text>
+                <SourceSummary
+                  registry={nostr}
+                  open={() => setSourcesOpen(true)}
+                />
                 <RegtestCustodyCard
                   custody={regtest}
                   amount={fundAmount}
                   setAmount={setFundAmount}
                 />
-                <SourceSummary
-                  registry={nostr}
-                  open={() => setSourcesOpen(true)}
-                />
-                <View style={local.quickActions}>
-                  {[
-                    ["↑", "Send"],
-                    ["↓", "Receive"],
-                    ["⌘", "Scan"],
-                    ["•••", "More"],
-                  ].map(([icon, label]) => (
-                    <View key={label} style={local.quickAction}>
-                      <View style={local.quickCircle}>
-                        <Text style={local.quickIcon}>{icon}</Text>
-                      </View>
-                      <Text style={local.quickLabel}>{label}</Text>
-                    </View>
-                  ))}
-                </View>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={flow.edit}
-                  style={local.meshPromo}
-                >
-                  <EcashMeshMark small />
-                  <View style={{ flex: 1 }}>
-                    <Text style={local.promoOverline}>
-                      Smarter Payments with
-                    </Text>
-                    <Text style={local.promoTitle}>EcashMesh</Text>
-                    <Text style={styles.small}>
-                      Choose the best payment source across Cashu, Fedimint and
-                      Lightning.
-                    </Text>
-                  </View>
-                  <Text style={local.promoArrow}>›</Text>
-                </Pressable>
-                <Section title="Recent Activity">
-                  <View style={local.activityHead}>
-                    <Text style={local.activityNote}>
-                      {regtest.enabled
-                        ? "Local regtest wallet activity"
-                        : "No wallet activity is available in read-only mode"}
-                    </Text>
-                  </View>
-                  <Text style={styles.small}>
-                    {regtest.enabled
-                      ? "Balances are derived from proofs stored locally in this browser."
-                      : "Nostr import does not read proofs or transaction history. Balances remain unknown without custody or explicit local connector evidence."}
-                  </Text>
-                </Section>
-                <Button onPress={flow.edit}>Send payment</Button>
-                <BottomNav />
               </>
             )}
 
             {flow.screen === "payment" && (
               <>
-                <ScreenHeader title="Send" onBack={flow.back} end="⌗" />
-                <View
-                  accessibilityLabel="Routing mode: live"
-                  style={[local.modeNotice, local.liveNotice]}
-                >
-                  <Text style={local.modeNoticeTitle}>
-                    Live Route Discovery
-                  </Text>
-                  <Text style={styles.small}>
-                    LIVE READ-ONLY · No funds will move. Public Cashu mint data,
-                    unpaid quotes, and Fedimint client status only.
-                  </Text>
-                </View>
+                <ScreenHeader title="Compare a payment" onBack={flow.back} />
+                <Text style={styles.small}>
+                  Enter an amount and a fresh invoice. No payment will be sent.
+                </Text>
                 <Text style={local.fieldLabel}>Amount</Text>
                 <View style={local.amountWrap}>
                   <TextInput
@@ -558,32 +467,35 @@ function ReferenceWallet() {
                     secondary={flow.selectedSourceIds.length > 0}
                     onPress={() => flow.setSelectedSourceIds([])}
                   >
-                    Automatic — compare all enabled sources
+                    All enabled sources
                   </Button>
                   <Text style={styles.small}>
-                    Automatic compares all enabled Cashu sources and locally
-                    connected Fedimint sources. Choose a source only to narrow
-                    this payment's comparison.
+                    Leave all selected, or choose specific sources below.
                   </Text>
-                  {nostr.profiles
-                    .filter(
-                      (p) => p.enabled && p.authorization === "user_authorized",
-                    )
-                    .map((profile) => (
-                      <Button
-                        key={profile.id}
-                        secondary={!flow.selectedSourceIds.includes(profile.id)}
-                        onPress={() =>
-                          flow.setSelectedSourceIds((ids) =>
-                            ids.includes(profile.id)
-                              ? ids.filter((id) => id !== profile.id)
-                              : [...ids, profile.id],
-                          )
-                        }
-                      >
-                        {`${profile.label} · ${profile.protocol}${flow.selectedSourceIds.includes(profile.id) ? " · Selected" : ""}`}
-                      </Button>
-                    ))}
+                  <Disclosure title="Choose specific sources">
+                    {nostr.profiles
+                      .filter(
+                        (p) =>
+                          p.enabled && p.authorization === "user_authorized",
+                      )
+                      .map((profile) => (
+                        <Button
+                          key={profile.id}
+                          secondary={
+                            !flow.selectedSourceIds.includes(profile.id)
+                          }
+                          onPress={() =>
+                            flow.setSelectedSourceIds((ids) =>
+                              ids.includes(profile.id)
+                                ? ids.filter((id) => id !== profile.id)
+                                : [...ids, profile.id],
+                            )
+                          }
+                        >
+                          {`${profile.label} · ${profile.protocol}${flow.selectedSourceIds.includes(profile.id) ? " · Selected" : ""}`}
+                        </Button>
+                      ))}
+                  </Disclosure>
                   {!nostr.profiles.some((p) => p.enabled) &&
                     !regtest.custody && (
                       <Text style={styles.small}>
@@ -624,12 +536,27 @@ function ReferenceWallet() {
                   <Text style={local.destinationIcon}>⌗</Text>
                 </View>
                 {flow.error && <ErrorNotice error={flow.error} />}
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 12,
+                  }}
+                >
+                  <Switch
+                    accessibilityLabel="Compare routes ignoring balance"
+                    value={flow.comparisonOnly}
+                    onValueChange={flow.setComparisonOnly}
+                  />
+                  <Text style={[styles.body, { flex: 1 }]}>
+                    Include sources with no balance
+                  </Text>
+                </View>
                 <Button onPress={() => void flow.evaluate()}>
-                  Find best payment source
+                  {flow.comparisonOnly
+                    ? "Compare fees"
+                    : "Check payment options"}
                 </Button>
-                <Text style={local.powered}>
-                  Powered by EcashMesh · LIVE · read-only evaluation
-                </Text>
               </>
             )}
 
@@ -640,22 +567,24 @@ function ReferenceWallet() {
                   onBack={flow.back}
                   backLabel="Back to payment"
                 />
-                <View style={local.integrationLine}>
-                  <EcashMeshMark small />
-                  <Text style={styles.small}>
-                    Source selection · integrated into My Wallet
-                  </Text>
-                </View>
                 <Heading
-                  eyebrow="Source selection / Evaluation"
-                  title="Available sources"
+                  eyebrow="RESULTS"
+                  title={
+                    flow.comparisonOnly ? "Compare fees" : "Payment options"
+                  }
                 >
                   {flow.payment
-                    ? `${sats(flow.payment.amount)} · ${flow.payment.destination.type} · Send`
+                    ? `${sats(flow.payment.amount)} · ${flow.payment.destination.type}`
                     : "Your available payment sources"}
                 </Heading>
                 {flow.busy && (
-                  <Loading label="Discovering live quote-backed sources…" />
+                  <Loading
+                    label={
+                      flow.comparisonOnly
+                        ? "Checking fees…"
+                        : "Checking payment options…"
+                    }
+                  />
                 )}
                 {flow.error && (
                   <>
@@ -673,11 +602,32 @@ function ReferenceWallet() {
                     <DecisionView
                       decision={flow.decision}
                       inspect={flow.inspect}
+                      inspectOption={flow.inspectOption}
                       select={flow.select}
                     />
-                    <LiveObservations decision={flow.decision} />
+                    <Disclosure title="Connection details">
+                      <LiveObservations decision={flow.decision} />
+                    </Disclosure>
                     <ExcludedSources
-                      values={flow.decision.excluded_sources ?? []}
+                      values={(flow.decision.excluded_sources ?? []).filter(
+                        (value: unknown) =>
+                          !flow.decision?.gateway_estimated_sources?.some(
+                            (option) =>
+                              option.source_id ===
+                              (value as { source_id?: string }).source_id,
+                          ),
+                      )}
+                    />
+                  </>
+                )}
+                {flow.comparison && (
+                  <>
+                    <RouteComparisonView
+                      comparison={flow.comparison}
+                      inspect={flow.inspectOption}
+                    />
+                    <ExcludedSources
+                      values={flow.comparison.excluded_sources}
                     />
                   </>
                 )}
@@ -690,6 +640,15 @@ function ReferenceWallet() {
               </>
             )}
 
+            {flow.screen === "details" && flow.inspectedOption && (
+              <>
+                <ScreenHeader title="Option details" onBack={flow.back} />
+                <OptionDetails option={flow.inspectedOption} />
+                <Button secondary onPress={flow.back}>
+                  Back to options
+                </Button>
+              </>
+            )}
             {flow.screen === "details" && flow.decision && flow.selected && (
               <>
                 <ScreenHeader title="Source Details" onBack={flow.back} />
@@ -710,15 +669,20 @@ function ReferenceWallet() {
               flow.payment &&
               flow.selected && (
                 <>
-                  <ScreenHeader title="Confirm Payment" onBack={flow.back} />
-                  <Text style={local.testEyebrow}>Pocket / Confirmation</Text>
+                  <ScreenHeader
+                    title={
+                      regtest.enabled ? "Confirm payment" : "Review option"
+                    }
+                    onBack={flow.back}
+                  />
+
                   <Surface>
                     <View style={local.confirmTop}>
                       <View style={local.confirmIdentity}>
                         <EcashMeshMark small />
-                        <View>
-                          <Text style={local.confirmName}>
-                            {flow.selected.connector}
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <Text numberOfLines={2} style={local.confirmName}>
+                            {flow.selected.source_label ?? "Payment source"}
                           </Text>
                           <Text style={styles.small}>
                             {flow.selected.protocol === "fedimint"
@@ -736,12 +700,6 @@ function ReferenceWallet() {
                           </Text>
                         </View>
                       </View>
-                      <View style={local.confirmScore}>
-                        <Text style={local.confirmScoreNumber}>
-                          {flow.selected.score}
-                        </Text>
-                        <Text style={styles.small}>/100</Text>
-                      </View>
                     </View>
                     <View style={local.divider} />
                     <Row label="Amount" value={sats(flow.payment.amount)} />
@@ -754,32 +712,14 @@ function ReferenceWallet() {
                       value={feeRate(flow.selected.fee.fee_rate_basis_points)}
                     />
                     <Row
-                      label="Fee reasonableness"
-                      value={feeReasonableness(
-                        flow.selected.fee_reasonableness,
-                      )}
-                    />
-                    <Row
-                      label="Estimated time"
-                      value={estimatedTime(
-                        flow.selected.estimated_time_seconds,
-                      )}
-                    />
-                    <Row
                       label="Destination"
                       value={compactDestination(flow.payment.destination.value)}
                     />
-                    <Row
-                      label="Selected source execution ID"
-                      value={flow.selected.route_id}
-                    />
                   </Surface>
-                  <Risks flags={flow.selected.risk_flags} />
-                  <Text style={styles.body}>
-                    {regtest.enabled
-                      ? "This browser holds the selected regtest Cashu proofs and NUT-08 change outputs locally. EcashMesh receives no proof secrets."
-                      : "This is a live read-only evaluation. Mainnet payment execution is unavailable."}
-                  </Text>
+                  <Disclosure title="Details and risks">
+                    <Row label="Source ID" value={flow.selected.connector} />
+                    <Risks flags={flow.selected.risk_flags} />
+                  </Disclosure>
                   {flow.error && (
                     <>
                       <ErrorNotice error={flow.error} />
@@ -797,15 +737,9 @@ function ReferenceWallet() {
                       Confirm real regtest payment
                     </Button>
                   ) : (
-                    <Surface>
-                      <Text style={local.custodyTitle}>
-                        Read-only route evaluation
-                      </Text>
-                      <Text style={styles.small}>
-                        This route is quote-backed only. EcashMesh did not
-                        receive proofs and cannot send a mainnet payment.
-                      </Text>
-                    </Surface>
+                    <Text style={styles.small}>
+                      Fee preview only. No payment will be sent.
+                    </Text>
                   )}
                   {!flow.busy && (
                     <Button secondary onPress={flow.edit}>
@@ -853,15 +787,9 @@ function ReferenceWallet() {
                   This result was reported settled by the regtest Cashu mint.
                 </Text>
                 <Button secondary onPress={flow.home}>
-                  Return to Pocket
+                  Back to home
                 </Button>
               </>
-            )}
-            {flow.screen !== "home" && (
-              <Text style={local.footer}>
-                EcashMesh is an evidence-aware routing capability inside this
-                reference wallet.
-              </Text>
             )}
           </View>
         </ScrollView>
@@ -880,17 +808,7 @@ function RegtestCustodyCard({
   setAmount: (value: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
-  if (!custody.enabled) {
-    return (
-      <Surface>
-        <Text style={local.custodyTitle}>Regtest Cashu custody</Text>
-        <Text style={styles.small}>
-          Disabled. Start the web app with
-          EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY=true to hold local regtest proofs.
-        </Text>
-      </Surface>
-    );
-  }
+  if (!custody.enabled) return null;
   const requested = Number(amount);
   return (
     <Surface>
@@ -1018,109 +936,6 @@ const local = StyleSheet.create({
     transform: [{ rotate: "-15deg" }],
   },
   meshNodeSmall: { fontSize: 22 },
-  homeHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    minHeight: 68,
-  },
-  avatar: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: "#4B8DEA",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  avatarText: { color: "white", fontSize: 14, fontWeight: "700" },
-  homeTitle: { flex: 1, color: colors.ink, fontSize: 16, fontWeight: "700" },
-  settings: { color: colors.ink, fontSize: 19 },
-  balanceCard: {
-    backgroundColor: colors.navy,
-    borderRadius: 17,
-    padding: 18,
-    gap: 6,
-  },
-  balanceLabel: { color: "#D6E4FE", fontSize: 12 },
-  balance: {
-    color: "white",
-    fontSize: 27,
-    fontWeight: "700",
-    letterSpacing: -0.4,
-  },
-  balanceFiat: { color: "#DBE6F9", fontSize: 13 },
-  quickActions: {
-    flexDirection: "row",
-    justifyContent: "space-around",
-    paddingVertical: 5,
-  },
-  quickAction: { alignItems: "center", gap: 6 },
-  quickCircle: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: colors.blue,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  quickIcon: { color: "white", fontSize: 24, lineHeight: 26 },
-  quickLabel: { color: colors.muted, fontSize: 11 },
-  meshPromo: {
-    flexDirection: "row",
-    gap: 10,
-    backgroundColor: "#EDF6FF",
-    padding: 14,
-    borderRadius: 12,
-    alignItems: "center",
-  },
-  promoOverline: { color: colors.muted, fontSize: 11 },
-  promoTitle: { color: colors.ink, fontSize: 17, fontWeight: "700" },
-  promoArrow: { color: colors.blue, fontSize: 28 },
-  activityHead: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginTop: -6,
-  },
-  activityNote: { fontSize: 11, color: colors.muted },
-  seeAll: { fontSize: 12, color: colors.blue, fontWeight: "700" },
-  activityRow: {
-    flexDirection: "row",
-    gap: 10,
-    paddingVertical: 10,
-    alignItems: "center",
-    borderBottomWidth: 1,
-    borderColor: "#EDF1F7",
-  },
-  activityIcon: {
-    width: 35,
-    height: 35,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  activityLabel: { color: colors.ink, fontSize: 13, fontWeight: "600" },
-  activityAmount: { fontSize: 12, fontWeight: "700" },
-  bottomNav: {
-    flexDirection: "row",
-    justifyContent: "space-around",
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderColor: colors.line,
-  },
-  navItem: { alignItems: "center", gap: 2, minWidth: 48 },
-  navIcon: { color: "#97A7C1", fontSize: 20 },
-  navActive: { color: colors.blue },
-  navText: { color: "#97A7C1", fontSize: 9 },
-  navTextActive: { color: colors.blue, fontWeight: "700" },
-  modeNotice: {
-    borderRadius: 12,
-    borderWidth: 1,
-    padding: 12,
-    gap: 3,
-  },
-  liveNotice: { backgroundColor: "#EDF8F4", borderColor: "#AEE8CD" },
-  modeNoticeTitle: { color: colors.ink, fontWeight: "800", fontSize: 14 },
   destinationTypes: { gap: 8 },
   fieldLabel: {
     color: colors.ink,
@@ -1167,16 +982,6 @@ const local = StyleSheet.create({
     minHeight: 50,
   },
   destinationIcon: { color: colors.muted, fontSize: 20, paddingHorizontal: 14 },
-  contactCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    padding: 10,
-    borderRadius: 10,
-    backgroundColor: "#F5F8FC",
-  },
-  contactBolt: { fontSize: 28, color: "#FFB11B" },
-  contactName: { color: colors.ink, fontSize: 13, fontWeight: "700" },
   choice: {
     flexDirection: "row",
     gap: 10,
@@ -1210,7 +1015,6 @@ const local = StyleSheet.create({
     borderRadius: 5,
     backgroundColor: colors.blue,
   },
-  powered: { color: colors.muted, fontSize: 11, textAlign: "center" },
   custodyTitle: { color: colors.ink, fontSize: 16, fontWeight: "800" },
   quoteBox: {
     gap: 9,
@@ -1219,12 +1023,6 @@ const local = StyleSheet.create({
     padding: 11,
   },
   custodyError: { color: colors.red, fontSize: 12, lineHeight: 17 },
-  integrationLine: {
-    flexDirection: "row",
-    gap: 9,
-    alignItems: "center",
-    marginTop: 3,
-  },
   testEyebrow: { color: colors.faint, fontSize: 10, textAlign: "center" },
   confirmTop: {
     flexDirection: "row",
@@ -1278,11 +1076,4 @@ const local = StyleSheet.create({
     marginTop: 10,
   },
   successAmount: { color: colors.ink, fontSize: 27, fontWeight: "800" },
-  footer: {
-    color: colors.muted,
-    fontSize: 11,
-    lineHeight: 16,
-    textAlign: "center",
-    paddingVertical: 20,
-  },
 });

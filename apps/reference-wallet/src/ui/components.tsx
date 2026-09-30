@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -35,6 +35,32 @@ export const sats = (amount: number | null) =>
   amount === null ? "Unknown fee" : `${amount.toLocaleString("en-US")} sats`;
 export const estimatedTime = (seconds: number | null) =>
   seconds === null ? "Not available" : `~ ${seconds} seconds`;
+
+export function Disclosure({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <View style={{ gap: 12 }}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        onPress={() => setOpen(!open)}
+      >
+        <Text
+          style={[styles.body, { color: colors.blue, paddingVertical: 10 }]}
+        >
+          {open ? "−" : "+"} {title}
+        </Text>
+      </Pressable>
+      {open && children}
+    </View>
+  );
+}
 
 export function Button({
   children,
@@ -114,7 +140,7 @@ export function Row({ label, value }: { label: string; value: string }) {
   return (
     <View style={styles.row}>
       <Text style={styles.rowLabel}>{label}</Text>
-      <Text selectable style={styles.rowValue}>
+      <Text selectable numberOfLines={3} style={styles.rowValue}>
         {value}
       </Text>
     </View>

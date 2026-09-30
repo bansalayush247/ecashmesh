@@ -52,6 +52,37 @@ const decision = {
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status });
 
+test("comparison uses a separate read-only endpoint and rejects executable responses", async () => {
+  const response = {
+    mode: "comparison_only",
+    ignore_balances: true,
+    executable: false,
+    ranking_basis: "known_fee_ascending",
+    notice: "Partial fees remain partial",
+    candidates: [],
+    excluded_sources: [],
+    observed_at_unix_seconds: 100,
+  };
+  const client = createEcashMeshClient({
+    baseUrl: "http://local",
+    fetch: async (url, options) => {
+      assert.equal(url, "http://local/v1/routes/compare");
+      assert.equal(JSON.parse(String(options?.body)).amount, payment.amount);
+      return json(response);
+    },
+  });
+  assert.deepEqual(await client.compareRoutes(payment), response);
+  const invalid = createEcashMeshClient({
+    baseUrl: "http://local",
+    fetch: async () => json({ ...response, executable: true }),
+  });
+  await assert.rejects(
+    invalid.compareRoutes(payment),
+    (error: unknown) =>
+      error instanceof EcashMeshError && error.code === "INVALID_RESPONSE",
+  );
+});
+
 test("adapter translates payment intent and preserves every returned decision field and order", async () => {
   let calls = 0;
   const client = createEcashMeshClient({

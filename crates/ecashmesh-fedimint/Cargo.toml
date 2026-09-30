@@ -19,10 +19,14 @@ fedimint-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.
 fedimint-connectors = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
 fedimint-core = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
 fedimint-ln-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
+fedimint-ln-common = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
+fedimint-lnv2-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
+fedimint-lnv2-common = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
 fedimint-meta-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
 fedimint-mint-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
 fedimint-rocksdb = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
 fedimint-wallet-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
+futures = "0.3"
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rand = "0.8"

@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::cors::CorsLayer;
 
+mod comparison;
 mod connectors;
 mod federation_setup;
 mod live;
@@ -94,6 +95,7 @@ fn app(provider: Provider) -> Router {
         .route("/v1/market/btc-usd", get(btc_usd_price))
         .route("/v1/routes/rank", post(rank))
         .route("/v1/routes/evaluate", post(evaluate))
+        .route("/v1/routes/compare", post(comparison::compare))
         .route("/v1/connectors", get(connector_observations))
         .route("/v1/connectors/discover", post(discover_connectors))
         .route("/v1/federations/setup", get(federation_setup::catalog))
@@ -251,7 +253,19 @@ async fn evaluate(
 ) -> Result<Json<EvaluateResponse>, ApiError> {
     let Json(request) = request
         .map_err(|error| ApiError::new("invalid_json", format!("invalid request body: {error}")))?;
-    let response = evaluate_using(&state.provider, Ok(Json(request.clone()))).await?;
+    // Respond before the wallet's 15-second transport deadline, including
+    // discovery, destination quoting, and every source read.
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(12),
+        evaluate_using(&state.provider, Ok(Json(request.clone()))),
+    )
+    .await
+    .map_err(|_| {
+        ApiError::new(
+            "EVALUATION_DEADLINE",
+            "Source discovery exceeded the evaluation deadline. Refresh sources and retry.",
+        )
+    })??;
     state
         .payments
         .record_evaluation(&request, &response.0)
@@ -365,7 +379,6 @@ async fn evaluate_using(
         &batch.discovery,
         &destination_mint_urls,
         provider.allows_discovered_sources(),
-        provider.automatic_discovered_source_limit(),
         strict_source_registry,
     )?;
     // Local aliases must not silently resolve to a different federation after
@@ -462,6 +475,7 @@ async fn evaluate_using(
             .collect::<Vec<_>>(),
     );
     response.apply_fedimint_details(&batch.fedimint_observations, &evaluation.quote_observations);
+    response.gateway_estimated_sources = evaluation.gateway_estimated_sources;
     let ranked_ids = std::iter::once(&response.recommended_source)
         .chain(&response.alternative_sources)
         .map(|route| route.source_id.clone())
@@ -489,6 +503,25 @@ async fn evaluate_using(
     }
     response.sync_legacy_route_fields();
     Ok(Json(response))
+}
+
+fn gateway_comparison_diagnostic(
+    quote: Option<&serde_json::Value>,
+    estimate: Option<&serde_json::Value>,
+) -> Option<String> {
+    let estimate = estimate?;
+    let quote_error = quote
+        .and_then(|value| value["issue"]["message"].as_str())
+        .unwrap_or("Native federation fee quote is unavailable");
+    if estimate["state"] == "known" {
+        Some(format!(
+            "Verified gateway-fee estimate is available. {quote_error}. This is not a funded, quote-backed route."
+        ))
+    } else {
+        estimate["issue"]["message"]
+            .as_str()
+            .map(|error| format!("{quote_error}; gateway comparison unavailable: {error}"))
+    }
 }
 
 fn source_diagnostics(
@@ -540,6 +573,9 @@ fn source_diagnostics(
             let quote = quotes.iter().find(|value| {
                 value["connector"] == id && value["kind"] != "destination_mint_quote"
             });
+            let gateway_estimate = quotes.iter().find(|value| {
+                value["connector"] == id && value["kind"] == "fedimint_gateway_fee_estimate"
+            });
             let reason = if destinations.contains(&endpoint) {
                 "Destination is excluded from payment sources".to_owned()
             } else if request
@@ -556,6 +592,8 @@ fn source_diagnostics(
             } else if observation.is_none() {
                 "Source is not configured locally or its URL was rejected by discovery policy"
                     .to_owned()
+            } else if let Some(message) = gateway_comparison_diagnostic(quote, gateway_estimate) {
+                message
             } else if let Some(message) = quote.and_then(|value| value["issue"]["message"].as_str())
             {
                 message.to_owned()
@@ -1184,6 +1222,9 @@ pub(crate) struct EvaluateResponse {
     pub(crate) recommended_source: EvaluatedRouteResponse,
     /// Other independently quote-backed payment sources, in rank order.
     pub(crate) alternative_sources: Vec<EvaluatedRouteResponse>,
+    /// Authenticated gateway-fee comparisons without a native federation quote.
+    /// These are never executable routes or recommendations.
+    gateway_estimated_sources: Vec<serde_json::Value>,
     /// Compatibility mirror for clients migrating from route-selection wording.
     #[serde(rename = "recommended_route")]
     pub(crate) legacy_recommended_route: EvaluatedRouteResponse,
@@ -1232,6 +1273,7 @@ impl EvaluateResponse {
             legacy_alternatives: routes.clone(),
             recommended_source,
             alternative_sources: routes,
+            gateway_estimated_sources: Vec::new(),
             score_breakdown,
             risk_flags,
             evidence: connectors

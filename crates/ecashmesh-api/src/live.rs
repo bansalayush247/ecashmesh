@@ -67,6 +67,9 @@ pub(super) struct LiveEvaluation {
     pub fee_terms: Vec<LiveFeeTerms>,
     pub expires_at_unix_seconds: u64,
     pub graph_context: Value,
+    /// Verified gateway-fee comparisons that lack a native federation quote.
+    /// They are intentionally kept outside the executable route ranking.
+    pub gateway_estimated_sources: Vec<Value>,
 }
 
 /// Quote and keyset-fee facts for a quoted source connector.
@@ -261,9 +264,64 @@ pub(super) async fn evaluate(
     let mut source_health = BTreeMap::new();
     let mut expiries = Vec::new();
     let mut no_route_details = Vec::new();
+    let mut gateway_estimated_sources = Vec::new();
     if let Some(expiry) = destination_expiry {
         expiries.push(expiry);
     }
+    // Poll independent source reads together. Preserve input ordering when
+    // collecting results so completion timing cannot affect ranking.
+    let fedimint_reads = futures::future::join_all(sources.iter().filter_map(|source| {
+        let observation = batch
+            .fedimint_observations
+            .iter()
+            .find(|observation| observation.snapshot.id == source.id)?;
+        let invoice = &invoice;
+        Some(async move {
+            let read = async {
+                let quote = fedimint
+                    .quote(observation, invoice.as_str(), amount, unix_now())
+                    .await;
+                let estimate = if quote.is_err() {
+                    Some(
+                        fedimint
+                            .gateway_estimate(observation, invoice.as_str(), amount, unix_now())
+                            .await,
+                    )
+                } else {
+                    None
+                };
+                (quote, estimate)
+            };
+            let result = tokio::time::timeout(std::time::Duration::from_secs(4), read)
+                .await
+                .unwrap_or_else(|_| {
+                    (
+                        Err("Fedimint source evaluation timed out".into()),
+                        Some(Err("Gateway estimate deadline reached".into())),
+                    )
+                });
+            (source.id.clone(), result)
+        })
+    }));
+    let cashu_reads = futures::future::join_all(sources.iter().filter_map(|source| {
+        let observation = by_id.get(&source.id).copied()?;
+        if !source.capabilities.can_send || !source.capabilities.supports_lightning {
+            return None;
+        }
+        let invoice = &invoice;
+        Some(async move {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                service.melt_quote(source.id.clone(), &observation.mint_url, invoice, amount),
+            )
+            .await
+            .unwrap_or_else(|_| Err("Cashu source quote timed out".into()));
+            (source.id.clone(), result)
+        })
+    }));
+    let (fedimint_reads, cashu_reads) = tokio::join!(fedimint_reads, cashu_reads);
+    let mut fedimint_reads = fedimint_reads.into_iter().collect::<BTreeMap<_, _>>();
+    let mut cashu_reads = cashu_reads.into_iter().collect::<BTreeMap<_, _>>();
     for source in sources {
         if source.connector_type == ConnectorType::Fedimint {
             let Some(observation) = batch
@@ -274,17 +332,55 @@ pub(super) async fn evaluate(
                 no_route_details.push(format!("{}: Fedimint observation is missing", source.id));
                 continue;
             };
-            let quote = match fedimint
-                .quote(observation, invoice.as_str(), amount, unix_now())
-                .await
-            {
+            let (quote_result, estimate_result) = fedimint_reads
+                .remove(&source.id)
+                .expect("selected federation was probed");
+            let quote = match quote_result {
                 Ok(quote) => quote,
                 Err(error) => {
                     quote_observations.push(fedimint_quote_json(observation, None, Some(&error)));
-                    no_route_details.push(format!(
-                        "{}: missing read-only Fedimint quote: {error}",
-                        source.id
-                    ));
+                    match estimate_result.expect("failed quotes have estimate diagnostics") {
+                        Ok(estimate) => {
+                            for candidate in &estimate.candidates {
+                                gateway_estimated_sources.push(json!({
+                                    "source_id": source.id.as_str(),
+                                    "source_label": observation.config.label,
+                                    "protocol": "fedimint",
+                                    "settlement_mechanism": "fedimint_lightning",
+                                    "route_classification": "gateway_estimated",
+                                    "executable": false,
+                                    "gateway_id": candidate.gateway_id,
+                                    "gateway_url": candidate.gateway_url,
+                                    "gateway_protocol": candidate.gateway_protocol,
+                                    "lightning_alias": candidate.lightning_alias,
+                                    "gateway_fee_sats": candidate.gateway_fee_sats.sats(),
+                                    "fee_base_msat": candidate.fee_base_msat,
+                                    "fee_ppm": candidate.fee_ppm,
+                                    "expiration_delta": candidate.expiration_delta,
+                                    "federation_fee_sats": null,
+                                    "funding_feasible": null,
+                                    "gateway_identity_verified": true,
+                                    "observed_at_unix_seconds": estimate.observed_at.unix_seconds(),
+                                    "expires_at_unix_seconds": estimate.expires_at_unix_seconds,
+                                    "reason": "Gateway fee is authenticated, but this federation did not provide a native read-only fee quote; federation fee, funding and execution remain unknown"
+                                }));
+                            }
+                            quote_observations
+                                .push(fedimint_gateway_estimate_json(observation, &estimate));
+                        }
+                        Err(estimate_error) => {
+                            quote_observations.push(json!({
+                                "kind": "fedimint_gateway_fee_estimate",
+                                "connector": source.id.as_str(),
+                                "state": "unknown",
+                                "issue": {"code": "GATEWAY_ESTIMATE_UNAVAILABLE", "message": estimate_error},
+                            }));
+                            no_route_details.push(format!(
+                                "{}: missing read-only Fedimint quote: {error}; gateway estimate unavailable: {estimate_error}",
+                                source.id
+                            ));
+                        }
+                    }
                     continue;
                 }
             };
@@ -336,13 +432,20 @@ pub(super) async fn evaluate(
             ));
             continue;
         }
-        let quote = service
-            .melt_quote(source.id.clone(), &observation.mint_url, &invoice, amount)
-            .await
-            .map_err(|error| LiveNoRoute {
-                details: vec![format!("{}: source melt quote failed: {error}", source.id)],
-                quote_observations: Vec::new(),
-            })?;
+        let quote = match cashu_reads
+            .remove(&source.id)
+            .expect("eligible Cashu source was probed")
+        {
+            Ok(quote) => quote,
+            Err(error) => {
+                no_route_details.push(format!("{}: source melt quote failed: {error}", source.id));
+                quote_observations.push(json!({
+                    "kind": "source_melt_quote", "connector": source.id.as_str(), "state": "unknown",
+                    "issue": {"code": "QUOTE_UNAVAILABLE", "message": error},
+                }));
+                continue;
+            }
+        };
         quote_observations.push(melt_quote_json(observation, &quote));
         let Some(quote_evidence) = quote.evidence.observation() else {
             let detail = quote.issue.map_or_else(
@@ -580,6 +683,15 @@ pub(super) async fn evaluate(
             "route_classification": "quote_backed",
             "execution": "No wallet proofs, funds, or payment instruction were supplied to EcashMesh",
         }),
+        gateway_estimated_sources: {
+            gateway_estimated_sources.sort_by(|left, right| {
+                left["gateway_fee_sats"]
+                    .as_u64()
+                    .cmp(&right["gateway_fee_sats"].as_u64())
+                    .then_with(|| left["source_id"].as_str().cmp(&right["source_id"].as_str()))
+            });
+            gateway_estimated_sources
+        },
     })
 }
 
@@ -662,6 +774,39 @@ fn fedimint_quote_json(
             "expiry": quote.expires_at_unix_seconds,
         })),
         "issue": issue.map(|message| json!({"code": "READ_ONLY_QUOTE_UNAVAILABLE", "message": message})),
+    })
+}
+
+fn fedimint_gateway_estimate_json(
+    source: &FederationObservation,
+    estimate: &ecashmesh_fedimint::FedimintGatewayEstimate,
+) -> Value {
+    json!({
+        "kind": "fedimint_gateway_fee_estimate",
+        "connector": source.snapshot.id.as_str(),
+        "federation_id": source.config.federation_id,
+        "state": "known",
+        "observed_at_unix_seconds": estimate.observed_at.unix_seconds(),
+        "value": {
+            "gateway_fee_sats": estimate.gateway_fee_sats.sats(),
+            "selected_gateway_id": estimate.selected_gateway_id,
+            "gateway_protocol": estimate.gateway_protocol,
+            "gateway_candidates": estimate.candidates.iter().map(|candidate| json!({
+                "gateway_id": candidate.gateway_id,
+                "gateway_url": candidate.gateway_url,
+                "gateway_fee_sats": candidate.gateway_fee_sats.sats(),
+                "fee_base_msat": candidate.fee_base_msat,
+                "fee_ppm": candidate.fee_ppm,
+                "expiration_delta": candidate.expiration_delta,
+                "gateway_protocol": candidate.gateway_protocol,
+                "lightning_alias": candidate.lightning_alias,
+            })).collect::<Vec<_>>(),
+            "gateway_identity_verified": true,
+            "federation_fee_sats": null,
+            "funding_feasible": null,
+            "payable": null,
+            "expiry": estimate.expires_at_unix_seconds,
+        },
     })
 }
 

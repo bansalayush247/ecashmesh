@@ -4,6 +4,8 @@ import type {
   PaymentInput,
   PaymentSource,
   RouteDecision,
+  RouteComparison,
+  ComparisonOption,
 } from "../ecashmesh/contracts";
 import { EcashMeshError } from "../ecashmesh/transport";
 import { collectPayment } from "./payment";
@@ -47,7 +49,14 @@ export function usePaymentFlow(
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
   const [payment, setPayment] = useState<PaymentInput | null>(null);
   const [decision, setDecision] = useState<RouteDecision | null>(null);
+  const [comparison, setComparison] = useState<RouteComparison | null>(null);
+  const [comparisonOnly, setComparisonOnly] = useState(
+    !regtestCustody &&
+      process.env.EXPO_PUBLIC_ROUTE_COMPARISON_ONLY !== "false",
+  );
   const [selected, setSelected] = useState<PaymentSource | null>(null);
+  const [inspectedOption, setInspectedOption] =
+    useState<ComparisonOption | null>(null);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [error, setError] = useState<EcashMeshError | null>(null);
   const [busy, setBusy] = useState(false);
@@ -63,8 +72,10 @@ export function usePaymentFlow(
   }
 
   function edit() {
+    setInspectedOption(null);
     cancel();
     setDecision(null);
+    setComparison(null);
     setSelected(null);
     setPayment(null);
     setReceipt(null);
@@ -82,6 +93,7 @@ export function usePaymentFlow(
   }
 
   async function evaluate() {
+    setInspectedOption(null);
     if (active.current) return;
     let input: PaymentInput;
     try {
@@ -103,14 +115,20 @@ export function usePaymentFlow(
     active.current = controller;
     setPayment(input);
     setDecision(null);
+    setComparison(null);
     setSelected(null);
     setReceipt(null);
     setError(null);
     setBusy(true);
     setScreen("decision");
     try {
-      const result = await ecashmesh.evaluateRoute(input, controller.signal);
-      if (active.current === controller) setDecision(result);
+      if (comparisonOnly) {
+        const result = await ecashmesh.compareRoutes(input, controller.signal);
+        if (active.current === controller) setComparison(result);
+      } else {
+        const result = await ecashmesh.evaluateRoute(input, controller.signal);
+        if (active.current === controller) setDecision(result);
+      }
     } catch (error) {
       if (active.current === controller) setError(asError(error));
     } finally {
@@ -122,16 +140,21 @@ export function usePaymentFlow(
   }
 
   function inspect(route: PaymentSource) {
+    setInspectedOption(null);
     setSelected(route);
     setScreen("details");
   }
   function select(route: PaymentSource) {
+    setInspectedOption(null);
+    if (comparisonOnly || comparison) return;
     setSelected(route);
     setError(null);
     setScreen("confirmation");
   }
 
   async function confirm() {
+    if (inspectedOption) return;
+    if (comparisonOnly || comparison) return;
     if (!payment || !decision || !selected || active.current) return;
     const controller = new AbortController();
     active.current = controller;
@@ -192,6 +215,9 @@ export function usePaymentFlow(
     setSourceMintUrl,
     payment,
     decision,
+    comparison,
+    comparisonOnly,
+    setComparisonOnly,
     selected,
     receipt,
     error,
@@ -200,6 +226,12 @@ export function usePaymentFlow(
     home,
     evaluate,
     inspect,
+    inspectedOption,
+    inspectOption: (option: ComparisonOption) => {
+      setSelected(null);
+      setInspectedOption(option);
+      setScreen("details");
+    },
     select,
     confirm,
     back,

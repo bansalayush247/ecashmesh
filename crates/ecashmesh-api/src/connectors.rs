@@ -22,7 +22,6 @@ pub(super) struct Provider {
     cashu: Arc<DiscoveryService>,
     fedimint: Arc<FedimintService>,
     allow_discovered_sources: bool,
-    automatic_discovered_source_limit: usize,
 }
 
 pub(super) struct ConnectorBatch {
@@ -109,7 +108,6 @@ pub(super) fn select_live_sources(
     discovery: &DiscoveryReport,
     destination_mint_urls: &[String],
     allow_discovered_sources: bool,
-    automatic_discovered_source_limit: usize,
     strict_registry: bool,
 ) -> Result<Vec<ConnectorSnapshot>, ApiError> {
     let source_connector = source_connector
@@ -194,9 +192,7 @@ pub(super) fn select_live_sources(
         })
         .map(ecashmesh_cashu::discovery::DiscoveredMint::connector_id)
         .collect::<Vec<_>>();
-    if automatic_discovered_source_limit > 0 {
-        discovered_sources.truncate(automatic_discovered_source_limit);
-    } else if !allow_discovered_sources {
+    if !allow_discovered_sources {
         discovered_sources.clear();
     }
     let allowed_sources = explicit_sources
@@ -248,7 +244,6 @@ impl Provider {
             cashu: Arc::new(DiscoveryService::new(vec![], vec![], vec![], 300).unwrap()),
             fedimint: Arc::new(fedimint),
             allow_discovered_sources: false,
-            automatic_discovered_source_limit: 0,
         }
     }
     pub fn from_env() -> Result<Self, String> {
@@ -281,14 +276,6 @@ impl Provider {
                         .map_err(
                             |_| "ECASHMESH_CASHU_ALLOW_DISCOVERED_SOURCES must be true or false",
                         )?;
-                let automatic_discovered_source_limit =
-                    std::env::var("ECASHMESH_CASHU_AUTO_SOURCE_LIMIT")
-                        .unwrap_or_else(|_| "0".into())
-                        .parse::<usize>()
-                        .map_err(|_| "ECASHMESH_CASHU_AUTO_SOURCE_LIMIT must be an integer")?;
-                if automatic_discovered_source_limit > 3 {
-                    return Err("ECASHMESH_CASHU_AUTO_SOURCE_LIMIT may not exceed 3".into());
-                }
                 let federations =
                     std::env::var("ECASHMESH_FEDIMINT_FEDERATIONS").unwrap_or_else(|_| "[]".into());
                 let mut federations: Vec<FederationConfig> = serde_json::from_str(&federations)
@@ -338,7 +325,6 @@ impl Provider {
                         )?,
                     ),
                     allow_discovered_sources,
-                    automatic_discovered_source_limit,
                 })
             }
             other => Err(format!("Unsupported ROUTING_MODE: {other}")),
@@ -359,20 +345,15 @@ impl Provider {
         self.allow_discovered_sources
     }
 
-    pub const fn automatic_discovered_source_limit(&self) -> usize {
-        self.automatic_discovered_source_limit
-    }
-
     pub async fn collect(
         &self,
         amount: Amount,
         hints: Vec<MintHint>,
     ) -> Result<ConnectorBatch, ApiError> {
         {
-            let state = self
-                .cashu
-                .collect(hints)
-                .await
+            let (cashu, fedimint_observations) =
+                tokio::join!(self.cashu.collect(hints), self.fedimint.collect(unix_now()),);
+            let state = cashu
                 .map_err(|error| ApiError::validation("Mint discovery failed", vec![error]))?;
             let observations = state.observations;
             let evaluated_at = observations
@@ -380,7 +361,6 @@ impl Provider {
                 .map(|observation| observation.evaluated_at)
                 .max()
                 .unwrap_or_else(|| EvidenceTimestamp::from_unix_seconds(unix_now()));
-            let fedimint_observations = self.fedimint.collect(unix_now()).await;
             let mut connectors = observations
                 .iter()
                 .map(|observation| observation.routing_snapshot(amount))

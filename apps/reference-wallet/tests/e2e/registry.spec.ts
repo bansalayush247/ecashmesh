@@ -138,11 +138,12 @@ test("NIP-60 import, encrypted NIP-78 save/restore, NIP-87 discovery and automat
   });
   await page.goto("/");
   await page.getByRole("button", { name: "Manage payment sources" }).click();
+  await page.getByRole("button", { name: /Sync with Nostr/ }).click();
   await page
     .getByRole("button", { name: "Connect Nostr", exact: true })
     .click();
   await expect(
-    page.getByText("NIP-60 wallet found", { exact: true }),
+    page.getByText("Wallet sources found", { exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Disable", exact: true }),
@@ -159,6 +160,7 @@ test("NIP-60 import, encrypted NIP-78 save/restore, NIP-87 discovery and automat
   ).toBeVisible();
   await page.reload();
   await page.getByRole("button", { name: "Manage payment sources" }).click();
+  await page.getByRole("button", { name: /Sync with Nostr/ }).click();
   await page
     .getByRole("button", { name: "Connect Nostr", exact: true })
     .click();
@@ -178,14 +180,24 @@ test("NIP-60 import, encrypted NIP-78 save/restore, NIP-87 discovery and automat
     page.getByRole("button", { name: "Add source", exact: true }),
   ).toHaveCount(2);
   await page.getByRole("button", { name: "Go back", exact: true }).click();
-  await page.getByRole("button", { name: "Send payment" }).click();
+  await page.getByRole("button", { name: "Compare a payment" }).click();
   await expect(
-    page.getByRole("button", { name: /Automatic — compare all/ }),
+    page.getByRole("button", { name: /All enabled sources/ }),
   ).toBeVisible();
   await page
     .getByLabel("Lightning destination")
     .fill("lnbc1000u1qqqqqqq9kvtew");
-  await page.getByRole("button", { name: "Find best payment source" }).click();
+  await page
+    .getByRole("switch", { name: "Compare routes ignoring balance" })
+    .click();
+  await page.getByRole("button", { name: "Check payment options" }).click();
+  await expect(
+    page.getByRole("button", { name: /Not included/ }).first(),
+  ).toBeVisible();
+  for (const button of await page
+    .getByRole("button", { name: /Not included/ })
+    .all())
+    await button.click();
   await expect(
     page.getByText("No current quote", { exact: true }),
   ).toBeVisible();
@@ -225,6 +237,7 @@ test("manual sources work disconnected; removal, local persistence and safe form
   await expect(
     page.getByRole("button", { name: "Enable", exact: true }),
   ).toBeVisible();
+  await page.getByRole("button", { name: "View source details" }).click();
   await page.getByRole("button", { name: "Remove source" }).click();
   await expect(page.getByText("Local Mint", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Add Fedimint source" }).click();

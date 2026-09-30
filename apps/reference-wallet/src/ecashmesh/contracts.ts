@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-// Transport contracts only. All signals, explanations and ordering come from
-// Phase 6. passthrough retains additive machine-readable server fields.
+// Transport contracts only. Ranking and explanations come from the API.
+// passthrough preserves additive server fields.
 const percentage = z.number().int().min(0).max(100);
 const unsigned = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const freshness = z.enum(["fresh", "stale", "unknown"]);
@@ -94,6 +94,30 @@ export const decisionSchema = z
     quote_id: z.string().min(1),
     recommended_source: paymentSourceSchema.nullable().optional(),
     alternative_sources: z.array(paymentSourceSchema).optional(),
+    gateway_estimated_sources: z
+      .array(
+        z
+          .object({
+            source_id: z.string().min(1),
+            source_label: z.string().min(1),
+            gateway_id: z.string().min(1),
+            gateway_url: z.string().url(),
+            gateway_protocol: z.enum(["lnv1", "lnv2"]),
+            lightning_alias: z.string().nullable().optional(),
+            gateway_fee_sats: unsigned,
+            fee_base_msat: unsigned,
+            fee_ppm: unsigned,
+            expiration_delta: unsigned.nullable().optional(),
+            federation_fee_sats: z.null(),
+            funding_feasible: z.null(),
+            gateway_identity_verified: z.literal(true),
+            route_classification: z.literal("gateway_estimated"),
+            executable: z.literal(false),
+            reason: z.string().min(1),
+          })
+          .passthrough(),
+      )
+      .optional(),
     // Deprecated wire fields are accepted while servers are upgraded. Views
     // use them only as a source-selection fallback.
     recommended_route: paymentSourceSchema.nullable().optional(),
@@ -158,6 +182,34 @@ export type PaymentSource = z.infer<typeof paymentSourceSchema>;
 /** @deprecated Use PaymentSource. */
 export type Route = PaymentSource;
 export type RouteDecision = z.infer<typeof decisionSchema>;
+export const comparisonSchema = z.object({
+  mode: z.literal("comparison_only"),
+  ignore_balances: z.literal(true),
+  executable: z.literal(false),
+  ranking_basis: z.literal("known_fee_ascending"),
+  notice: z.string(),
+  observed_at_unix_seconds: unsigned,
+  candidates: z.array(
+    z.object({
+      rank: unsigned,
+      source_id: z.string(),
+      source_label: z.string(),
+      federation_id: z.string().nullable(),
+      gateway_id: z.string().nullable(),
+      gateway_protocol: z.string().nullable(),
+      fee_sats: unsigned,
+      fee_scope: z.enum(["cashu_reserve", "fedimint_quote", "gateway_only"]),
+      balance_sats: unsigned.nullable(),
+      balance_ignored: z.literal(true),
+      executable: z.literal(false),
+      funding_feasible: z.null(),
+      expires_at_unix_seconds: unsigned.nullable(),
+    }),
+  ),
+  excluded_sources: z.array(z.unknown()),
+});
+export type RouteComparison = z.infer<typeof comparisonSchema>;
+export type ComparisonOption = RouteComparison["candidates"][number];
 export type EvidenceState = z.infer<typeof evidenceStateSchema>;
 export type Reason = z.infer<typeof reasonSchema>;
 export type PaymentInput = {

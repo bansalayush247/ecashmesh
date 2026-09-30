@@ -494,3 +494,172 @@ fn unconfigured_user_authorized_federation_is_rejected_without_creating_a_route(
             .is_some_and(|message| message.contains("unavailable federation"))
     );
 }
+
+#[test]
+fn rejection_reason_survives_bridge_and_api_adapters() {
+    let cashu = MockMint::start("healthy");
+    for (mode, message) in [
+        ("fed_invoice_expired", "Lightning invoice expired."),
+        (
+            "fed_gateway_unreachable",
+            "Fedimint gateway did not respond to verification",
+        ),
+        (
+            "fed_gateway_verification_failed",
+            "Fedimint gateway identity verification failed",
+        ),
+        (
+            "fed_invoice_amount_mismatch",
+            "Lightning invoice amount is missing or does not match",
+        ),
+        (
+            "fed_invoice_network_mismatch",
+            "Lightning invoice network does not match",
+        ),
+    ] {
+        let fed = MockMint::start(mode);
+        let server = ApiServer::start_with_federations(
+            &json!([{"id":"cashu:source-a", "url":cashu.url}]),
+            &json!([]),
+            &json!([]),
+            &json!([{"id":"fedimint:native", "label":"Native", "federation_id":"11".repeat(32),
+                "bridge_url":fed.url, "quote_backend":"local_v0121_bridge"}]),
+        );
+        let mut body = lightning_payment(100_000);
+        body.as_object_mut().unwrap().remove("candidate_connectors");
+        body["strict_source_registry"] = json!(true);
+        body["wallet_mint_urls"] = json!([cashu.url]);
+        body["federation_connector_ids"] = json!(["fedimint:native"]);
+        let (status, result) = server.post("/v1/routes/evaluate", &body);
+        assert_eq!(status, 200, "{result}");
+        assert_eq!(result["recommended_source"]["protocol"], "cashu");
+        let excluded = result["excluded_sources"].as_array().unwrap();
+        let federation = excluded
+            .iter()
+            .find(|source| source["source_id"] == "fedimint:native")
+            .unwrap();
+        assert!(
+            federation["reason"].as_str().unwrap().starts_with(message),
+            "{result}"
+        );
+        assert!(
+            federation["reason"]
+                .as_str()
+                .unwrap()
+                .contains("gateway comparison unavailable"),
+            "{result}"
+        );
+        assert!(
+            !federation["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Verified gateway-fee estimate is available"),
+            "{result}"
+        );
+    }
+}
+
+#[test]
+fn comparison_ranks_unfunded_federation_even_without_a_cashu_route() {
+    let fed = MockMint::start("fed_estimate");
+    let cashu = MockMint::start("healthy");
+    let server = ApiServer::start_with_federations(
+        &json!([{"id":"cashu:source-a", "url":cashu.url}]),
+        &json!([]),
+        &json!([]),
+        &json!([{"id":"fedimint:native", "label":"Native", "federation_id":"11".repeat(32),
+            "bridge_url":fed.url, "quote_backend":"local_v0121_bridge"}]),
+    );
+    let mut body = lightning_payment(100_000);
+    body.as_object_mut().unwrap().remove("candidate_connectors");
+    body["strict_source_registry"] = json!(true);
+    body["wallet_mint_urls"] = json!([]);
+    body["federation_connector_ids"] = json!(["fedimint:native"]);
+    let (status, _) = server.post("/v1/routes/evaluate", &body);
+    assert_eq!(
+        status, 422,
+        "normal evaluation still excludes the unfunded federation"
+    );
+    let (status, result) = server.post("/v1/routes/compare", &body);
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["mode"], "comparison_only");
+    assert_eq!(result["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(result["candidates"][0]["source_id"], "fedimint:native");
+    assert_eq!(result["candidates"][0]["federation_id"], "11".repeat(32));
+    assert_eq!(result["candidates"][0]["fee_sats"], 7);
+    assert_eq!(result["candidates"][0]["executable"], false);
+    assert!(result.get("quote_id").is_none());
+    assert!(result["excluded_sources"].as_array().unwrap().is_empty());
+    body["wallet_mint_urls"] = json!([cashu.url]);
+    let (status, result) = server.post("/v1/routes/compare", &body);
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["candidates"].as_array().unwrap().len(), 2);
+    assert_eq!(result["candidates"][0]["fee_scope"], "gateway_only");
+    assert_eq!(result["candidates"][1]["fee_scope"], "cashu_reserve");
+}
+
+#[test]
+fn slow_federations_do_not_delay_healthy_sources_past_the_wallet_deadline() {
+    let cashu = MockMint::start("healthy");
+    let healthy_fed = MockMint::start("healthy");
+    let slow = (0..3)
+        .map(|_| MockMint::start("fed_slow_quote"))
+        .collect::<Vec<_>>();
+    let mut federations = slow
+        .iter()
+        .enumerate()
+        .map(|(index, fed)| {
+            json!({
+                "id": format!("fedimint:slow-{index}"), "label":"Slow federation",
+                "federation_id": format!("{index:064x}"), "bridge_url":fed.url,
+                "quote_backend":"local_v0121_bridge",
+            })
+        })
+        .collect::<Vec<_>>();
+    federations.push(json!({
+        "id":"fedimint:healthy", "label":"Healthy federation", "federation_id":"aa".repeat(32),
+        "bridge_url":healthy_fed.url, "quote_backend":"local_v0121_bridge",
+    }));
+    let server = ApiServer::start_with_federations(
+        &json!([{"id":"cashu:source-a", "url":cashu.url}]),
+        &json!([]),
+        &json!([]),
+        &json!(federations),
+    );
+    let mut body = lightning_payment(100_000);
+    body.as_object_mut().unwrap().remove("candidate_connectors");
+    body["strict_source_registry"] = json!(true);
+    body["wallet_mint_urls"] = json!([cashu.url]);
+    body["federation_connector_ids"] = json!([
+        "fedimint:slow-0",
+        "fedimint:slow-1",
+        "fedimint:slow-2",
+        "fedimint:healthy"
+    ]);
+    let started = std::time::Instant::now();
+    let (status, result) = server.post("/v1/routes/evaluate", &body);
+    assert_eq!(status, 200, "{result}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(7),
+        "evaluation exceeded source budget"
+    );
+    let routes = std::iter::once(&result["recommended_source"])
+        .chain(result["alternative_sources"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    assert!(routes.iter().any(|route| route["protocol"] == "cashu"));
+    assert!(
+        routes
+            .iter()
+            .any(|route| route["source_id"] == "fedimint:healthy")
+    );
+    let excluded = result["excluded_sources"].as_array().unwrap();
+    for index in 0..3 {
+        assert!(
+            excluded.iter().any(
+                |source| source["source_id"] == format!("fedimint:slow-{index}")
+                    && source["reason"].as_str().unwrap().contains("timed out")
+            ),
+            "{result}"
+        );
+    }
+}

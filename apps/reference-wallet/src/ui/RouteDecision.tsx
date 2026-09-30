@@ -1,3 +1,8 @@
+import {
+  gatewayOptions,
+  namedSource,
+  type ComparisonOption,
+} from "./sourceOptions";
 import { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import type {
@@ -107,9 +112,9 @@ export function Risks({ flags }: { flags: string[] }) {
   return (
     <View style={local.risks}>
       <Text style={local.riskTitle}>⚠ Important risks</Text>
-      {flags.map((flag, index) => (
+      {[...new Set(flags)].map((flag, index) => (
         <Text key={`${flag}-${index}`} style={local.riskText}>
-          • {humanize(flag)} ({flag})
+          • {humanize(flag)}
         </Text>
       ))}
     </View>
@@ -204,20 +209,17 @@ function RouteCard({
             <Text selectable style={local.routeName}>
               {route.source_label ?? compactId(route.connector)}
             </Text>
-            <Text style={styles.small}>
-              {sats(route.fee.amount)} ·{" "}
-              {estimatedTime(route.estimated_time_seconds)}
-            </Text>
+            <Text style={styles.small}>{sats(route.fee.amount)}</Text>
           </View>
         </View>
-        <Score score={route.score} />
       </View>
-      <Settlement source={route} />
       <Button
         secondary
         onPress={onInspect}
-        accessibilityLabel={`Inspect ${route.connector}`}
-      >{`Inspect ${route.connector}`}</Button>
+        accessibilityLabel={`Inspect ${route.source_label ?? "source"}`}
+      >
+        Inspect details
+      </Button>
     </View>
   );
 }
@@ -226,106 +228,47 @@ export function DecisionView({
   decision,
   inspect,
   select,
+  inspectOption,
 }: {
   decision: RouteDecision;
+  inspectOption: (option: ComparisonOption) => void;
   inspect: (route: PaymentSource) => void;
   select: (route: PaymentSource) => void;
 }) {
-  const recommended =
-    decision.recommended_source ?? decision.recommended_route ?? null;
-  const alternatives =
-    decision.alternative_sources ?? decision.alternatives ?? [];
-  if (!recommended) {
+  const raw = decision.recommended_source ?? decision.recommended_route ?? null;
+  const recommended = raw ? namedSource(raw, decision) : null;
+  const alternatives = (
+    decision.alternative_sources ??
+    decision.alternatives ??
+    []
+  ).map((source) => namedSource(source, decision));
+  const estimates = gatewayOptions(decision);
+  if (!recommended)
     return (
-      <View style={styles.state}>
-        <Text style={styles.subtitle}>No payment sources returned</Text>
-        <Text style={styles.body}>
-          There is no recommendation to confirm. Edit your payment and evaluate
-          again.
-        </Text>
-      </View>
+      <Text style={styles.body}>No current quotes. Try a fresh invoice.</Text>
     );
-  }
   return (
     <View style={styles.stack}>
-      <View style={local.foundBanner}>
-        <Text style={local.bannerIcon}>✦</Text>
-        <View style={{ flex: 1 }}>
-          <Text style={local.bannerTitle}>
-            Found {alternatives.length + 1} available sources
-          </Text>
-          <Text style={styles.small}>
-            Quote-backed sources are ranked by their current evidence. No funds
-            will move from this screen.
-          </Text>
-        </View>
-      </View>
-      <View style={local.recommendation}>
-        <Text style={local.visuallyPresent}>
-          Recommended quote-backed source
+      <Section
+        title={`${alternatives.length + estimates.length + 1} payment options`}
+      >
+        <Text style={styles.small}>
+          Ranked by the available evidence. A quote does not guarantee payment.
         </Text>
-        <View style={local.recommendedPill}>
-          <Text style={local.recommendedText}>✦ Recommended</Text>
-        </View>
-        <View style={local.routeTop}>
-          <View style={local.routeIdentity}>
-            <ConnectorMark connector={recommended.connector} />
-            <View style={{ flex: 1, gap: 3 }}>
-              <Text selectable style={local.routeName}>
-                {recommended.source_label ?? compactId(recommended.connector)}
-              </Text>
-              <Settlement source={recommended} />
-            </View>
-          </View>
-          <Score score={recommended.score} />
-        </View>
-        <View style={local.feeRow}>
+        <Surface>
+          <Text style={local.recommendedText}>Top match</Text>
+          <Text style={styles.subtitle}>
+            {recommended.source_label ?? compactId(recommended.connector)}
+          </Text>
+          <Text style={local.fee}>{sats(recommended.fee.amount)}</Text>
           <Text style={styles.small}>
             {feeEstimateLabel(recommended.fee.estimate_kind)}
           </Text>
-          <View style={{ alignItems: "flex-end" }}>
-            <Text style={local.fee}>{sats(recommended.fee.amount)}</Text>
-            <Text style={styles.small}>
-              Fee rate {feeRate(recommended.fee.fee_rate_basis_points)} · Fee
-              reasonableness {feeReasonableness(recommended.fee_reasonableness)}
-            </Text>
-          </View>
-        </View>
-        <RouteMetrics route={recommended} />
-        <View style={local.whyStrip}>
-          <Text style={local.whyCheck}>✓</Text>
-          <Text numberOfLines={3} style={local.whyText}>
-            {compactDecisionText(decision.explanation.summary)}
-          </Text>
-        </View>
-        {recommended.risk_flags.length > 0 && (
-          <View style={local.riskSummary}>
-            <Text style={local.riskSummaryTitle}>
-              {recommended.risk_flags.length} important risk
-              {recommended.risk_flags.length === 1 ? "" : "s"}
-            </Text>
-            <Text style={local.riskSummaryText}>
-              Open source details to review evidence, risks and settlement.
-            </Text>
-          </View>
-        )}
-        <Button onPress={() => select(recommended)}>
-          Use recommended source
-        </Button>
-        <Button secondary onPress={() => inspect(recommended)}>
-          Inspect recommended source
-        </Button>
-      </View>
-      <Section title="Why this source?">
-        <Reasons reasons={decision.explanation.reasons} />
-      </Section>
-      <Section title="Alternative sources">
-        <Text style={styles.small}>
-          Other viable options, in deterministic server order.
-        </Text>
-        {alternatives.length === 0 && (
-          <Text style={styles.body}>No alternative sources returned.</Text>
-        )}
+          <Button onPress={() => select(recommended)}>Review option</Button>
+          <Button secondary onPress={() => inspect(recommended)}>
+            Details
+          </Button>
+        </Surface>
         {alternatives.map((route) => (
           <RouteCard
             key={route.route_id}
@@ -333,8 +276,35 @@ export function DecisionView({
             onInspect={() => inspect(route)}
           />
         ))}
+        {estimates.map((option) => (
+          <Surface
+            key={`${option.source_id}:${option.gateway_protocol}:${option.gateway_id}`}
+          >
+            <Text style={styles.subtitle}>{option.source_label}</Text>
+            <Text style={styles.body}>{sats(option.fee_sats)}</Text>
+            <Text style={styles.small}>
+              Gateway fee · federation fees not included
+            </Text>
+            <Text style={styles.small}>
+              {option.balance_sats === 0
+                ? "Needs funds"
+                : "Funding not checked"}{" "}
+              · included for comparison
+            </Text>
+            <Button
+              secondary
+              onPress={() => inspectOption(option)}
+              accessibilityLabel={`Inspect ${option.source_label}`}
+            >
+              Inspect details
+            </Button>
+          </Surface>
+        ))}
       </Section>
-      <Text style={styles.small}>Quote expires: {decision.expires_at}.</Text>
+      <Text style={styles.small}>
+        Quote expires:{" "}
+        {new Date(decision.expires_at_unix_seconds * 1000).toLocaleTimeString()}
+      </Text>
     </View>
   );
 }
@@ -393,7 +363,7 @@ export function RouteDetails({
             <ConnectorMark connector={route.connector} />
             <View style={{ flex: 1, gap: 4 }}>
               <Text selectable style={local.routeName}>
-                {compactId(route.connector)}
+                {route.source_label ?? compactId(route.connector)}
               </Text>
               <Settlement source={route} />
             </View>
@@ -601,41 +571,6 @@ export function RouteDetails({
 }
 
 const local = StyleSheet.create({
-  foundBanner: {
-    flexDirection: "row",
-    gap: 11,
-    backgroundColor: "#EEF7FF",
-    padding: 14,
-    borderRadius: 12,
-    alignItems: "center",
-  },
-  bannerIcon: { color: colors.blue, fontSize: 28 },
-  bannerTitle: {
-    fontSize: 13,
-    lineHeight: 18,
-    fontWeight: "700",
-    color: colors.ink,
-  },
-  recommendation: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: "#82DDB8",
-    borderRadius: 15,
-    padding: 14,
-    gap: 13,
-    shadowColor: colors.green,
-    shadowOpacity: 0.08,
-    shadowRadius: 9,
-    elevation: 2,
-  },
-  visuallyPresent: { color: colors.blueDark, fontWeight: "700", fontSize: 11 },
-  recommendedPill: {
-    alignSelf: "flex-start",
-    backgroundColor: colors.green,
-    borderRadius: 5,
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-  },
   recommendedText: { color: "white", fontSize: 11, fontWeight: "700" },
   routeTop: {
     flexDirection: "row",
@@ -696,14 +631,6 @@ const local = StyleSheet.create({
     fontWeight: "800",
   },
   scoreOut: { color: colors.muted, fontSize: 9 },
-  feeRow: {
-    borderTopWidth: 1,
-    borderColor: "#EDF1F7",
-    paddingTop: 11,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
   fee: { color: colors.ink, fontSize: 13, fontWeight: "700" },
   metricGroup: { gap: 10 },
   metric: { gap: 5 },
@@ -721,36 +648,6 @@ const local = StyleSheet.create({
     overflow: "hidden",
   },
   fill: { height: "100%", borderRadius: 7, minWidth: 3 },
-  whyStrip: {
-    backgroundColor: "#F0FCF6",
-    flexDirection: "row",
-    gap: 8,
-    padding: 10,
-    borderRadius: 8,
-    alignItems: "flex-start",
-  },
-  whyCheck: { color: colors.green, fontWeight: "800", flexShrink: 0 },
-  whyText: {
-    flex: 1,
-    minWidth: 0,
-    flexShrink: 1,
-    color: "#087D49",
-    fontSize: 12,
-    lineHeight: 17,
-  },
-  riskSummary: {
-    backgroundColor: colors.sand,
-    borderRadius: 8,
-    padding: 10,
-    gap: 3,
-  },
-  riskSummaryTitle: {
-    color: colors.amber,
-    fontSize: 12,
-    lineHeight: 17,
-    fontWeight: "700",
-  },
-  riskSummaryText: { color: colors.amber, fontSize: 11, lineHeight: 16 },
   risks: { backgroundColor: colors.sand, borderRadius: 9, padding: 11, gap: 4 },
   riskTitle: { color: colors.amber, fontWeight: "700", fontSize: 12 },
   riskText: { color: colors.amber, fontSize: 12, lineHeight: 17 },

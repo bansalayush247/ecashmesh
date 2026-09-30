@@ -3,16 +3,24 @@ import { Modal, ScrollView, Text, TextInput, View } from "react-native";
 import { npubEncode } from "nostr-tools/nip19";
 import type { useNostrSourceRegistry } from "../host/useNostrSourceRegistry";
 import type { PaymentSourceProfile } from "../nostr/sourceRegistry";
-import { Button, Section, Surface, Row, styles, colors } from "./components";
+import {
+  Button,
+  Section,
+  Surface,
+  Row,
+  styles,
+  colors,
+  Disclosure,
+} from "./components";
 import { FederationConnect } from "./FederationConnect";
 import { InviteConnect } from "./InviteConnect";
 
 export type Registry = ReturnType<typeof useNostrSourceRegistry>;
 export const originLabel = (origin: string) =>
   origin === "nostr_nip60"
-    ? "Linked via NIP-60"
+    ? "Imported from Nostr"
     : origin === "nostr_nip87"
-      ? "Discovered via NIP-87"
+      ? "Found on Nostr"
       : "Added manually";
 
 const shortId = (value: string) =>
@@ -39,8 +47,7 @@ function sourceStatus(
       : {
           label: "Connection unavailable",
           tone: "bad",
-          detail:
-            "This saved source is not currently present in the local bridge catalog.",
+          detail: "Start the local bridge or reconnect this federation.",
         };
   }
   if (!profile.enabled)
@@ -71,21 +78,18 @@ function sourceStatus(
     return {
       label: "Connected",
       tone: "good",
-      detail:
-        "Local wallet connected; quote and balance are checked when you evaluate a payment.",
+      detail: "Ready to check fees.",
     };
   if (profile.liveStatus === "online")
     return {
       label: "Online",
       tone: "good",
-      detail:
-        "Public service data is available; no payment quote has been requested.",
+      detail: "Ready to check fees.",
     };
   return {
     label: "Not evaluated",
     tone: "quiet",
-    detail:
-      "Refresh or start a payment evaluation to collect current evidence.",
+    detail: "Refresh to check availability.",
   };
 }
 
@@ -166,10 +170,7 @@ export function SourceSummary({
           · {registry.profiles.filter((p) => p.protocol === "fedimint").length}{" "}
           Fedimint
         </Text>
-        <Text style={styles.small}>
-          Automatic comparison uses enabled Cashu sources and connected Fedimint
-          sources.
-        </Text>
+
         {registry.lastSync && (
           <Text style={styles.small}>
             Last sync: {new Date(registry.lastSync).toLocaleString()}
@@ -319,79 +320,76 @@ export function SourceManager({ registry }: { registry: Registry }) {
   };
   return (
     <View style={styles.stack}>
-      <Text style={styles.eyebrow}>LIVE · source registry</Text>
       <Text style={styles.small}>
-        Nostr stores your source preferences. EcashMesh compares evidence. Your
-        wallet retains custody and settlement.
+        Add the sources you want to compare. Save them in this browser or sync
+        with Nostr.
       </Text>
-      {registry.status !== "connected" ? (
-        <Surface>
-          <Button
-            disabled={
-              registry.status === "connecting" ||
-              !registry.browserSignerAvailable
-            }
-            onPress={() => void registry.connect("browser")}
-          >
-            Connect Nostr
-          </Button>
-          <Field
-            label="NIP-46 bunker URI"
-            value={uri}
-            change={setUri}
-            placeholder="bunker://…"
-          />
-          <Button
-            secondary
-            disabled={!uri || registry.status === "connecting"}
-            onPress={() => {
-              const value = uri;
-              setUri("");
-              void registry.connect("nip46", value);
-            }}
-          >
-            Connect remote signer
-          </Button>
-          {registry.status === "connecting" && (
-            <Button secondary onPress={() => void registry.disconnect()}>
-              Cancel connection
+      <Disclosure title="Sync with Nostr (optional)">
+        {registry.status !== "connected" ? (
+          <Surface>
+            <Button
+              disabled={
+                registry.status === "connecting" ||
+                !registry.browserSignerAvailable
+              }
+              onPress={() => void registry.connect("browser")}
+            >
+              Connect Nostr
             </Button>
-          )}
-        </Surface>
-      ) : (
-        <Surface>
-          <Text style={styles.subtitle}>Nostr connected</Text>
-          <Text selectable style={styles.small}>
-            {npubEncode(registry.pubkey!)}
-          </Text>
-          <Text style={styles.small}>
-            {registry.walletFound
-              ? "NIP-60 wallet found"
-              : "NIP-60 metadata not available"}
-          </Text>
-          <Button
-            secondary
-            disabled={registry.busy}
-            onPress={() => void registry.importWallet()}
-          >
-            Import NIP-60 mints
-          </Button>
-          <Button secondary onPress={() => void registry.disconnect()}>
-            Disconnect Nostr
-          </Button>
-        </Surface>
-      )}
+            <Field
+              label="Remote signer address"
+              value={uri}
+              change={setUri}
+              placeholder="bunker://…"
+            />
+            <Button
+              secondary
+              disabled={!uri || registry.status === "connecting"}
+              onPress={() => {
+                const value = uri;
+                setUri("");
+                void registry.connect("nip46", value);
+              }}
+            >
+              Connect remote signer
+            </Button>
+            {registry.status === "connecting" && (
+              <Button secondary onPress={() => void registry.disconnect()}>
+                Cancel connection
+              </Button>
+            )}
+          </Surface>
+        ) : (
+          <Surface>
+            <Text style={styles.subtitle}>Nostr connected</Text>
+            <Text selectable style={styles.small}>
+              {npubEncode(registry.pubkey!)}
+            </Text>
+            <Text style={styles.small}>
+              {registry.walletFound
+                ? "Wallet sources found"
+                : "No wallet sources found"}
+            </Text>
+            <Button
+              secondary
+              disabled={registry.busy}
+              onPress={() => void registry.importWallet()}
+            >
+              Import wallet sources
+            </Button>
+            <Button secondary onPress={() => void registry.disconnect()}>
+              Disconnect Nostr
+            </Button>
+          </Surface>
+        )}
+        <Button
+          disabled={registry.busy || registry.status !== "connected"}
+          onPress={() => void registry.save()}
+        >
+          Save to Nostr
+        </Button>
+      </Disclosure>
       <Text style={styles.small}>{registry.syncStatus}</Text>
-      <Text style={styles.small}>
-        Save to Nostr encrypts your registry and asks your signer to sign it.
-        Without encryption, use local-only storage.
-      </Text>
-      <Button
-        disabled={registry.busy || registry.status !== "connected"}
-        onPress={() => void registry.save()}
-      >
-        Save to Nostr
-      </Button>
       <Button
         secondary
         disabled={registry.status === "connecting"}
@@ -470,9 +468,7 @@ export function SourceManager({ registry }: { registry: Registry }) {
                         <StatusChip status={status} />
                       </View>
                       <Text style={styles.small}>{status.detail}</Text>
-                      <Text style={styles.small}>
-                        {originLabel(profile.origin)}
-                      </Text>
+
                       {profile.protocol === "fedimint" && !local && (
                         <Button
                           disabled={registry.busy}
@@ -514,22 +510,24 @@ export function SourceManager({ registry }: { registry: Registry }) {
                       >
                         View source details
                       </Button>
-                      <Button
-                        secondary
-                        disabled={registry.busy}
-                        onPress={() => void registry.refresh(profile.id)}
-                      >
-                        Refresh source
-                      </Button>
-                      <Button
-                        secondary
-                        disabled={registry.status === "connecting"}
-                        onPress={() => registry.remove(profile.id)}
-                      >
-                        Remove source
-                      </Button>
                       {selected?.id === profile.id && (
-                        <SourceDetails profile={selected} />
+                        <View style={{ gap: 12 }}>
+                          <SourceDetails profile={selected} />{" "}
+                          <Button
+                            secondary
+                            disabled={registry.busy}
+                            onPress={() => void registry.refresh(profile.id)}
+                          >
+                            Refresh source
+                          </Button>
+                          <Button
+                            secondary
+                            disabled={registry.status === "connecting"}
+                            onPress={() => registry.remove(profile.id)}
+                          >
+                            Remove source
+                          </Button>
+                        </View>
                       )}
                     </Surface>
                   );
@@ -557,14 +555,11 @@ export function SourceManager({ registry }: { registry: Registry }) {
               Add Cashu mint
             </Button>
             <Text style={styles.small}>
-              Federations are usually added from Discover. If you already know a
-              federation ID, add it here and connect it from your local
-              wallet—no connector ID is required.
+              Add a federation by ID, or find one in Discover.
             </Text>
             <Field label="Federation ID" value={fed} change={setFed} />
             <Text style={styles.small}>
-              Adding is separate from connecting. Bridge tokens and invites stay
-              outside the registry.
+              You will connect the federation after adding it.
             </Text>
             <Button
               secondary
@@ -598,8 +593,7 @@ export function SourceManager({ registry }: { registry: Registry }) {
       ) : (
         <Section title="Discover sources">
           <Text style={styles.small}>
-            Discovered sources are public announcements. Adding authorizes
-            inspection; connecting a federation is a separate local action.
+            Find sources shared on Nostr, or paste a federation invite.
           </Text>
           <Button
             disabled={registry.busy}
@@ -623,7 +617,7 @@ export function SourceManager({ registry }: { registry: Registry }) {
               <Surface key={entry.id}>
                 <Text style={styles.subtitle}>{entry.label}</Text>
                 <Text style={styles.small}>
-                  {entry.protocol} · {entry.network} · Discovered via NIP-87
+                  {entry.protocol} · {entry.network} · Found on Nostr
                 </Text>
                 <Text selectable style={styles.small}>
                   {entry.endpoint}
@@ -694,13 +688,17 @@ export function ExcludedSources({ values }: { values: unknown[] }) {
   const [raw, setRaw] = useState(false);
   if (!values.length) return null;
   return (
-    <Section title="Unavailable / excluded sources">
+    <Disclosure title={`Not included (${values.length})`}>
       {values.map((value, index) => {
         const row = value as Record<string, unknown>;
         return (
           <Surface key={index}>
             <Text style={styles.subtitle}>
-              {String(row.source_id ?? "Source")}
+              {String(
+                (row.evidence as Record<string, unknown> | undefined)?.label ??
+                  row.source_label ??
+                  shortId(String(row.source_id ?? "Source")),
+              )}
             </Text>
             <Text style={styles.small}>
               {String(row.protocol ?? "")} ·{" "}
@@ -720,6 +718,6 @@ export function ExcludedSources({ values }: { values: unknown[] }) {
           {JSON.stringify(values, null, 2)}
         </Text>
       )}
-    </Section>
+    </Disclosure>
   );
 }

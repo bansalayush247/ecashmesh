@@ -109,6 +109,7 @@ impl MockMint {
         let stopped = Arc::clone(&stop);
         let directory_url = url.clone();
         let task = thread::spawn(move || {
+            let mut stalled_connections = Vec::new();
             while !stopped.load(Ordering::Relaxed) {
                 let (mut stream, _) = match listener.accept() {
                     Ok(connection) => connection,
@@ -131,6 +132,16 @@ impl MockMint {
                 }
                 let request = String::from_utf8(request).unwrap();
                 let first = request.lines().next().unwrap();
+                if mode == "fed_slow_quote"
+                    && (first == "POST /v2/ln/ecashmesh-quote HTTP/1.1"
+                        || first == "POST /v2/ln/ecashmesh-gateway-estimate HTTP/1.1")
+                {
+                    // Keep the response pending without blocking other bridge
+                    // requests; dropping this fixture closes every connection.
+                    stalled_connections.push(stream);
+                    continue;
+                }
+
                 let content_length = request
                     .lines()
                     .find_map(|line| {
@@ -146,7 +157,9 @@ impl MockMint {
                     stream.read_exact(&mut request_body).unwrap();
                 }
                 let mut body = match first {
-                    "GET /health HTTP/1.1" | "POST /v2/ln/ecashmesh-quote HTTP/1.1" => "{}",
+                    "GET /health HTTP/1.1"
+                    | "POST /v2/ln/ecashmesh-quote HTTP/1.1"
+                    | "POST /v2/ln/ecashmesh-gateway-estimate HTTP/1.1" => "{}",
                     "GET /v2/admin/info HTTP/1.1" => r#"{"network":"bitcoin"}"#,
                     "POST /v2/ln/list-gateways HTTP/1.1" => r#"[{"gateway_id":"fixture-gateway","fees":{"base_msat":1000,"proportional_millionths":100}}]"#,
                     "GET /v1/info HTTP/1.1" => {
@@ -196,6 +209,42 @@ impl MockMint {
                 if first.contains("/directory ") {
                     body = json!([{"url":directory_url}]).to_string();
                 }
+                if first == "POST /v1/melt/quote/bolt11 HTTP/1.1" {
+                    let mut value: Value = serde_json::from_str(&body).unwrap();
+                    value["expiry"] = json!(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs()
+                            + 30
+                    );
+                    body = value.to_string();
+                }
+                if first == "POST /v2/ln/ecashmesh-gateway-estimate HTTP/1.1"
+                    && mode == "fed_estimate"
+                {
+                    use sha2::{Digest, Sha256};
+                    let req: Value = serde_json::from_slice(&request_body).unwrap();
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let gateway_id = format!("02{}", "11".repeat(32));
+                    body = json!({
+                        "schema":"ecashmesh-fedimint-gateway-estimate-v1", "fedimint_version":"0.12.1",
+                        "federation_id":req["federation_id"], "invoice_digest":format!("{:x}", Sha256::digest(req["invoice"].as_str().unwrap().as_bytes())),
+                        "payment_hash":"11".repeat(32), "amount_msat":req["amount_sats"].as_u64().unwrap()*1000,
+                        "network":"bitcoin", "federation_fee_msat":null, "gateway_fee_msat":7000,
+                        "wallet_balance_msat":0, "funding_feasible":null, "payable":null,
+                        "selected_gateway_id":gateway_id, "gateway_identity_verified":true,
+                        "gateway_protocol":"lnv1", "gateway_candidates":[{
+                            "gateway_id":gateway_id, "gateway_url":"https://gateway.example/v1",
+                            "gateway_fee_msat":7000, "fee_base_msat":7000, "fee_ppm":0,
+                            "gateway_identity_verified":true, "gateway_protocol":"lnv1"
+                        }],
+                        "observed_at_unix_seconds":now, "expires_at_unix_seconds":now+30
+                    }).to_string();
+                }
                 if mode == "malformed" {
                     body = "{".into();
                 }
@@ -215,7 +264,14 @@ impl MockMint {
                     && mode == "fed_unauthorized"
                 {
                     401
-                } else if first == "POST /v2/ln/ecashmesh-quote HTTP/1.1" && mode == "fed_empty" {
+                } else if first.starts_with("POST /v2/ln/")
+                    && (mode.starts_with("fed_invoice_") || mode.starts_with("fed_gateway_"))
+                {
+                    body = json!({"error_code":mode.strip_prefix("fed_").unwrap().to_ascii_uppercase()}).to_string();
+                    422
+                } else if first == "POST /v2/ln/ecashmesh-quote HTTP/1.1"
+                    && (mode == "fed_empty" || mode == "fed_estimate")
+                {
                     body = json!({"error_code":"INSUFFICIENT_BALANCE"}).to_string();
                     422
                 } else {

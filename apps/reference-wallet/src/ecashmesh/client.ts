@@ -1,5 +1,6 @@
 import {
   decisionSchema,
+  comparisonSchema,
   paymentStatusSchema,
   paymentToWire,
   type PaymentInput,
@@ -10,6 +11,14 @@ import { createTransport, type ClientOptions } from "./transport";
 export function createEcashMeshClient(options: ClientOptions) {
   const post = createTransport(options);
   return {
+    compareRoutes(payment: PaymentInput, signal?: AbortSignal) {
+      return post(
+        "/v1/routes/compare",
+        paymentToWire(payment),
+        comparisonSchema,
+        signal,
+      );
+    },
     evaluateRoute(payment: PaymentInput, signal?: AbortSignal) {
       return post(
         "/v1/routes/evaluate",

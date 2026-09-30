@@ -16,6 +16,7 @@ use ecashmesh_core::{
     ConnectorId, ConnectorSnapshot, ConnectorType, Evidence, EvidenceSource, EvidenceTimestamp,
     LiquidityInfo,
 };
+use futures::future::join_all;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -128,6 +129,32 @@ pub struct FedimintQuote {
     pub expires_at_unix_seconds: Option<u64>,
 }
 
+/// Gateway-announced fee evidence for a federation whose module cannot provide
+/// a native fee quote. It is useful for comparison only and never establishes
+/// that a payment can be funded or executed.
+#[derive(Clone, Debug)]
+pub struct FedimintGatewayEstimate {
+    pub gateway_fee_sats: Amount,
+    pub selected_gateway_id: String,
+    pub gateway_protocol: String,
+    pub candidates: Vec<FedimintGatewayCandidate>,
+    pub observed_at: EvidenceTimestamp,
+    pub expires_at_unix_seconds: u64,
+}
+
+/// One verified native gateway fee parameter set used for comparison only.
+#[derive(Clone, Debug)]
+pub struct FedimintGatewayCandidate {
+    pub gateway_id: String,
+    pub gateway_url: String,
+    pub gateway_fee_sats: Amount,
+    pub fee_base_msat: u64,
+    pub fee_ppm: u64,
+    pub expiration_delta: Option<u64>,
+    pub gateway_protocol: String,
+    pub lightning_alias: Option<String>,
+}
+
 impl FedimintQuote {
     #[must_use]
     pub fn total_fee(&self) -> Amount {
@@ -160,7 +187,9 @@ impl FedimintService {
             config.validate()?;
         }
         let client = Client::builder()
-            .timeout(Duration::from_secs(10))
+            // The bridge is loopback-only. A slow federation probe must not
+            // consume the interactive route-evaluation budget.
+            .timeout(Duration::from_secs(3))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| error.to_string())?;
@@ -296,18 +325,23 @@ impl FedimintService {
         // Joining is separate and opt-in; this only restores already joined IDs.
         let _ = self.refresh_joined_catalog().await;
         let configs = self.configured();
-        let mut observations = Vec::with_capacity(configs.len());
-        for config in configs {
-            observations.push(self.observe(config, now).await);
-        }
-        observations
+        join_all(configs.into_iter().map(|config| self.observe(config, now))).await
     }
 
     async fn observe(&self, config: FederationConfig, now: u64) -> FederationObservation {
         let timestamp = EvidenceTimestamp::from_unix_seconds(now);
         let mut issues = Vec::new();
         let health_url = join_url(&config.bridge_url, "/health");
-        let health = match self.client.get(health_url).send().await {
+        let (health_response, gateway_response, info) = tokio::join!(
+            self.client.get(health_url).send(),
+            self.post_bridge(
+                &config,
+                "/v2/ln/list-gateways",
+                json!({"federationId": config.federation_id}),
+            ),
+            self.get_bridge(&config, "/v2/admin/info"),
+        );
+        let health = match health_response {
             Ok(response) if response.status().is_success() => Evidence::reported(
                 ConnectorHealth::Healthy,
                 EvidenceSource::Observer,
@@ -333,13 +367,6 @@ impl FedimintService {
                 )
             }
         };
-        let gateway_response = self
-            .post_bridge(
-                &config,
-                "/v2/ln/list-gateways",
-                json!({"federationId": config.federation_id}),
-            )
-            .await;
         let gateways = match gateway_response {
             Ok(value) => Evidence::reported(
                 parse_gateways(&value),
@@ -352,7 +379,6 @@ impl FedimintService {
                 Evidence::Unknown
             }
         };
-        let info = self.get_bridge(&config, "/v2/admin/info").await;
         let (balance_sats, network) = match info {
             Ok(value) => parse_wallet_info(&value, &config.federation_id, timestamp),
             Err(error) => {
@@ -421,6 +447,42 @@ impl FedimintService {
         bridge::parse(&value, &config.federation_id, invoice, amount, now)
     }
 
+    /// Obtains a verified gateway-fee estimate without invoking a payment or
+    /// claiming a federation fee, sufficient balance, or payment capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description if the bridge is unavailable or its gateway
+    /// evidence fails binding, freshness, or identity validation.
+    pub async fn gateway_estimate(
+        &self,
+        observation: &FederationObservation,
+        invoice: &str,
+        amount: Amount,
+        now: u64,
+    ) -> Result<FedimintGatewayEstimate, String> {
+        if observation.config.quote_backend != QuoteBackend::LocalV0121Bridge {
+            return Err("No read-only Fedimint quote bridge is configured".into());
+        }
+        let value = self
+            .post_url(
+                &join_url(
+                    &observation.config.bridge_url,
+                    "/v2/ln/ecashmesh-gateway-estimate",
+                ),
+                observation.config.token.as_deref(),
+                json!({"federation_id": observation.config.federation_id, "invoice": invoice, "amount_sats": amount.sats()}),
+            )
+            .await?;
+        bridge::parse_gateway_estimate(
+            &value,
+            &observation.config.federation_id,
+            invoice,
+            amount,
+            now,
+        )
+    }
+
     async fn get_bridge(&self, config: &FederationConfig, path: &str) -> Result<Value, String> {
         let mut request = self.client.get(join_url(&config.bridge_url, path));
         if let Some(token) = &config.token {
@@ -469,10 +531,22 @@ impl FedimintService {
                     Some("INVALID_INVOICE") => {
                         "Fedimint rejected an expired, invalid, amountless or wrong-network invoice"
                     }
+                    Some("INVOICE_EXPIRED") => {
+                        "Lightning invoice expired. Create a new invoice and evaluate it before it expires."
+                    }
+                    Some("INVOICE_AMOUNT_MISMATCH") => {
+                        "Lightning invoice amount is missing or does not match the requested payment amount"
+                    }
+                    Some("INVOICE_NETWORK_MISMATCH") => {
+                        "Lightning invoice network does not match this federation"
+                    }
                     Some("UNSUPPORTED_PAYMENT") => {
                         "Fedimint bridge does not support this payment or module"
                     }
                     Some("GATEWAY_UNAVAILABLE") => "No usable verified Fedimint gateway",
+                    Some("GATEWAY_UNREACHABLE") => "Fedimint gateway did not respond to verification",
+                    Some("GATEWAY_VERIFICATION_FAILED") => "Fedimint gateway identity verification failed",
+                    Some("NATIVE_QUOTE_UNAVAILABLE") => "Native Fedimint funding fee quote is unavailable; checking gateway fees separately",
                     _ => "Read-only Fedimint quote unavailable",
                 }
                 .into());

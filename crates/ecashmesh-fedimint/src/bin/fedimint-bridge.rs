@@ -5,7 +5,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, ensure};
@@ -15,7 +15,10 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     routing::{get, post},
 };
-use fedimint_api_client::download_from_invite_code;
+use fedimint_api_client::{
+    api::{DynGlobalApi, FederationApiExt},
+    download_from_invite_code,
+};
 use fedimint_bip39::{Bip39RootSecretStrategy, Mnemonic};
 use fedimint_client::{Client, ClientHandleArc, RootSecret, module::secret::RootSecretStrategy};
 use fedimint_connectors::ConnectorRegistry;
@@ -33,8 +36,15 @@ use fedimint_ln_client::{
         lightning_invoice::Bolt11Invoice,
     },
 };
+use fedimint_ln_common::{
+    LightningGatewayAnnouncement, federation_endpoint_constants::LIST_GATEWAYS_ENDPOINT,
+};
+use fedimint_lnv2_client::{
+    LightningClientInit as LightningV2ClientInit, LightningClientModule as LightningV2ClientModule,
+};
+use fedimint_lnv2_common::config::LightningClientConfig as LightningV2ClientConfig;
 use fedimint_meta_client::MetaClientInit;
-use fedimint_mint_client::MintClientInit;
+use fedimint_mint_client::{InsufficientBalanceError, MintClientInit};
 use fedimint_rocksdb::RocksDb;
 use fedimint_wallet_client::WalletClientInit;
 use rand::RngCore;
@@ -53,6 +63,10 @@ struct BridgeState {
     catalog_path: PathBuf,
     join_lock: Mutex<()>,
 }
+
+const LNV2_GATEWAY_LIST_TIMEOUT: Duration = Duration::from_millis(750);
+const LNV2_GATEWAY_PROBE_BUDGET: Duration = Duration::from_millis(1_500);
+const GATEWAY_REGISTRY_TIMEOUT: Duration = Duration::from_millis(1_250);
 
 #[derive(Clone, Serialize, Deserialize)]
 struct FederationEntry {
@@ -275,6 +289,195 @@ impl BridgeState {
         self.clients.read().await.get(&federation_id).cloned()
     }
 
+    async fn discover_gateways(
+        &self,
+        client: &ClientHandleArc,
+    ) -> anyhow::Result<Vec<LightningGatewayAnnouncement>> {
+        let config = client.config().await;
+        let peers = config
+            .global
+            .api_endpoints
+            .iter()
+            .map(|(&peer_id, peer_url)| (peer_id, peer_url.url.clone()))
+            .collect();
+        let api = DynGlobalApi::new(self.connectors.clone(), peers, None)?;
+        let ln = client.get_first_module::<LightningClientModule>()?;
+        let mut announcements_by_id: HashMap<_, Vec<LightningGatewayAnnouncement>> = HashMap::new();
+        let mut successful_peer_queries = 0;
+
+        let module_api = api.with_module(ln.id);
+        let responses =
+            futures::future::join_all(config.global.api_endpoints.keys().map(|&peer_id| {
+                let module_api = &module_api;
+                async move {
+                    let result = tokio::time::timeout(
+                        GATEWAY_REGISTRY_TIMEOUT,
+                        module_api.request_single_peer(
+                            LIST_GATEWAYS_ENDPOINT.to_string(),
+                            fedimint_core::module::ApiRequestErased::default(),
+                            peer_id,
+                        ),
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|result| result.map_err(anyhow::Error::from))
+                    .and_then(|value| {
+                        serde_json::from_value::<Vec<LightningGatewayAnnouncement>>(value)
+                            .map_err(anyhow::Error::from)
+                    });
+                    (peer_id, result)
+                }
+            }))
+            .await;
+        for (peer_id, result) in responses {
+            match result {
+                Ok(gateways) => {
+                    successful_peer_queries += 1;
+                    for gateway in gateways {
+                        announcements_by_id
+                            .entry(gateway.info.gateway_id.to_string())
+                            .or_default()
+                            .push(gateway);
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "Fedimint bridge: gateway query failed for peer {peer_id}: {error:#}"
+                    );
+                }
+            }
+        }
+
+        ensure!(
+            successful_peer_queries > 0,
+            "No successful gateway registry responses from federation peers"
+        );
+
+        // Match the pinned client’s safety policy before selecting a record
+        // returned by only one guardian. A malformed proof is rejected. When
+        // both signed and unsigned records exist, only the signed records may
+        // win. For equivalent registrations retain the longest TTL and newest
+        // proof exactly as the native cache does.
+        let mut discovered = Vec::new();
+        for mut announcements in announcements_by_id.into_values() {
+            announcements.retain(|announcement| {
+                !announcement.ttl.is_zero()
+                    && announcement.registration_proof_is_valid(ln.cfg.threshold_pub_key)
+            });
+            if announcements
+                .iter()
+                .any(|announcement| announcement.auth.is_some())
+            {
+                announcements.retain(|announcement| announcement.auth.is_some());
+            }
+            let mut registrations = HashMap::new();
+            for announcement in announcements {
+                registrations
+                    .entry(announcement.info.clone())
+                    .and_modify(|existing: &mut LightningGatewayAnnouncement| {
+                        if announcement.ttl > existing.ttl {
+                            existing.ttl = announcement.ttl;
+                        }
+                        let nonce = |gateway: &LightningGatewayAnnouncement| {
+                            gateway.auth.as_ref().map_or(0, |auth| auth.nonce)
+                        };
+                        if nonce(&announcement) > nonce(existing) {
+                            existing.auth.clone_from(&announcement.auth);
+                        }
+                    })
+                    .or_insert(LightningGatewayAnnouncement {
+                        vetted: false,
+                        ..announcement
+                    });
+            }
+            discovered.extend(registrations.into_values());
+        }
+        Ok(discovered)
+    }
+
+    async fn gateways_for_client(
+        &self,
+        client: &ClientHandleArc,
+    ) -> anyhow::Result<Vec<LightningGatewayAnnouncement>> {
+        let ln = client.get_first_module::<LightningClientModule>()?;
+        // Prefer the public v0.12.1 cache API. Some older federations return
+        // divergent gateway registries across guardians, however, and the
+        // cache request can yield no record. In that case query every guardian
+        // directly, preserving the native validation and duplicate handling.
+        let mut cached = ln.list_gateways().await;
+        cached.retain(|gateway| !gateway.ttl.is_zero());
+        if !cached.is_empty() {
+            return Ok(cached);
+        }
+        let (refresh, discovered) = tokio::join!(
+            tokio::time::timeout(GATEWAY_REGISTRY_TIMEOUT, ln.update_gateway_cache()),
+            self.discover_gateways(client),
+        );
+        if matches!(refresh, Ok(Ok(()))) {
+            let mut cached = ln.list_gateways().await;
+            cached.retain(|gateway| !gateway.ttl.is_zero());
+            if !cached.is_empty() {
+                return Ok(cached);
+            }
+        }
+        discovered
+    }
+
+    async fn lnv2_gateways_for_client(&self, client: &ClientHandleArc) -> Vec<Value> {
+        let Ok(lnv2) = client.get_first_module::<LightningV2ClientModule>() else {
+            return Vec::new();
+        };
+        let Ok(Ok(gateways)) =
+            tokio::time::timeout(LNV2_GATEWAY_LIST_TIMEOUT, lnv2.list_gateways(None)).await
+        else {
+            return Vec::new();
+        };
+        let mut observed = Vec::new();
+        let responses = futures::future::join_all(gateways.into_iter().map(|gateway| {
+            let lnv2 = &lnv2;
+            async move {
+                let routing =
+                    tokio::time::timeout(LNV2_GATEWAY_PROBE_BUDGET, lnv2.routing_info(&gateway))
+                        .await;
+                (gateway, routing)
+            }
+        }))
+        .await;
+        for (gateway, routing) in responses {
+            let Ok(Ok(Some(routing))) = routing else {
+                continue;
+            };
+            observed.push(json!({
+                "protocol": "lnv2",
+                "federation_registered": true,
+                "info": {
+                    "api": gateway,
+                    "gateway_id": routing.lightning_public_key.to_string(),
+                    "node_pub_key": routing.lightning_public_key.to_string(),
+                    "lightning_alias": routing.lightning_alias,
+                    "fees": {
+                        "base_msat": routing.send_fee_default.base.msats,
+                        "proportional_millionths": routing.send_fee_default.parts_per_million,
+                    },
+                },
+                "routing": {
+                    "send_fee_minimum_base_msat": routing.send_fee_minimum.base.msats,
+                    "send_fee_minimum_ppm": routing.send_fee_minimum.parts_per_million,
+                    "send_fee_default_base_msat": routing.send_fee_default.base.msats,
+                    "send_fee_default_ppm": routing.send_fee_default.parts_per_million,
+                    "expiration_delta_minimum": routing.expiration_delta_minimum,
+                    "expiration_delta_default": routing.expiration_delta_default,
+                },
+            }));
+        }
+        observed.sort_by(|left, right| {
+            left["info"]["api"]
+                .as_str()
+                .cmp(&right["info"]["api"].as_str())
+        });
+        observed
+    }
+
     async fn insert_client(&self, federation_id: FederationId, client: ClientHandleArc) {
         self.clients.write().await.insert(federation_id, client);
     }
@@ -321,6 +524,7 @@ async fn native_builder() -> anyhow::Result<fedimint_client::ClientBuilder> {
     let mut builder = Client::builder().await?;
     builder.with_module(MintClientInit);
     builder.with_module(LightningClientInit::default());
+    builder.with_module(LightningV2ClientInit::default());
     builder.with_module(WalletClientInit::default());
     builder.with_module(MetaClientInit);
     Ok(builder)
@@ -455,15 +659,22 @@ async fn info(State(b): State<Arc<BridgeState>>, h: HeaderMap) -> HttpResult<Jso
             b.get_client(federation_id).await,
         ) {
             let balance = client.get_balance_for_btc().await.map_err(internal)?;
-            let ln = client
-                .get_first_module::<LightningClientModule>()
-                .map_err(internal)?;
             let native_config = client.config().await;
-            let network = native_config
-                .get_module::<LightningClientConfig>(ln.id)
-                .map_err(internal)?
-                .network
-                .to_string();
+            let network = if let Ok(ln) = client.get_first_module::<LightningClientModule>() {
+                native_config
+                    .get_module::<LightningClientConfig>(ln.id)
+                    .map_err(internal)?
+                    .network
+                    .to_string()
+            } else if let Ok(lnv2) = client.get_first_module::<LightningV2ClientModule>() {
+                native_config
+                    .get_module::<LightningV2ClientConfig>(lnv2.id)
+                    .map_err(internal)?
+                    .network
+                    .to_string()
+            } else {
+                return Err(internal("Federation has no supported Lightning module"));
+            };
             let config = client.get_config_json().await;
             let config_json = serde_json::to_value(&config).map_err(internal)?;
             let meta = config_json
@@ -488,19 +699,15 @@ async fn gateways(
         .get_client(req.federation_id)
         .await
         .ok_or_else(not_joined)?;
-    let ln = client
-        .get_first_module::<LightningClientModule>()
-        .map_err(internal)?;
-    // `list_gateways` reads the local cache. Refresh it exactly as the pinned
-    // Fedimint CLI does so a client joined before a gateway announcement can
-    // still discover that gateway without restarting the bridge.
-    ln.update_gateway_cache().await.map_err(internal)?;
-    let values = ln
-        .list_gateways()
-        .await
-        .into_iter()
-        .map(|gateway| json!(gateway))
-        .collect::<Vec<_>>();
+    let (mut values, legacy) = tokio::join!(
+        b.lnv2_gateways_for_client(&client),
+        b.gateways_for_client(&client),
+    );
+    if let Ok(legacy) = legacy {
+        values.extend(legacy.into_iter().map(|gateway| json!(gateway)));
+    } else if values.is_empty() {
+        return Err(internal("gateway discovery unavailable"));
+    }
     Ok(Json(Value::Array(values)))
 }
 
@@ -523,13 +730,38 @@ async fn quote(
         .get_client(req.federation_id)
         .await
         .ok_or_else(not_joined)?;
-    quote_client(client, req)
+    quote_client(&b, client, req)
         .await
         .map(Json)
         .map_err(|error| quote_error(&error))
 }
 
-async fn quote_client(client: ClientHandleArc, req: QuoteRequest) -> anyhow::Result<Value> {
+/// Returns only gateway-announced fee evidence when a federation cannot
+/// produce its native read-only fee quote.  This endpoint is deliberately not
+/// a payment quote: the federation fee and funding feasibility remain unknown.
+async fn gateway_estimate(
+    State(b): State<Arc<BridgeState>>,
+    h: HeaderMap,
+    Json(req): Json<QuoteRequest>,
+) -> HttpResult<Json<Value>> {
+    if !authed(&h, &b) {
+        return Err(unauthorized());
+    }
+    let client = b
+        .get_client(req.federation_id)
+        .await
+        .ok_or_else(not_joined)?;
+    gateway_estimate_client(&b, client, req)
+        .await
+        .map(Json)
+        .map_err(|error| quote_error(&error))
+}
+
+async fn gateway_estimate_client(
+    bridge: &BridgeState,
+    client: ClientHandleArc,
+    req: QuoteRequest,
+) -> anyhow::Result<Value> {
     let invoice: Bolt11Invoice = req.invoice.parse().context("invalid invoice")?;
     let amount_msat = sats_to_msats(req.amount_sats)?;
     ensure!(
@@ -537,8 +769,24 @@ async fn quote_client(client: ClientHandleArc, req: QuoteRequest) -> anyhow::Res
         "invoice amount mismatch"
     );
     ensure!(!invoice.is_expired(), "invoice expired");
+    let (lnv2, legacy) = tokio::join!(
+        lnv2_gateway_estimate(&client, &req, &invoice, amount_msat),
+        legacy_gateway_estimate(bridge, &client, &req, &invoice, amount_msat),
+    );
+    if let Some(value) = lnv2? {
+        return Ok(value);
+    }
+    legacy
+}
+
+async fn legacy_gateway_estimate(
+    bridge: &BridgeState,
+    client: &ClientHandleArc,
+    req: &QuoteRequest,
+    invoice: &Bolt11Invoice,
+    amount_msat: u64,
+) -> anyhow::Result<Value> {
     let ln = client.get_first_module::<LightningClientModule>()?;
-    ln.update_gateway_cache().await?;
     let config = client.config().await;
     let ln_config = config.get_module::<LightningClientConfig>(ln.id)?;
     ensure!(
@@ -546,9 +794,173 @@ async fn quote_client(client: ClientHandleArc, req: QuoteRequest) -> anyhow::Res
         "invoice network mismatch"
     );
     let amount = Amount::from_msats(amount_msat);
-    let gateway = ln
-        .list_gateways()
+    let gateway = bridge
+        .gateways_for_client(client)
+        .await?
+        .into_iter()
+        .filter(|gateway| !gateway.ttl.is_zero())
+        .filter(|gateway| matches!(gateway.info.api.scheme(), "http" | "https"))
+        .min_by_key(|gateway| {
+            (
+                gateway.info.fees.to_amount(&amount).msats,
+                gateway.info.gateway_id.to_string(),
+            )
+        })
+        .context("no gateway")?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(1_250))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let gateway_identity: String = http
+        .get(gateway.info.api.join_path("id").to_string())
+        .send()
         .await
+        .context("gateway unavailable")?
+        .error_for_status()
+        .context("gateway unavailable")?
+        .json()
+        .await
+        .context("gateway identity")?;
+    ensure!(
+        gateway_identity == gateway.info.gateway_id.to_string(),
+        "gateway identity mismatch"
+    );
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let invoice_expiry = invoice.expires_at().context("invoice expiry")?.as_secs();
+    let expires = now
+        .saturating_add(30)
+        .min(now.saturating_add(gateway.ttl.as_secs()))
+        .min(invoice_expiry);
+    Ok(json!({
+        "schema":"ecashmesh-fedimint-gateway-estimate-v1", "fedimint_version":"0.12.1",
+        "federation_id":req.federation_id.to_string(),
+        "invoice_digest":format!("{:x}", Sha256::digest(req.invoice.as_bytes())),
+        "payment_hash":invoice.payment_hash().to_string(), "amount_msat":amount_msat,
+        "network":ln_config.network.to_string(),
+        "gateway_fee_msat":gateway.info.fees.to_amount(&amount).msats,
+        "federation_fee_msat":null, "wallet_balance_msat":client.get_balance_for_btc().await?.msats,
+        "funding_feasible":null, "payable":null,
+        "selected_gateway_id":gateway.info.gateway_id.to_string(), "gateway_identity_verified":true,
+        "gateway_protocol":"lnv1",
+        "gateway_candidates":[{
+            "gateway_id":gateway.info.gateway_id.to_string(), "gateway_url":gateway.info.api.to_string(),
+            "gateway_fee_msat":gateway.info.fees.to_amount(&amount).msats,
+            "fee_base_msat":gateway.info.fees.base_msat, "fee_ppm":gateway.info.fees.proportional_millionths,
+            "gateway_identity_verified":true, "gateway_protocol":"lnv1"
+        }],
+        "observed_at_unix_seconds":now, "expires_at_unix_seconds":expires
+    }))
+}
+
+async fn lnv2_gateway_estimate(
+    client: &ClientHandleArc,
+    req: &QuoteRequest,
+    invoice: &Bolt11Invoice,
+    amount_msat: u64,
+) -> anyhow::Result<Option<Value>> {
+    let Ok(lnv2) = client.get_first_module::<LightningV2ClientModule>() else {
+        return Ok(None);
+    };
+    let config = client.config().await;
+    let ln_config = config.get_module::<LightningV2ClientConfig>(lnv2.id)?;
+    ensure!(
+        invoice.network() == ln_config.network,
+        "invoice network mismatch"
+    );
+    let Ok(Ok(gateways)) =
+        tokio::time::timeout(LNV2_GATEWAY_LIST_TIMEOUT, lnv2.list_gateways(None)).await
+    else {
+        return Ok(None);
+    };
+    let mut candidates = Vec::new();
+    let responses = futures::future::join_all(gateways.into_iter().map(|gateway| {
+        let lnv2 = &lnv2;
+        async move {
+            let routing =
+                tokio::time::timeout(LNV2_GATEWAY_PROBE_BUDGET, lnv2.routing_info(&gateway)).await;
+            (gateway, routing)
+        }
+    }))
+    .await;
+    for (gateway, routing) in responses {
+        let Ok(Ok(Some(routing))) = routing else {
+            continue;
+        };
+        let (fee, expiration_delta) = routing.send_parameters(invoice);
+        if !fee.is_within(&fedimint_lnv2_common::gateway_api::PaymentFee::SEND_FEE_LIMIT) {
+            continue;
+        }
+        candidates.push(json!({
+            "gateway_id":routing.lightning_public_key.to_string(), "gateway_url":gateway.to_string(),
+            "gateway_fee_msat":fee.fee(amount_msat).msats,
+            "fee_base_msat":fee.base.msats, "fee_ppm":fee.parts_per_million,
+            "expiration_delta":expiration_delta,
+            "lightning_alias":routing.lightning_alias,
+            // Registration is returned by the native LNv2 federation API and
+            // the fee response is decoded through its native typed client.
+            "gateway_identity_verified":true, "gateway_protocol":"lnv2"
+        }));
+    }
+    candidates.sort_by(|left, right| {
+        left["gateway_fee_msat"]
+            .as_u64()
+            .cmp(&right["gateway_fee_msat"].as_u64())
+            .then_with(|| {
+                left["gateway_url"]
+                    .as_str()
+                    .cmp(&right["gateway_url"].as_str())
+            })
+    });
+    let Some(selected) = candidates.first() else {
+        return Ok(None);
+    };
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let invoice_expiry = invoice.expires_at().context("invoice expiry")?.as_secs();
+    let expires = now.saturating_add(30).min(invoice_expiry);
+    Ok(Some(json!({
+        "schema":"ecashmesh-fedimint-gateway-estimate-v1", "fedimint_version":"0.12.1",
+        "federation_id":req.federation_id.to_string(),
+        "invoice_digest":format!("{:x}", Sha256::digest(req.invoice.as_bytes())),
+        "payment_hash":invoice.payment_hash().to_string(), "amount_msat":amount_msat,
+        "network":ln_config.network.to_string(),
+        "gateway_fee_msat":selected["gateway_fee_msat"], "federation_fee_msat":null,
+        "wallet_balance_msat":client.get_balance_for_btc().await?.msats,
+        "funding_feasible":null, "payable":null,
+        "selected_gateway_id":selected["gateway_id"], "gateway_identity_verified":true,
+        "gateway_protocol":"lnv2", "gateway_candidates":candidates,
+        "observed_at_unix_seconds":now, "expires_at_unix_seconds":expires
+    })))
+}
+
+async fn quote_client(
+    bridge: &BridgeState,
+    client: ClientHandleArc,
+    req: QuoteRequest,
+) -> anyhow::Result<Value> {
+    let invoice: Bolt11Invoice = req.invoice.parse().context("invalid invoice")?;
+    let amount_msat = sats_to_msats(req.amount_sats)?;
+    ensure!(
+        amount_msat > 0 && invoice.amount_milli_satoshis() == Some(amount_msat),
+        "invoice amount mismatch"
+    );
+    ensure!(!invoice.is_expired(), "invoice expired");
+    let ln = client
+        .get_first_module::<LightningClientModule>()
+        .context("native quote unavailable")?;
+    let config = client.config().await;
+    let ln_config = config.get_module::<LightningClientConfig>(ln.id)?;
+    ensure!(
+        invoice.network() == ln_config.network.0,
+        "invoice network mismatch"
+    );
+    // Native fee quoting selects real funding notes. Report an empty wallet
+    // before network probes, while leaving the estimate endpoint usable.
+    let balance = client.get_balance_for_btc().await?.msats;
+    ensure!(balance >= amount_msat, "insufficient balance");
+    let amount = Amount::from_msats(amount_msat);
+    let gateway = bridge
+        .gateways_for_client(&client)
+        .await?
         .into_iter()
         .filter(|g| !g.ttl.is_zero())
         // Gateway announcements can use Iroh as well as HTTP.  The bridge
@@ -567,7 +979,7 @@ async fn quote_client(client: ClientHandleArc, req: QuoteRequest) -> anyhow::Res
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let gateway_identity: String = http
-        .get(gateway.info.api.join("id")?.to_string())
+        .get(gateway.info.api.join_path("id").to_string())
         .send()
         .await
         .context("gateway unavailable")?
@@ -588,7 +1000,8 @@ async fn quote_client(client: ClientHandleArc, req: QuoteRequest) -> anyhow::Res
     );
     let federation_fee = ln
         .send_fee_quote(contract)
-        .await?
+        .await
+        .context("native quote unavailable")?
         .total()
         .get(&AmountUnit::BITCOIN)
         .copied()
@@ -638,14 +1051,21 @@ fn not_joined() -> (StatusCode, Json<Value>) {
     )
 }
 fn quote_error(error: &anyhow::Error) -> (StatusCode, Json<Value>) {
-    let code = match error.to_string().as_str() {
-        "insufficient balance" => "INSUFFICIENT_BALANCE",
-        "no gateway" => "GATEWAY_UNAVAILABLE",
-        "invalid invoice"
-        | "invoice amount mismatch"
-        | "invoice expired"
-        | "invoice network mismatch" => "INVALID_INVOICE",
-        _ => "UNSUPPORTED_PAYMENT",
+    let code = if error.downcast_ref::<InsufficientBalanceError>().is_some() {
+        "INSUFFICIENT_BALANCE"
+    } else {
+        match error.to_string().as_str() {
+            "insufficient balance" => "INSUFFICIENT_BALANCE",
+            "no gateway" => "GATEWAY_UNAVAILABLE",
+            "invalid invoice" => "INVALID_INVOICE",
+            "invoice amount mismatch" => "INVOICE_AMOUNT_MISMATCH",
+            "invoice expired" => "INVOICE_EXPIRED",
+            "invoice network mismatch" => "INVOICE_NETWORK_MISMATCH",
+            "gateway unavailable" => "GATEWAY_UNREACHABLE",
+            "gateway identity" | "gateway identity mismatch" => "GATEWAY_VERIFICATION_FAILED",
+            "native quote unavailable" => "NATIVE_QUOTE_UNAVAILABLE",
+            _ => "QUOTE_UNAVAILABLE",
+        }
     };
     (
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -746,7 +1166,11 @@ async fn main() -> anyhow::Result<()> {
     for federation_id in federation_ids {
         match bridge.open_client(federation_id).await {
             Ok(client) => bridge.insert_client(federation_id, client).await,
-            Err(_) => eprintln!("Fedimint bridge: federation {federation_id} is unavailable"),
+            Err(error) => {
+                eprintln!(
+                    "Fedimint bridge: could not reopen federation {federation_id}: {error:#}"
+                );
+            }
         }
     }
     let app = Router::new()
@@ -754,6 +1178,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v2/admin/info", get(info))
         .route("/v2/ln/list-gateways", post(gateways))
         .route("/v2/ln/ecashmesh-quote", post(quote))
+        .route("/v2/ln/ecashmesh-gateway-estimate", post(gateway_estimate))
         .route("/v2/ln/ecashmesh-connect-identify", post(identify))
         .route("/v2/ln/ecashmesh-connect-preview", post(preview))
         .route("/v2/ln/ecashmesh-connect", post(connect))
@@ -781,12 +1206,50 @@ mod tests {
     }
 
     #[test]
+    fn invoice_failures_have_distinct_public_codes() {
+        for (reason, code) in [
+            ("invalid invoice", "INVALID_INVOICE"),
+            ("invoice amount mismatch", "INVOICE_AMOUNT_MISMATCH"),
+            ("invoice expired", "INVOICE_EXPIRED"),
+            ("invoice network mismatch", "INVOICE_NETWORK_MISMATCH"),
+        ] {
+            let (status, Json(body)) = quote_error(&anyhow::anyhow!(reason));
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(body, json!({"error_code":code}));
+        }
+    }
+
+    #[test]
     fn bridge_listen_address_is_loopback_only() {
         assert_eq!(
             listen_address_from("127.0.0.1:3334").unwrap(),
             "127.0.0.1:3334".parse().unwrap()
         );
         assert!(listen_address_from("0.0.0.0:3334").is_err());
+    }
+
+    #[test]
+    fn native_note_selection_failure_is_insufficient_balance() {
+        let error = anyhow::Error::new(InsufficientBalanceError {
+            requested_amount: Amount::from_msats(100_000),
+            total_amount: Amount::ZERO,
+        })
+        .context("native quote unavailable");
+        let (_, Json(body)) = quote_error(&error);
+        assert_eq!(body["error_code"], "INSUFFICIENT_BALANCE");
+    }
+
+    #[test]
+    fn gateway_failures_are_not_reported_as_unsupported_modules() {
+        for (reason, code) in [
+            ("gateway unavailable", "GATEWAY_UNREACHABLE"),
+            ("gateway identity mismatch", "GATEWAY_VERIFICATION_FAILED"),
+            ("native quote unavailable", "NATIVE_QUOTE_UNAVAILABLE"),
+            ("some other failure", "QUOTE_UNAVAILABLE"),
+        ] {
+            let (_, Json(body)) = quote_error(&anyhow::anyhow!(reason));
+            assert_eq!(body["error_code"], code);
+        }
     }
 
     #[test]
