@@ -25,6 +25,7 @@ use tower_http::cors::CorsLayer;
 mod comparison;
 mod connectors;
 mod federation_setup;
+mod lab;
 mod live;
 mod payment;
 mod payment_mode;
@@ -35,6 +36,7 @@ struct AppState {
     provider: Provider,
     payments: std::sync::Arc<payment::PaymentService>,
     setup: std::sync::Arc<federation_setup::SetupService>,
+    lab_results: Option<lab::LabResults>,
 }
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:5000";
@@ -68,10 +70,13 @@ fn app(provider: Provider) -> Router {
         "Federation setup requires a loopback API bind address"
     );
     let setup = federation_setup::SetupService::new().expect("setup transport initialization");
+    let lab_results = lab::LabResults::from_env()
+        .unwrap_or_else(|error| panic!("invalid lab configuration: {error}"));
     let state = AppState {
         provider,
         payments,
         setup,
+        lab_results,
     };
     // Expo's local browser preview; native clients do not use browser CORS.
     let origins = std::env::var("ECASHMESH_WEB_ORIGIN").map_or_else(
@@ -112,6 +117,8 @@ fn app(provider: Provider) -> Router {
             post(federation_setup::connect),
         )
         .route("/v1/payments/prepare", post(payment::prepare))
+        .route("/v1/lab/results/latest", get(lab::latest))
+        .route("/api/lab/results/latest", get(lab::latest))
         .with_state(state)
         .layer(
             CorsLayer::new()

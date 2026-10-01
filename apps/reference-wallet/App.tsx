@@ -43,6 +43,7 @@ import {
 import { DecisionView, Risks, RouteDetails } from "./src/ui/RouteDecision";
 import { Disclosure } from "./src/ui/components";
 import { RouteComparisonView } from "./src/ui/RouteComparison";
+import { InteroperabilityLab } from "./src/ui/InteroperabilityLab";
 
 const baseUrl =
   process.env.EXPO_PUBLIC_ECASHMESH_API_URL ??
@@ -52,6 +53,8 @@ const baseUrl =
 const ecashmesh = createEcashMeshClient({ baseUrl });
 const regtestCustodyEnabled =
   process.env.EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY === "true";
+const interoperabilityLabEnabled =
+  process.env.EXPO_PUBLIC_ENABLE_INTEROPERABILITY_LAB === "true";
 
 function compactDestination(value: string) {
   const start = 18;
@@ -421,6 +424,9 @@ function ReferenceWallet() {
                   amount={fundAmount}
                   setAmount={setFundAmount}
                 />
+                {interoperabilityLabEnabled && (
+                  <InteroperabilityLab baseUrl={baseUrl} />
+                )}
               </>
             )}
 

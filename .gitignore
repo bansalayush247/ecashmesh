@@ -1,4 +1,5 @@
 /target/
+/target-nix/
 /result
 /.direnv/
 node_modules/

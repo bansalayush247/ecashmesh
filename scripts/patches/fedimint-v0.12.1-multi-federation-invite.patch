@@ -1,0 +1,152 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 49d9361fe7..36bbfa1091 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -14892,3 +14892,13 @@ dependencies = [
+  "cc",
+  "pkg-config",
+ ]
++
++[[package]]
++name = "ecashmesh-lab-runtime-runner"
++version = "0.1.0"
++dependencies = [
++ "anyhow",
++ "devimint",
++ "serde_json",
++ "tokio",
++]
+diff --git a/Cargo.toml b/Cargo.toml
+index 9e92a9f408..e4aed20f7a 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -7,6 +7,7 @@ members = [
+     "crypto/tpe",
+     "devimint",
++    "ecashmesh-lab-runner",
+     "docs",
+     "fedimint-api-client",
+     "fedimint-bip39",
+     "fedimint-bitcoind",
+diff --git a/devimint/src/federation.rs b/devimint/src/federation.rs
+index 870217e6e3..b8dcf4d154 100644
+--- a/devimint/src/federation.rs
++++ b/devimint/src/federation.rs
+@@ -430,7 +430,11 @@ pub async fn new(
+             }
+ 
+             // copy over invite-code file to client directory
+-            let peer_data_dir = utf8(&peer_to_env_vars_map[&0].FM_DATA_DIR);
++            let first_peer = peer_to_env_vars_map
++                .values()
++                .next()
++                .context("federation has no guardians")?;
++            let peer_data_dir = utf8(&first_peer.FM_DATA_DIR);
+ 
+             tokio::fs::copy(
+                 format!("{peer_data_dir}/{invite_code_filename_original}"),
+@@ -1463,20 +1463,22 @@ pub async fn run_cli_dkg_v2(endpoints: BTreeMap<PeerId, String>) -> Result<()> {
+     // Parallelize setup status checks
+     let status_futures = endpoints.values().map(|endpoint| {
+         let endpoint = endpoint.clone();
+-        async move {
++        async move {
+             let status = poll("awaiting-setup-status-awaiting-local-params", || async {
+                 crate::util::FedimintCli
+                     .setup_status(&API_AUTH, &endpoint)
+                     .await
+                     .map_err(ControlFlow::Continue)
+             })
+-            .await
+-            .unwrap();
++            .await?;
+ 
+-            assert_eq!(status, SetupStatus::AwaitingLocalParams);
++            if status != SetupStatus::AwaitingLocalParams {
++                bail!("unexpected DKG setup status at {endpoint}: {status:?}");
++            }
++            Ok(())
+         }
+     });
+-    join_all(status_futures).await;
++    try_join_all(status_futures).await?;
+ 
+     debug!(target: LOG_DEVIMINT, "Setting local parameters...");
+ 
+diff --git a/devimint/src/util.rs b/devimint/src/util.rs
+index cad1acd549..444ddd0606 100644
+--- a/devimint/src/util.rs
++++ b/devimint/src/util.rs
+@@ -1016,8 +1016,14 @@ pub async fn use_matching_fedimint_cli_for_dkg() -> Result<(String, String)> {
+         // we're on the current version if the fedimintd version is the same as the
+         // package version. to use the current version of `fedimint-cli` built by cargo,
+         // we need to unset FM_FEDIMINT_CLI_BASE_EXECUTABLE
++        // Keep an explicit absolute executable supplied by an embedding launcher. The
++        // local EcashMesh lab runs the pinned binary outside devimint's cargo target.
+         // TODO: Audit that the environment access only happens in single-threaded code.
+-        unsafe { std::env::remove_var(FM_FEDIMINT_CLI_BASE_EXECUTABLE_ENV) };
++        if let Some(explicit_cli) = std::env::var_os("ECASHMESH_LAB_FEDIMINT_CLI") {
++            unsafe { std::env::set_var(FM_FEDIMINT_CLI_BASE_EXECUTABLE_ENV, explicit_cli) };
++        } else if std::env::var_os(FM_FEDIMINT_CLI_BASE_EXECUTABLE_ENV).is_none() {
++            unsafe { std::env::remove_var(FM_FEDIMINT_CLI_BASE_EXECUTABLE_ENV) };
++        }
+     } else {
+         let parsed_fedimintd_version = fedimintd_version.to_string().replace(['-', '.'], "_");
+ 
+diff --git a/modules/fedimint-lnv2-client/src/cli.rs b/modules/fedimint-lnv2-client/src/cli.rs
+index 68e3c61f70..e543987803 100644
+--- a/modules/fedimint-lnv2-client/src/cli.rs
++++ b/modules/fedimint-lnv2-client/src/cli.rs
+@@ -26,24 +26,26 @@ enum Opts {
+     /// generate the invoice, otherwise a gateway will be selected
+     /// automatically.
+     Receive {
+         amount: Amount,
+         #[arg(long)]
+         gateway: Option<SafeUrl>,
+     },
+     /// Await the final state of the receive operation.
+     AwaitReceive { operation_id: OperationId },
+     /// Lnurl subcommands
+     #[command(subcommand)]
+     Lnurl(LnurlOpts),
++    /// Return the module's real send fee quote without creating a payment.
++    FeeQuote { amount: Amount },
+     /// Gateway subcommands
+     #[command(subcommand)]
+     Gateways(GatewaysOpts),
+ }
+ 
+ #[derive(Clone, Subcommand, Serialize)]
+ enum LnurlOpts {
+     /// Generate a new lnurl.
+     Generate {
+         recurringd: SafeUrl,
+         #[arg(long)]
+         gateway: Option<SafeUrl>,
+@@ -94,24 +96,25 @@ pub(crate) async fn handle_cli_command(
+                     3600,
+                     Bolt11InvoiceDescription::Direct(String::new()),
+                     gateway,
+                     Value::Null,
+                 )
+                 .await?,
+         ),
+         Opts::AwaitReceive { operation_id } => json(
+             lightning
+                 .await_final_receive_operation_state(operation_id)
+                 .await?,
+         ),
++        Opts::FeeQuote { amount } => json(format!("{:?}", lightning.send_fee_quote(amount).await?)),
+         Opts::Lnurl(lnurl_opts) => match lnurl_opts {
+             LnurlOpts::Generate {
+                 recurringd,
+                 gateway,
+             } => json(lightning.generate_lnurl(recurringd, gateway).await?),
+         },
+         Opts::Gateways(gateway_opts) => match gateway_opts {
+             #[allow(clippy::unit_arg)]
+             GatewaysOpts::Map => json(lightning.update_gateway_map().await),
+             GatewaysOpts::Select { invoice } => json(lightning.select_gateway(invoice).await?.0),
+             GatewaysOpts::List { peer } => json(lightning.list_gateways(peer).await?),
+             GatewaysOpts::Add { gateway } => {

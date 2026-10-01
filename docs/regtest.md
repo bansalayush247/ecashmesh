@@ -39,3 +39,8 @@ be prepared as payments. Mainnet execution stays disabled.
 
 See `scripts/regtest-multi-source.sh` for the existing multi-source harness.
 Do not mix demo bridge state with isolated regtest wallet state.
+
+The requested eight-source Cashu/Fedimint interoperability lab has stricter
+requirements than this CDK topology.  Its command guards and the audited
+provisioning blockers are documented in
+[local-interoperability-lab.md](local-interoperability-lab.md).

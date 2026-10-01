@@ -35,6 +35,7 @@
               pkgs.openssl
               pkgs.pkg-config
               pkgs.pnpm
+              pkgs.protobuf
               pkgs.rust-analyzer
               pkgs.rustc
               pkgs.rustfmt

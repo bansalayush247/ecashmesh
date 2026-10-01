@@ -431,6 +431,7 @@ mod tests {
                 provider: super::super::connectors::Provider::for_setup_test(service),
                 payments: super::super::payment::PaymentService::from_env().unwrap(),
                 setup,
+                lab_results: None,
             },
             mock,
             task,
