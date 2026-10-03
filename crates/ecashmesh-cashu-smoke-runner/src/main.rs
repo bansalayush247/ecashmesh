@@ -168,10 +168,20 @@ async fn smoke(index: &str, mint_url: &str, wallet_path: PathBuf) -> Result<Valu
     }))
 }
 
-async fn cross_mint(source_url: &str, destination_url: &str, root: PathBuf) -> Result<Value> {
+async fn cross_mint(
+    source_index: &str,
+    source_url: &str,
+    destination_index: &str,
+    destination_url: &str,
+    root: PathBuf,
+) -> Result<Value> {
     let started = std::time::Instant::now();
-    let source = wallet(source_url, root.join("A/wallet.sqlite")).await?;
-    let destination = wallet(destination_url, root.join("B/wallet.sqlite")).await?;
+    let source = wallet(source_url, root.join(source_index).join("wallet.sqlite")).await?;
+    let destination = wallet(
+        destination_url,
+        root.join(destination_index).join("wallet.sqlite"),
+    )
+    .await?;
     let source_before = source.total_balance().await?;
     let destination_before = destination.total_balance().await?;
     let destination_quote = destination
@@ -182,7 +192,7 @@ async fn cross_mint(source_url: &str, destination_url: &str, root: PathBuf) -> R
             None,
         )
         .await
-        .context("creating Cashu B destination mint quote")?;
+        .with_context(|| format!("creating Cashu {destination_index} destination mint quote"))?;
     let source_quote = source
         .melt_quote(
             PaymentMethod::BOLT11,
@@ -191,19 +201,20 @@ async fn cross_mint(source_url: &str, destination_url: &str, root: PathBuf) -> R
             None,
         )
         .await
-        .context("creating Cashu A source melt quote")?;
+        .with_context(|| format!("creating Cashu {source_index} source melt quote"))?;
     let prepared = source
         .prepare_melt(&source_quote.id, HashMap::new())
         .await
-        .context("preparing Cashu A cross-mint melt")?;
+        .with_context(|| format!("preparing Cashu {source_index} cross-mint melt"))?;
     let source_fee = prepared.total_fee().to_string();
     let finalized = prepared
         .confirm()
         .await
-        .context("confirming Cashu A cross-mint melt")?;
+        .with_context(|| format!("confirming Cashu {source_index} cross-mint melt"))?;
     ensure!(
         finalized.state() == MeltQuoteState::Paid,
-        "Cashu A cross-mint melt is not paid"
+        "Cashu {} cross-mint melt is not paid",
+        source_index
     );
     let proofs = destination
         .wait_and_mint_quote(
@@ -213,19 +224,21 @@ async fn cross_mint(source_url: &str, destination_url: &str, root: PathBuf) -> R
             Duration::from_secs(60),
         )
         .await
-        .context("issuing paid Cashu B destination quote")?;
+        .with_context(|| format!("issuing paid Cashu {destination_index} destination quote"))?;
     ensure!(
         !proofs.is_empty(),
-        "Cashu B cross-mint issuance returned no proofs"
+        "Cashu {} cross-mint issuance returned no proofs",
+        destination_index
     );
     let source_after = source.total_balance().await?;
     let destination_after = destination.total_balance().await?;
     ensure!(
         destination_after > destination_before,
-        "Cashu B destination state did not increase"
+        "Cashu {} destination state did not increase",
+        destination_index
     );
     Ok(json!({
-        "status": "READY", "source": "A", "destination": "B", "amount_sat": MELT_AMOUNT_SAT,
+        "status": "READY", "source": source_index, "destination": destination_index, "amount_sat": MELT_AMOUNT_SAT,
         "source_quote": source_quote.id, "destination_quote": destination_quote.id,
         "source_fee_sat": source_fee, "destination_fee_sat": "0",
         "lightning_payment_status": format!("{:?}", finalized.state()),
@@ -233,6 +246,75 @@ async fn cross_mint(source_url: &str, destination_url: &str, root: PathBuf) -> R
         "destination_state_before_sat": destination_before.to_string(), "destination_state_after_sat": destination_after.to_string(),
         "latency_ms": started.elapsed().as_millis(),
     }))
+}
+
+async fn create_quote(index: &str, mint_url: &str, wallet_path: PathBuf) -> Result<Value> {
+    let wallet = wallet(mint_url, wallet_path).await?;
+    let before = wallet.total_balance().await?;
+    let quote = wallet
+        .mint_quote(
+            PaymentMethod::BOLT11,
+            Some(Amount::from(MELT_AMOUNT_SAT)),
+            None,
+            None,
+        )
+        .await
+        .context("creating real destination mint quote")?;
+    Ok(
+        json!({"mint":index,"quote_id":quote.id,"invoice":quote.request,"amount_sat":MELT_AMOUNT_SAT,"balance_before_sat":before.to_string()}),
+    )
+}
+
+async fn claim_quote(
+    index: &str,
+    mint_url: &str,
+    wallet_path: PathBuf,
+    quote_id: &str,
+) -> Result<Value> {
+    let wallet = wallet(mint_url, wallet_path).await?;
+    let before = wallet.total_balance().await?;
+    let quote = wallet
+        .check_mint_quote(quote_id)
+        .await
+        .context("checking destination mint quote")?;
+    ensure!(
+        quote.state == MintQuoteState::Paid,
+        "destination mint quote is not paid"
+    );
+    let proofs = wallet
+        .wait_and_mint_quote(quote, SplitTarget::default(), None, Duration::from_secs(60))
+        .await?;
+    ensure!(
+        !proofs.is_empty(),
+        "destination issuance returned no proofs"
+    );
+    let after = wallet.total_balance().await?;
+    ensure!(after > before, "destination balance did not increase");
+    Ok(
+        json!({"mint":index,"quote_id":quote_id,"status":"PAID","proof_count":proofs.len(),"balance_before_sat":before.to_string(),"balance_after_sat":after.to_string()}),
+    )
+}
+
+async fn melt_invoice(
+    index: &str,
+    mint_url: &str,
+    wallet_path: PathBuf,
+    invoice: &str,
+) -> Result<Value> {
+    let wallet = wallet(mint_url, wallet_path).await?;
+    let quote = wallet
+        .melt_quote(PaymentMethod::BOLT11, invoice.to_owned(), None, None)
+        .await?;
+    let prepared = wallet.prepare_melt(&quote.id, HashMap::new()).await?;
+    let fee = prepared.total_fee().to_string();
+    let final_state = prepared.confirm().await?;
+    ensure!(
+        final_state.state() == MeltQuoteState::Paid,
+        "source Cashu melt is not paid"
+    );
+    Ok(
+        json!({"mint":index,"melt_quote_id":quote.id,"status":"PAID","fee_sat":fee,"amount_sat":quote.amount.to_string()}),
+    )
 }
 
 #[tokio::main]
@@ -247,10 +329,39 @@ async fn main() -> Result<()> {
             smoke(&index, &mint_url, wallet_path).await?
         }
         "cross" => {
+            let source_index = args.next().context("source mint index is required")?;
             let source_url = args.next().context("source URL is required")?;
+            let destination_index = args.next().context("destination mint index is required")?;
             let destination_url = args.next().context("destination URL is required")?;
             let root = PathBuf::from(args.next().context("wallet root is required")?);
-            cross_mint(&source_url, &destination_url, root).await?
+            cross_mint(
+                &source_index,
+                &source_url,
+                &destination_index,
+                &destination_url,
+                root,
+            )
+            .await?
+        }
+        "quote" => {
+            let index = args.next().context("mint index is required")?;
+            let url = args.next().context("mint URL is required")?;
+            let wallet_path = PathBuf::from(args.next().context("wallet path is required")?);
+            create_quote(&index, &url, wallet_path).await?
+        }
+        "claim" => {
+            let index = args.next().context("mint index is required")?;
+            let url = args.next().context("mint URL is required")?;
+            let wallet_path = PathBuf::from(args.next().context("wallet path is required")?);
+            let quote_id = args.next().context("quote ID is required")?;
+            claim_quote(&index, &url, wallet_path, &quote_id).await?
+        }
+        "melt" => {
+            let index = args.next().context("mint index is required")?;
+            let url = args.next().context("mint URL is required")?;
+            let wallet_path = PathBuf::from(args.next().context("wallet path is required")?);
+            let invoice = args.next().context("invoice is required")?;
+            melt_invoice(&index, &url, wallet_path, &invoice).await?
         }
         _ => anyhow::bail!("unknown command: {command}"),
     };

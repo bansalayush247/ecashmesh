@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # This command must never turn an incomplete topology into synthetic route
-# results. It verifies the real topology created by lab-up before it allows a
-# future execution runner to touch payments.
+# results. It verifies the real topology created by lab-up and publishes only
+# the complete evidence emitted by the protocol-native route executor.
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 state="$root/.regtest/ecashmesh-lab"
 topology="$state/topology.env"
@@ -86,8 +86,14 @@ if len(marker.get("cashu", [])) != 4:
     raise SystemExit("Cashu attestation is incomplete")
 PY
 
-cat >&2 <<'EOF'
-The eight-source regtest topology is verified. No payment execution runner is
-implemented yet, so no route was attempted and no results artifact was written.
-EOF
-exit 78
+evidence="$state/route-evidence.json"
+results="$state/results.json"
+[[ -f "$evidence" ]] || fail "no real route evidence exists; the route executor has not completed all 56 settlements"
+rm -f "$results" "$results.tmp"
+python3 "$root/scripts/ecashmesh-lab-results-runner.py" \
+  --evidence "$evidence" \
+  --output "$results" \
+  --run-id "$(python3 -c 'import json; print(json.load(open("'"$attestation"'"))["run_id"])')"" || \
+  fail "route evidence is incomplete, failed, or lacks destination settlement verification; results.json was not written"
+[[ -s "$results" ]] || fail "results runner did not publish results.json"
+printf 'Verified real route matrix published: %s\n' "$results"

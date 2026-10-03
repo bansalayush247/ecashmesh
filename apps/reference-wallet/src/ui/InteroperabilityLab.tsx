@@ -25,10 +25,12 @@ type LabRoute = {
   invoice?: string;
 };
 type LabResult = {
+  format_version: number;
   run_id: string;
   timestamp_unix_seconds: number;
   topology: { network: string; sources: unknown[]; gateways?: unknown[] };
   routes: LabRoute[];
+  summary?: { total?: number; succeeded?: number; failed?: number };
 };
 
 function sourceName(value: unknown) {
@@ -66,6 +68,8 @@ export function InteroperabilityLab({ baseUrl }: { baseUrl: string }) {
         if (
           !value ||
           typeof value !== "object" ||
+          !("format_version" in value) ||
+          (value as { format_version?: unknown }).format_version !== 1 ||
           !("routes" in value) ||
           !Array.isArray((value as { routes?: unknown }).routes)
         ) {
@@ -87,9 +91,10 @@ export function InteroperabilityLab({ baseUrl }: { baseUrl: string }) {
 
   const summary = useMemo(() => {
     const routes = result?.routes ?? [];
+    const recorded = result?.summary;
     return {
-      pass: routes.filter((route) => route.status === "PASS").length,
-      fail: routes.filter((route) => route.status === "FAIL").length,
+      pass: recorded?.succeeded ?? routes.filter((route) => route.status === "PASS").length,
+      fail: recorded?.failed ?? routes.filter((route) => route.status === "FAIL").length,
       notRun: routes.filter((route) => route.status === "NOT_RUN").length,
     };
   }, [result]);

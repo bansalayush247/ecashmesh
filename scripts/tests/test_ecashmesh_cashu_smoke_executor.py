@@ -30,8 +30,8 @@ class CashuSmokeExecutorTests(unittest.TestCase):
         self.assertIn("InvoiceStatus::Paid", self.source)
 
     def test_cross_mint_requires_destination_issuance_and_balance_increase(self):
-        self.assertIn("creating Cashu B destination mint quote", self.source)
-        self.assertIn("Cashu B cross-mint issuance returned no proofs", self.source)
+        self.assertIn("creating Cashu {destination_index} destination mint quote", self.source)
+        self.assertIn("Cashu {} cross-mint issuance returned no proofs", self.source)
         self.assertIn("destination_after > destination_before", self.source)
 
     def test_launcher_marks_smoke_ready_only_after_executor_output_is_ready(self):
@@ -42,6 +42,26 @@ class CashuSmokeExecutorTests(unittest.TestCase):
     def test_attestation_requires_cross_mint_and_bidirectional_lightning_evidence(self):
         self.assertIn("Cashu A to Cashu B real settlement is not verified", self.launcher)
         self.assertIn("bidirectional real Lightning payment readiness is not verified", self.launcher)
+
+    def test_bitcoin_rpc_secret_uses_an_environment_reference(self):
+        self.assertIn(
+            'bitcoind_rpc_password = "env:CDK_MINTD_BITCOIND_RPC_PASSWORD"',
+            self.launcher,
+        )
+        self.assertNotIn('bitcoind_rpc_password = "bitcoin"', self.launcher)
+
+    def test_bitcoin_rpc_secret_is_available_to_init_and_daemon_only(self):
+        self.assertEqual(
+            self.launcher.count('CDK_MINTD_BITCOIND_RPC_PASSWORD="bitcoin"'),
+            2,
+        )
+        self.assertIn('config init --new-mint --file "$mint_dir/config.toml"', self.launcher)
+        self.assertIn('"$cdk_target" --work-dir "$mint_dir" >"$state/cashu-$index.log"', self.launcher)
+
+    def test_cashu_diagnostics_do_not_record_bitcoin_rpc_secret(self):
+        diagnostics_functions = self.launcher[self.launcher.index("cashu_stage()") : self.launcher.index("require_loopback()")]
+        self.assertNotIn("CDK_MINTD_BITCOIND_RPC_PASSWORD", diagnostics_functions)
+        self.assertNotIn('"bitcoin"', diagnostics_functions)
 
 
 if __name__ == "__main__":

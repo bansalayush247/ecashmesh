@@ -25,7 +25,11 @@ class PaymentStatusTests(unittest.TestCase):
         result = parse(
             [
                 {"status": "IN_FLIGHT"},
-                {"status": "SUCCEEDED", "payment_preimage": "preimage"},
+                {
+                    "status": "SUCCEEDED",
+                    "payment_preimage": "preimage",
+                    "htlcs": [{"status": "SUCCEEDED"}],
+                },
             ]
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -42,9 +46,54 @@ class PaymentStatusTests(unittest.TestCase):
         self.assertIn("did not return a terminal SUCCEEDED", result.stderr)
 
     def test_rejects_success_without_preimage(self):
-        result = parse([{"status": "SUCCEEDED"}])
+        result = parse([{"status": "SUCCEEDED", "htlcs": [{"status": "SUCCEEDED"}]}])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("has no preimage", result.stderr)
+
+    def test_accepts_wrapped_successful_rest_event(self):
+        result = parse(
+            [
+                {"result": {"status": "IN_FLIGHT"}},
+                {
+                    "result": {
+                        "status": "SUCCEEDED",
+                        "payment_preimage": "preimage",
+                        "htlcs": [{"status": "SUCCEEDED", "route": {"total_amt_msat": "1000000"}}],
+                    }
+                },
+            ]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["payment_preimage"], "preimage")
+
+    def test_rejects_wrapped_failed_rest_event(self):
+        result = parse([{"result": {"status": "FAILED", "failure_reason": "NO_ROUTE"}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("terminal failure: NO_ROUTE", result.stderr)
+
+    def test_rejects_malformed_response(self):
+        result = subprocess.run(
+            ["python3", str(PARSER)], input="not-json\n", text=True, capture_output=True, check=False
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no valid payment updates", result.stderr)
+
+    def test_rejects_missing_status(self):
+        result = parse([{"result": {"payment_preimage": "preimage"}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not return a terminal SUCCEEDED", result.stderr)
+
+    def test_rejects_success_without_successful_htlc(self):
+        result = parse(
+            [{"result": {"status": "SUCCEEDED", "payment_preimage": "preimage", "htlcs": []}}]
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no successful HTLC", result.stderr)
+
+    def test_rejects_wrapped_in_flight_response(self):
+        result = parse([{"result": {"status": "IN_FLIGHT"}}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not return a terminal SUCCEEDED", result.stderr)
 
     def test_launcher_verifies_destination_invoice_settlement(self):
         launcher = LAUNCHER.read_text()

@@ -90,6 +90,19 @@ class LncliContextTests(unittest.TestCase):
         self.assertIn('kill -TERM "$runner_pid"', teardown)
         self.assertIn("lab supervisor did not exit after SIGINT and SIGTERM", teardown)
 
+    def test_clean_lab_start_archives_lnd2_chain_state(self):
+        self.assertIn('[[ ! -d "$state/lnd-2" ]] || mv "$state/lnd-2" "$archive/lnd-2"', self.launcher)
+        self.assertIn("LND #2 follows devimint's disposable bitcoind chain", self.launcher)
+
+    def test_startup_waits_for_the_complete_deterministic_port_set(self):
+        self.assertIn("wait_for_required_ports()", self.launcher)
+        self.assertIn("for attempt in $(seq 1 60)", self.launcher)
+        self.assertIn("startup-port-diagnostics.json", self.launcher)
+        self.assertLess(
+            self.launcher.index("wait_for_required_ports"),
+            self.launcher.index("rm -f \"$state/lab.pid\""),
+        )
+
     def test_failed_lncli_command_records_node_command_exit_code_and_stderr(self):
         self.assertIn('f"{sys.argv[1]}_lncli"', self.launcher)
         self.assertIn("else\n    exit_code=$?", self.launcher)

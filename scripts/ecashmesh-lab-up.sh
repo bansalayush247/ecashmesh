@@ -48,12 +48,60 @@ finally:
     s.close()
 PY
 }
+wait_for_required_ports() {
+  local attempt port pid command evidence found_listener
+  for attempt in $(seq 1 60); do
+    evidence='[]'
+    for port in $(seq 39000 39063) $(seq 39100 39103) $(seq 39200 39203) $(seq 39300 39303) 39400 39401 39402 $(seq 5100 5103); do
+      if ! port_free "$port"; then
+        found_listener=0
+        while IFS= read -r pid; do
+          [[ -n "$pid" ]] || continue
+          found_listener=1
+          command="$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)"
+          evidence="$(python3 - "$evidence" "$port" "$pid" "$command" <<'PY'
+import json, sys
+items = json.loads(sys.argv[1])
+items.append({"port": int(sys.argv[2]), "pid": int(sys.argv[3]), "command": sys.argv[4]})
+print(json.dumps(items))
+PY
+)"
+        done < <(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+        # Some systems deny lsof visibility for an unrelated listener. Keep
+        # the blocked port even when its PID cannot be inspected.
+        [[ $found_listener -eq 1 ]] || evidence="$(python3 - "$evidence" "$port" <<'PY'
+import json, sys
+items = json.loads(sys.argv[1])
+items.append({"port": int(sys.argv[2]), "pid": None, "command": None})
+print(json.dumps(items))
+PY
+)"
+      fi
+    done
+    if [[ "$evidence" == '[]' ]]; then
+      python3 - "$state/startup-port-diagnostics.json" <<'PY'
+import json, pathlib, sys, time
+path = pathlib.Path(sys.argv[1])
+path.write_text(json.dumps({"status": "READY", "timestamp": int(time.time()), "listeners": []}, indent=2) + "\n")
+PY
+      return 0
+    fi
+    python3 - "$state/startup-port-diagnostics.json" "$evidence" <<'PY'
+import json, pathlib, sys, time
+path = pathlib.Path(sys.argv[1])
+path.write_text(json.dumps({"status": "WAITING", "timestamp": int(time.time()), "listeners": json.loads(sys.argv[2])}, indent=2) + "\n")
+PY
+    sleep 1
+  done
+  python3 - "$state/startup-port-diagnostics.json" "$evidence" <<'PY'
+import json, pathlib, sys, time
+path = pathlib.Path(sys.argv[1])
+path.write_text(json.dumps({"status": "FAILED", "timestamp": int(time.time()), "listeners": json.loads(sys.argv[2])}, indent=2) + "\n")
+PY
+  fail "required deterministic lab ports remained occupied; see $state/startup-port-diagnostics.json"
+}
 # devimint assigns four peers per federation from the forced base range.  Its
 # Bitcoin/LND ports are dynamically reserved under the isolated lab root.
-for port in $(seq 39000 39063) $(seq 39100 39103) $(seq 39200 39203) $(seq 39300 39303) $(seq 5100 5103); do
-  port_free "$port" || fail "required deterministic lab port $port is occupied"
-done
-
 if [[ -f "$state/runner.pid" && -f "$state/runner.start" ]]; then
   runner_pid="$(<"$state/runner.pid")"
   runner_start="$(/bin/ps -p "$runner_pid" -o lstart= 2>/dev/null || true)"
@@ -65,9 +113,11 @@ fi
 
 mkdir -p "$state"
 chmod 700 "$state"
+wait_for_required_ports
 rm -f "$state/lab.pid" "$state/lab.start" "$state/runner.pid" "$state/runner.start" \
   "$state/fedimint-ready" "$state/fedimint-runtime.env" "$state/fedimint-attestation.json" \
-  "$state/topology-attestation.json" "$state/startup-diagnostics.json"
+  "$state/topology-attestation.json" "$state/startup-diagnostics.json" \
+  "$state/results.json" "$state/results.json.tmp" "$state/route-evidence.json"
 rm -f "$cashu_diagnostics"
 [[ "${PAYMENT_ENVIRONMENT:-regtest}" == regtest ]] || fail "PAYMENT_ENVIRONMENT must be regtest"
 [[ "${ECASHMESH_LAB_MODE:-true}" == true ]] || fail "ECASHMESH_LAB_MODE must be true"
@@ -76,11 +126,15 @@ require_loopback "127.0.0.1"
 # A stopped topology is archived before the next start. This keeps its daemon
 # logs and mint/Fedimint evidence while ensuring DKG and mint initialization
 # always use clean, isolated runtime directories.
-if [[ -d "$state/fedimint" || -d "$state/cashu" ]]; then
+if [[ -d "$state/fedimint" || -d "$state/cashu" || -d "$state/lnd-2" ]]; then
   archive="$state/archive/$(date +%Y%m%d%H%M%S)"
   mkdir -p "$archive"
   [[ ! -d "$state/fedimint" ]] || mv "$state/fedimint" "$archive/fedimint"
   [[ ! -d "$state/cashu" ]] || mv "$state/cashu" "$archive/cashu"
+  # LND #2 follows devimint's disposable bitcoind chain. Retaining its
+  # wallet/chain database across a new bitcoind instance causes a rescan of a
+  # disconnected chain and prevents newly funded outputs from appearing.
+  [[ ! -d "$state/lnd-2" ]] || mv "$state/lnd-2" "$archive/lnd-2"
 fi
 
 # The exact upstream revisions are deliberately copied into the lab state.  No
@@ -165,7 +219,9 @@ lnd2_dir="$state/lnd-2"
 lnd2_p2p_port=39400
 lnd2_rpc_port=39401
 lnd2_rest_port=39402
-for port in "$lnd2_p2p_port" "$lnd2_rpc_port" "$lnd2_rest_port"; do port_free "$port" || fail "LND #2 port $port is occupied"; done
+# The complete deterministic set was already verified above. Retain this
+# explicit assertion for LND #2's documented port allocation.
+for port in "$lnd2_p2p_port" "$lnd2_rpc_port" "$lnd2_rest_port"; do port_free "$port" || fail "LND #2 port $port is occupied after startup port gate"; done
 mkdir -p "$lnd2_dir"
 cat >"$lnd2_dir/lnd.conf" <<EOF
 [Application Options]
@@ -588,7 +644,7 @@ chain_source_type = "bitcoinrpc"
 bitcoind_rpc_host = "127.0.0.1"
 bitcoind_rpc_port = $ECASHMESH_LAB_BITCOIN_RPC_PORT
 bitcoind_rpc_user = "bitcoin"
-bitcoind_rpc_password = "bitcoin"
+bitcoind_rpc_password = "env:CDK_MINTD_BITCOIND_RPC_PASSWORD"
 EOF
   cashu_stage "$index" config READY "{\"config\":\"$mint_dir/config.toml\",\"port\":$port,\"backend\":\"lnd\",\"network\":\"regtest\"}"
   case "$index" in
@@ -600,7 +656,8 @@ EOF
   init_log="$state/cashu-$index-init.log"
   cashu_stage "$index" config_init STARTING "{\"command\":\"$cdk_target --work-dir $mint_dir config init --new-mint --file $mint_dir/config.toml\",\"log\":\"$init_log\"}"
   init_started="$(date +%s)"; set +e
-  env CDK_MINTD_WORK_DIR="$mint_dir" CDK_MINTD_MNEMONIC="$mnemonic" "$cdk_target" --work-dir "$mint_dir" config init --new-mint --file "$mint_dir/config.toml" >"$init_log" 2>&1
+  env CDK_MINTD_WORK_DIR="$mint_dir" CDK_MINTD_MNEMONIC="$mnemonic" CDK_MINTD_BITCOIND_RPC_PASSWORD="bitcoin" \
+    "$cdk_target" --work-dir "$mint_dir" config init --new-mint --file "$mint_dir/config.toml" >"$init_log" 2>&1
   init_rc=$?; set -e; init_elapsed=$(( $(date +%s) - init_started ))
   if [[ $init_rc -ne 0 ]]; then
     init_error="$(tail -80 "$init_log" | tr '\n' ' ' | cut -c1-4000)"
@@ -609,7 +666,7 @@ EOF
   fi
   cashu_stage "$index" config_init READY "{\"exit_code\":0,\"elapsed_seconds\":$init_elapsed,\"log\":\"$init_log\"}"
   cashu_stage "$index" daemon STARTING "{\"port\":$port}"
-  nohup env CDK_MINTD_WORK_DIR="$mint_dir" CDK_MINTD_MNEMONIC="$mnemonic" \
+  nohup env CDK_MINTD_WORK_DIR="$mint_dir" CDK_MINTD_MNEMONIC="$mnemonic" CDK_MINTD_BITCOIND_RPC_PASSWORD="bitcoin" \
     "$cdk_target" --work-dir "$mint_dir" >"$state/cashu-$index.log" 2>&1 &
   echo $! >"$state/cashu-$index.pid"
   /bin/ps -p "$(<"$state/cashu-$index.pid")" -o lstart= >"$state/cashu-$index.start"
@@ -667,7 +724,7 @@ cross_result="$(env \
   ECASHMESH_LAB_LND_RPC_ADDR="$ECASHMESH_LAB_LND_RPC_ADDR" \
   ECASHMESH_LAB_LND_TLS_CERT="$ECASHMESH_LAB_LND_TLS_CERT" \
   ECASHMESH_LAB_LND_MACAROON="$ECASHMESH_LAB_LND_MACAROON" \
-  "$cashu_smoke_target" cross http://127.0.0.1:5100 http://127.0.0.1:5101 "$state/cashu" 2>"$cross_log")"
+  "$cashu_smoke_target" cross A http://127.0.0.1:5100 B http://127.0.0.1:5101 "$state/cashu" 2>"$cross_log")"
 cross_rc=$?
 set -e
 if [[ $cross_rc -ne 0 ]]; then
@@ -683,6 +740,19 @@ for _ in $(seq 1 300); do
   sleep 1
 done
 [[ -f "$state/fedimint-attestation.json" ]] || fail "Fedimint topology did not become ready"
+
+# The route executor runs against the already live, isolated topology.  It
+# writes incremental route evidence but never results.json; the separate
+# validator is the only publisher for that artifact.
+if ! python3 "$root/scripts/ecashmesh-lab-route-executor.py" >"$state/route-executor.log" 2>&1; then
+  tail -120 "$state/route-executor.log" >&2 || true
+  fail "real 56-route protocol executor failed; see $state/route-executor.log and route-evidence.json"
+fi
+python3 "$root/scripts/ecashmesh-lab-results-runner.py" \
+  --evidence "$state/route-evidence.json" \
+  --output "$state/results.json" \
+  --run-id "$(python3 -c 'import json; print(json.load(open("'"$state"'/fedimint-attestation.json"))["run_id"])')" || \
+  fail "real route evidence did not satisfy the results contract"
 
 cat >"$state/topology.env" <<EOF
 export ECASHMESH_LAB_MODE=true
@@ -720,6 +790,11 @@ if cross_mint.get("status") != "READY" or cross_mint.get("destination") != "B":
 lightning = json.loads((state / "lightning-diagnostics.json").read_text()).get("lightning", {})
 if lightning.get("lightning_ready") != "READY":
     raise SystemExit("bidirectional real Lightning payment readiness is not verified")
+routes = json.loads((state / "route-evidence.json").read_text())
+if routes.get("format_version") != 1 or len(routes.get("routes", [])) != 56 or any(route.get("status") != "SUCCEEDED" for route in routes["routes"]):
+    raise SystemExit("real 56-route matrix is incomplete")
+if not (state / "results.json").is_file():
+    raise SystemExit("validated results.json is missing")
 cashu = []
 for index, port in zip("ABCD", range(5100, 5104)):
     mint_dir = state / "cashu" / index
