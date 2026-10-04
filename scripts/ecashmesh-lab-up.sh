@@ -680,6 +680,11 @@ nobootstrap=1
 wtclient.active=false
 sync-freelist=true
 max-commit-fee-rate-anchors=5
+# A fresh node runs its one historical graph sync with whichever peer it meets
+# first (here another Cashu node that has never seen LND #1). Retry it often so
+# channels announced before this node joined reach its graph within seconds,
+# not after LND's 20-minute default.
+historicalsyncinterval=10s
 debuglevel=info
 [Bitcoin]
 bitcoin.active=1
@@ -771,7 +776,7 @@ cashu_connect_peer() {
   cashu_lnd_cli "$from" listpeers | python3 -c 'import json,sys; assert any(p.get("pub_key")==sys.argv[1] for p in json.load(sys.stdin).get("peers",[]))' "$(cashu_peer_identity "$to")" || return 1
 }
 cashu_peer_identity() {
-  case "$1" in lnd2) printf '%s' "$lnd2_id" ;; *) cashu_lnd_value "$1" identity ;; esac
+  case "$1" in lnd1) printf '%s' "$lnd1_id" ;; lnd2) printf '%s' "$lnd2_id" ;; *) cashu_lnd_value "$1" identity ;; esac
 }
 cashu_peer_p2p() {
   case "$1" in lnd2) printf '%s' "$lnd2_p2p_port" ;; *) cashu_lnd_value "$1" p2p ;; esac
@@ -916,9 +921,22 @@ done
 # invoice is created, so a graph-convergence failure cannot be misreported as
 # a payment failure.
 cashu_route_readiness='[]'
+# LND #1 (gateway A's devimint LND) pays every Cashu smoke-test mint quote.
+# Its graph learns the Cashu mesh channels only through gossip relayed by
+# LND #2, which takes minutes; query it over REST like the Cashu nodes.
+lnd1_query_routes() {
+  curl --fail --silent --show-error --cacert "$lnd1_tls" \
+    -H "Grpc-Metadata-macaroon: $(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_bytes().hex())' "$lnd1_macaroon")" \
+    "https://localhost:$ECASHMESH_LAB_LND_REST_PORT/v1/graph/routes/$1/1000"
+}
 cashu_query_route() {
-  local sender="$1" receiver="$2" label="$3" response
-  if ! response="$(cashu_lnd_cli "$sender" queryroutes --dest="$(cashu_peer_identity "$receiver")" --amt=1000 2>&1)"; then
+  local sender="$1" receiver="$2" label="$3" response status
+  if [[ "$sender" == lnd1 ]]; then
+    response="$(lnd1_query_routes "$(cashu_peer_identity "$receiver")" 2>&1)"; status=$?
+  else
+    response="$(cashu_lnd_cli "$sender" queryroutes --dest="$(cashu_peer_identity "$receiver")" --amt=1000 2>&1)"; status=$?
+  fi
+  if [[ "$status" -ne 0 ]]; then
     python3 - "$label" "$sender" "$receiver" "$response" <<'PY'
 import json, sys
 print(json.dumps({"label": sys.argv[1], "from": sys.argv[2], "to": sys.argv[3],
@@ -952,14 +970,18 @@ PY
 }
 cashu_wait_for_graph_routes() {
   local attempt spec sender receiver label route routes all_ready
-  for attempt in $(seq 1 90); do
+  for attempt in $(seq 1 240); do
     routes='[]'
     all_ready=1
     for spec in \
       'A B cashu_a_to_b' 'A C cashu_a_to_c' 'A D cashu_a_to_d' \
       'B A cashu_b_to_a' 'B C cashu_b_to_c' 'B D cashu_b_to_d' \
       'C A cashu_c_to_a' 'C B cashu_c_to_b' 'C D cashu_c_to_d' \
-      'D A cashu_d_to_a' 'D B cashu_d_to_b' 'D C cashu_d_to_c'; do
+      'D A cashu_d_to_a' 'D B cashu_d_to_b' 'D C cashu_d_to_c' \
+      'A lnd1 cashu_a_to_lnd1' 'B lnd1 cashu_b_to_lnd1' \
+      'C lnd1 cashu_c_to_lnd1' 'D lnd1 cashu_d_to_lnd1' \
+      'lnd1 A lnd1_to_cashu_a' 'lnd1 B lnd1_to_cashu_b' \
+      'lnd1 C lnd1_to_cashu_c' 'lnd1 D lnd1_to_cashu_d'; do
       set -- $spec
       sender="$1"; receiver="$2"; label="$3"
       if route="$(cashu_query_route "$sender" "$receiver" "$label")"; then :; else all_ready=0; fi
@@ -985,7 +1007,7 @@ import json, sys
 routes, node = json.loads(sys.argv[1]), sys.argv[2]
 print(json.dumps({"route_readiness": [route for route in routes if route["from"] == node]}))
 PY
-)" "public channel graph did not converge to all required Cashu routes within 90 seconds"
+)" "public channel graph did not converge to all required Cashu and LND #1 routes within 240 attempts"
   done
   fail "Cashu LND public graph did not converge; see $cashu_diagnostics"
 fi
@@ -1243,6 +1265,17 @@ for _ in $(seq 1 300); do
   sleep 1
 done
 [[ -f "$state/fedimint-attestation.json" ]] || fail "Fedimint topology did not become ready"
+
+# Fedimint gateways B-D are LDK nodes with no channels after devimint starts,
+# so every route through them would fail. Before the route matrix runs,
+# give each a real, confirmed channel to the lab payee (distinct sizes and
+# routing fees), then generate the EcashMesh service configuration (paths
+# only; credentials go to a 0600 file under the lab state).
+python3 "$root/scripts/ecashmesh-lab-gateway-liquidity.py" >"$state/gateway-liquidity.log" 2>&1 || {
+  tail -40 "$state/gateway-liquidity.log" >&2
+  fail "LDK gateway Lightning liquidity could not be established"
+}
+python3 "$root/scripts/ecashmesh-lab-config.py" >/dev/null || fail "EcashMesh lab service configuration could not be generated"
 
 # The route executor runs against the already live, isolated topology.  It
 # writes incremental route evidence but never results.json; the separate

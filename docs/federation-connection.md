@@ -70,7 +70,7 @@ CARGO_TARGET_DIR="$PWD/.regtest/ecashmesh-lab/fedimint-target-release" \
 The mapping is explicit and validated (only `fed-A-0` … `fed-D-0`), and each
 client must report the mapped federation ID and the regtest network. The bridge never opens these
 databases or reads their secrets; it runs the pinned `fedimint-cli`, holding a
-per-client lock, for two commands only:
+per-client lock, for three commands only:
 
 - `info` — the mapped lab wallet's ecash balance (`balance_source:
   regtest_lab_client`). For a mapped federation this wallet *is* the source
@@ -78,14 +78,22 @@ per-client lock, for two commands only:
 - `module lnv2 fee-quote <contract>` — the wallet's native, non-committing
   LNv2 send-fee quote over its real notes (the federation fee). The gateway
   fee comes from the gateway's native LNv2 routing info.
+- `admin audit`, once per guardian, only when
+  `ECASHMESH_LAB_GUARDIAN_PASSWORD` is set (the guardian ID and password are
+  passed through `fedimint-cli`'s `FM_OUR_ID`/`FM_PASSWORD_API` environment,
+  never as arguments). See [regtest evidence](regtest-evidence.md#solvency).
 
 Unmapped federations keep the native LNv1 quote path. Federation reserve and
 pending peg-out/change come from the walletv2 `federation_wallet` and
-`pending_transaction_chain` consensus endpoints. Outstanding ecash liabilities
-have no public endpoint, so coverage and solvency stay `unknown`; gateway
-outbound liquidity also stays `unknown`. Gateway discovery and fee quotes are
-not counted as payment reliability.
+`pending_transaction_chain` consensus endpoints. Liabilities, coverage and
+solvency come only from a guardian audit agreed by a consensus threshold; with
+no audit they stay `unknown`, and a wallet balance or the reserve is never used
+as a liability. Gateway discovery and fee quotes are not counted as payment
+reliability.
 
+In practice the lab is configured by `scripts/ecashmesh-lab-config.py` and run
+by `scripts/ecashmesh-lab-services.sh`; see
+[regtest evidence](regtest-evidence.md#reproducing-the-lab).
 `scripts/ecashmesh-lab-rank-acceptance.py [amount]` creates a fresh invoice on
 the lab's independent `lnd-2` payee and prints the ranking inputs for all eight
 lab sources. It evaluates only; nothing is paid.

@@ -187,6 +187,10 @@ pub(super) fn parse(
 /// Funding and selected-gateway evidence bound to a validated quote.
 fn quote_metrics(q: &QuoteEvidence, required: u64) -> super::FedimintMetrics {
     super::FedimintMetrics {
+        amount_msat: Some(q.amount_msat),
+        federation_fee_msat: Some(q.federation_fee_msat),
+        gateway_fee_msat: Some(q.gateway_fee_msat),
+        total_fee_msat: Some(q.total_fee_msat),
         wallet_balance_sats: Some(q.wallet_balance_msat / 1000),
         balance_source: q.balance_source.clone(),
         required_balance_sats: Some(ceil_sats(required).sats()),
@@ -208,6 +212,7 @@ fn quote_metrics(q: &QuoteEvidence, required: u64) -> super::FedimintMetrics {
         gateway_candidate_count: q.gateway_candidate_count,
         gateways: Vec::new(),
         reserve: super::FedimintReserveMetrics::default(),
+        federation_health: None,
         reliability: super::ReliabilityEvidence::default(),
         observed_at_unix_seconds: q.observed_at_unix_seconds,
     }

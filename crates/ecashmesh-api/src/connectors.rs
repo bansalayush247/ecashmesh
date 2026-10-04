@@ -24,6 +24,8 @@ pub(super) struct Provider {
     allow_discovered_sources: bool,
     /// Regtest-lab Lightning liquidity probes; `None` outside the lab.
     liquidity_probes: Option<Arc<crate::probe::LiquidityProbes>>,
+    /// Regtest-lab payment/observation history; `None` outside the lab.
+    lab_history: Option<Arc<crate::history::LabHistory>>,
 }
 
 pub(super) struct ConnectorBatch {
@@ -247,6 +249,7 @@ impl Provider {
             fedimint: Arc::new(fedimint),
             allow_discovered_sources: false,
             liquidity_probes: None,
+            lab_history: None,
         }
     }
     pub fn from_env() -> Result<Self, String> {
@@ -334,6 +337,7 @@ impl Provider {
                     ),
                     allow_discovered_sources,
                     liquidity_probes: crate::probe::LiquidityProbes::from_env()?.map(Arc::new),
+                    lab_history: crate::history::LabHistory::from_env()?.map(Arc::new),
                 })
             }
             other => Err(format!("Unsupported ROUTING_MODE: {other}")),
@@ -352,6 +356,10 @@ impl Provider {
 
     pub fn liquidity_probes(&self) -> Option<&crate::probe::LiquidityProbes> {
         self.liquidity_probes.as_deref()
+    }
+
+    pub fn lab_history(&self) -> Option<&crate::history::LabHistory> {
+        self.lab_history.as_deref()
     }
 
     pub const fn allows_discovered_sources(&self) -> bool {

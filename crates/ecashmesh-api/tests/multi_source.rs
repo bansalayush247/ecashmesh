@@ -833,3 +833,119 @@ fn eight_sources_rank_with_fedimint_evidence_and_react_to_evidence_changes() {
         "{result}"
     );
 }
+
+#[test]
+#[allow(clippy::too_many_lines)] // One end-to-end ranking with four audit outcomes.
+fn guardian_audit_solvency_ranks_and_conflicts_stay_explicit() {
+    let mints = (0..4)
+        .map(|_| MockMint::start("healthy"))
+        .collect::<Vec<_>>();
+    let feds = [
+        "fed_audit_agreed",
+        "fed_audit_dissent",
+        "fed_audit_conflicting",
+        "fed_audit_none",
+    ]
+    .map(MockMint::start);
+    let (server, body) = eight_source_api(&feds, &mints);
+    let (status, result) = server.post("/v1/routes/evaluate", &body);
+    assert_eq!(status, 200, "{result}");
+    let sources = ranked_sources(&result);
+    let source = |id: &str| {
+        *sources
+            .iter()
+            .find(|source| source["source_id"] == id)
+            .unwrap_or_else(|| panic!("{id} ranked: {result}"))
+    };
+    let signal = |id: &str| {
+        source(id)["score_contributions"]["signals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|signal| signal["signal"] == "solvency_confidence")
+            .unwrap()["value_basis_points"]
+            .as_u64()
+            .unwrap()
+    };
+    let risks = |id: &str| {
+        source(id)["score_contributions"]["risks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|risk| risk["code"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    for source in &sources {
+        assert_score_contributions_are_consistent(source);
+    }
+    let reserve = |id: &str| source(id)["fedimint_metrics"]["reserve"].clone();
+    // 4/4 agree: covered, high confidence, liabilities from the audit only.
+    assert_eq!(signal("fedimint:aa"), 10_000);
+    assert_eq!(reserve("fedimint:aa")["solvency_status"], "covered");
+    assert_eq!(reserve("fedimint:aa")["confidence"], "high");
+    assert_eq!(reserve("fedimint:aa")["liabilities_msat"], 39_262_208);
+    assert_eq!(reserve("fedimint:aa")["guardian_audit"]["agreeing"], 4);
+    assert!(!risks("fedimint:aa").contains(&"unknown_solvency".to_owned()));
+    // 3/4 agree with one dissent: still covered, medium confidence.
+    assert_eq!(signal("fedimint:bb"), 6_000);
+    assert_eq!(reserve("fedimint:bb")["confidence"], "medium");
+    assert_eq!(reserve("fedimint:bb")["guardian_audit"]["disagreeing"], 1);
+    // No threshold majority: no value, explicit conflict instead of unknown.
+    assert_eq!(signal("fedimint:cc"), 0);
+    assert_eq!(reserve("fedimint:cc")["solvency_status"], "conflicting");
+    assert!(reserve("fedimint:cc")["liabilities_msat"].is_null());
+    assert!(risks("fedimint:cc").contains(&"conflicting_evidence".to_owned()));
+    assert!(!risks("fedimint:cc").contains(&"unknown_solvency".to_owned()));
+    // Guardian consensus answered but no audit: reserve known, solvency unknown.
+    assert_eq!(reserve("fedimint:dd")["reserve_sats"], 39_784);
+    assert!(reserve("fedimint:dd")["liabilities_msat"].is_null());
+    assert_eq!(signal("fedimint:dd"), 0);
+    assert_eq!(reserve("fedimint:dd")["solvency_status"], "unknown");
+    assert!(risks("fedimint:dd").contains(&"unknown_solvency".to_owned()));
+    let order = sources
+        .iter()
+        .map(|source| source["source_id"].as_str().unwrap())
+        .filter(|id| id.starts_with("fedimint:"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        order,
+        ["fedimint:aa", "fedimint:bb", "fedimint:dd", "fedimint:cc"],
+        "{result}"
+    );
+    // Every evidence parameter is inventoried with its classification.
+    let items = source("fedimint:aa")["evidence_items"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let classification = |parameter: &str| {
+        items
+            .iter()
+            .find(|item| item["parameter"] == parameter)
+            .map(|item| item["classification"].as_str().unwrap().to_owned())
+    };
+    assert_eq!(classification("solvency").as_deref(), Some("authoritative"));
+    assert_eq!(classification("reliability").as_deref(), Some("unknown"));
+    assert_eq!(
+        source("fedimint:cc")["evidence_items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["parameter"] == "solvency")
+            .unwrap()["classification"],
+        "unknown"
+    );
+    // Penalty categories add up to the uncapped total.
+    let contributions = &source("fedimint:cc")["score_contributions"];
+    let total: u64 = contributions["penalty_categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|category| category["penalty_basis_points"].as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        total,
+        contributions["total_penalty_uncapped_basis_points"]
+            .as_u64()
+            .unwrap()
+    );
+}

@@ -406,3 +406,300 @@ fn liquidity_evidence_moves_its_25_percent_contribution_and_the_rank() {
         );
     }
 }
+
+fn medium<T>(value: T) -> Evidence<T> {
+    Evidence::reported(
+        value,
+        EvidenceSource::Observer,
+        NOW,
+        ConfidenceLevel::Medium,
+    )
+}
+
+fn penalties(route: &RankedRoute) -> Vec<&'static str> {
+    route
+        .quality
+        .risk_factors
+        .iter()
+        .map(RiskFactor::reason_code)
+        .collect()
+}
+
+/// (solvency evidence, conflicting audit, solvency signal, freshness, base,
+/// penalty codes, score)
+type SolvencyCase = (
+    Evidence<SolvencyStatus>,
+    bool,
+    u16,
+    u16,
+    u16,
+    &'static [&'static str],
+    u16,
+);
+
+#[test]
+fn solvency_covered_weaker_undercovered_and_conflicting_guardian_audits() {
+    use ecashmesh_core::EvidenceField;
+    let cases: [SolvencyCase; 5] = [
+        // 4/4 guardians agree, assets >= liabilities.
+        (
+            known(SolvencyStatus::Supported),
+            false,
+            10_000,
+            10_000,
+            9830,
+            &[],
+            9830,
+        ),
+        // 3/4 agree (threshold majority): medium confidence, 6000.
+        (
+            medium(SolvencyStatus::Supported),
+            false,
+            6_000,
+            10_000,
+            9230,
+            &[],
+            9230,
+        ),
+        // Undercovered: the full 15% solvency contribution is lost. The model
+        // has no risk factor for known-concerning solvency (see report).
+        (
+            known(SolvencyStatus::Concerning),
+            false,
+            0,
+            10_000,
+            8330,
+            &[],
+            8330,
+        ),
+        // No audit: unknown, freshness input 0, unknown_solvency.
+        (
+            Evidence::Unknown,
+            false,
+            0,
+            8_333,
+            8079,
+            &["unknown_solvency"],
+            7279,
+        ),
+        // Guardians disagree without a threshold majority: no value is trusted
+        // and the conflict (1000) replaces the unknown penalty (800).
+        (
+            Evidence::Unknown,
+            true,
+            0,
+            8_333,
+            8079,
+            &["conflicting_evidence"],
+            7079,
+        ),
+    ];
+    for (solvency, conflicting, signal, freshness, base, risks, score) in cases {
+        let mut sources = sources();
+        let i = index(&sources, "fedimint:fed-a");
+        sources[i].evidence.solvency = solvency;
+        if conflicting {
+            sources[i].evidence = sources[i]
+                .evidence
+                .clone()
+                .with_conflicting(EvidenceField::Solvency);
+        }
+        let ranking = rank(&sources);
+        let fed_a = route(&ranking, "fedimint:fed-a");
+        assert_eq!(fed_a.signals.solvency_confidence, signal);
+        assert_eq!(fed_a.signals.freshness, freshness);
+        assert_eq!(fed_a.base_score, base);
+        assert_eq!(penalties(fed_a), risks);
+        assert_eq!(fed_a.score, score);
+    }
+}
+
+#[test]
+fn known_concerning_solvency_currently_outranks_unknown_solvency() {
+    // Pinned finding, not an endorsement: a federation with an agreed audit
+    // showing assets < liabilities scores above an identical federation whose
+    // solvency is merely unknown, because `Concerning` only zeroes the signal
+    // while `Unknown` also carries unknown_solvency and loses a freshness
+    // input. Changing this needs a new penalty or exclusion policy.
+    let mut sources = sources();
+    let a = index(&sources, "fedimint:fed-a");
+    let b = index(&sources, "fedimint:fed-b");
+    sources[a].evidence.solvency = known(SolvencyStatus::Concerning);
+    sources[b].evidence.solvency = Evidence::Unknown;
+    sources[b].fee = sources[a].fee.clone();
+    let ranking = rank(&sources);
+    assert!(route(&ranking, "fedimint:fed-a").score > route(&ranking, "fedimint:fed-b").score);
+}
+
+#[test]
+fn recorded_payment_history_drives_reliability_and_historical_behavior() {
+    // Reliability = hop success rate (capped by health); history = midpoint of
+    // connector age / 30 days and recorded outcomes / 100.
+    let cases = [
+        // 5/5 real payments (medium confidence).
+        (
+            10_000,
+            5,
+            ConfidenceLevel::Medium,
+            10_000,
+            5_250,
+            9375,
+            vec![],
+        ),
+        // 5 successes, 3 failures.
+        (
+            6_250,
+            8,
+            ConfidenceLevel::Medium,
+            6_250,
+            5_400,
+            8640,
+            vec![],
+        ),
+        // 25 outcomes at 90%: below the 95% policy with enough observations.
+        (
+            9_000,
+            25,
+            ConfidenceLevel::High,
+            9_000,
+            6_250,
+            9275,
+            vec!["poor_recent_reliability"],
+        ),
+        // 2 outcomes only: low confidence is weak connector evidence.
+        (
+            10_000,
+            2,
+            ConfidenceLevel::Low,
+            10_000,
+            5_100,
+            9360,
+            vec!["weak_evidence"],
+        ),
+    ];
+    for (rate, observations, confidence, signal, history, base, risks) in cases {
+        let mut sources = sources();
+        let i = index(&sources, "fedimint:fed-a");
+        let info = ReliabilityInfo::new(rate, observations).expect("valid");
+        let evidence = Evidence::reported(info, EvidenceSource::Historical, NOW, confidence);
+        sources[i].reliability = evidence.clone();
+        sources[i].evidence.reliability = evidence;
+        let ranking = rank(&sources);
+        let fed_a = route(&ranking, "fedimint:fed-a");
+        assert_eq!(fed_a.signals.reliability, signal);
+        assert_eq!(fed_a.signals.historical_behavior, history);
+        assert_eq!(fed_a.base_score, base);
+        assert_eq!(penalties(fed_a), risks);
+    }
+}
+
+#[test]
+fn historical_behavior_follows_connector_age_and_recorded_outcomes() {
+    let day = 86_400;
+    // (first observed, recorded outcomes, history signal, new connector risk)
+    let cases = [
+        // 600 s of age is 2 bp of 30 days; 5 outcomes are 500: midpoint 251.
+        (Some(NOW.unix_seconds() - 600), Some(5), 251, true),
+        (Some(NOW.unix_seconds() - day), Some(10), 666, false),
+        (
+            Some(NOW.unix_seconds() - 30 * day),
+            Some(100),
+            10_000,
+            false,
+        ),
+        (None, None, 0, true),
+    ];
+    for (first, observations, history, new) in cases {
+        let mut sources = sources();
+        let i = index(&sources, "cashu:mint-a");
+        sources[i].evidence.first_observed_at = first.map(EvidenceTimestamp::from_unix_seconds);
+        let reliability = observations.map_or(Evidence::Unknown, |count| {
+            known(ReliabilityInfo::new(10_000, count).expect("valid"))
+        });
+        sources[i].reliability = reliability.clone();
+        sources[i].evidence.reliability = reliability;
+        let ranking = rank(&sources);
+        let mint = route(&ranking, "cashu:mint-a");
+        assert_eq!(mint.signals.historical_behavior, history, "{first:?}");
+        assert_eq!(
+            penalties(mint).contains(&"new_or_unobserved_connector"),
+            new
+        );
+    }
+}
+
+#[test]
+fn unknown_reliability_is_one_risk_per_evidence_level_not_a_duplicate() {
+    // The model has two reliability facts: the hop's route reliability and
+    // the connector's own reliability. Each unknown fact is one risk; the
+    // two risks disappear independently, so this is not double counting of
+    // one input.
+    let cases = [
+        (true, true, 2),
+        (false, true, 1),
+        (true, false, 1),
+        (false, false, 0),
+    ];
+    for (hop_unknown, connector_unknown, expected) in cases {
+        let mut sources = sources();
+        let i = index(&sources, "cashu:mint-b");
+        if hop_unknown {
+            sources[i].reliability = Evidence::Unknown;
+        }
+        if connector_unknown {
+            sources[i].evidence.reliability = Evidence::Unknown;
+        }
+        let ranking = rank(&sources);
+        let mint = route(&ranking, "cashu:mint-b");
+        let count = penalties(mint)
+            .iter()
+            .filter(|code| **code == "unknown_reliability")
+            .count();
+        assert_eq!(
+            count, expected,
+            "hop {hop_unknown} connector {connector_unknown}"
+        );
+        // Only the hop fact feeds the reliability signal.
+        assert_eq!(
+            mint.signals.reliability,
+            if hop_unknown { 0 } else { 9_900 }
+        );
+    }
+}
+
+#[test]
+fn proportional_fees_in_ppm_are_not_basis_points() {
+    // A gateway charging 3000 ppm (parts per million) charges 0.3% = 30 bp.
+    // On 1000 sats = 1_000_000 msat that is 3000 msat = 3 sats. The ranker
+    // works in basis points of the payment against a 100 bp bound:
+    // 10000 - 30 * 10000 / 100 = 7000. Misreading 3000 ppm as 3000 bp (30%)
+    // would give 300 sats and a fee signal of 0.
+    let ppm = 3_000_u64;
+    let amount_msat = AMOUNT.sats() * 1_000;
+    let fee_msat = amount_msat * ppm / 1_000_000;
+    assert_eq!(fee_msat, 3_000);
+    let fee_sats = fee_msat.div_ceil(1_000);
+    assert_eq!(fee_sats * 10_000 / AMOUNT.sats(), 30, "basis points");
+    assert_eq!(ppm / 100, 30, "100 ppm = 1 bp");
+
+    let mut sources = sources();
+    let i = index(&sources, "fedimint:fed-a");
+    sources[i].fee = known(FeeQuote::new(Amount::from_sats(fee_sats)));
+    assert_eq!(
+        route(&rank(&sources), "fedimint:fed-a")
+            .signals
+            .fee_reasonableness,
+        7_000
+    );
+    sources[i].fee = known(FeeQuote::new(Amount::from_sats(
+        AMOUNT.sats() * ppm / 10_000,
+    )));
+    assert_eq!(
+        route(&rank(&sources), "fedimint:fed-a")
+            .signals
+            .fee_reasonableness,
+        0
+    );
+    // Msat fees round up to whole sats before the ratio: 6592 msat -> 7 sats.
+    assert_eq!(6_592_u64.div_ceil(1_000), 7);
+}

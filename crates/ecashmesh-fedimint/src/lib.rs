@@ -121,19 +121,33 @@ pub struct FedimintGatewayMetrics {
     pub liquidity_status: String,
 }
 
-/// Federation reserve evidence. Liabilities (outstanding ecash) have no public
-/// Fedimint endpoint, so coverage and solvency remain unknown.
+/// Federation reserve and solvency evidence.
+///
+/// `reserve_sats` and the pending fields come from walletv2 threshold
+/// consensus. Liabilities, assets and coverage come only from an agreed
+/// guardian `admin audit` (regtest lab); without one they stay `None` and
+/// solvency stays `unknown`. A wallet balance is never used as a liability.
 #[derive(Clone, Debug, Serialize)]
 pub struct FedimintReserveMetrics {
     pub reserve_sats: Option<u64>,
     pub pending_pegout_sats: Option<u64>,
     pub pending_change_sats: Option<u64>,
     pub pending_transaction_count: Option<u64>,
+    pub liabilities_msat: Option<u64>,
     pub liabilities_sats: Option<u64>,
+    pub assets_msat: Option<u64>,
+    pub net_assets_msat: Option<i64>,
+    /// `assets / liabilities`; `None` when either is unknown or nothing is owed.
     pub coverage_ratio: Option<f64>,
+    pub covered: Option<bool>,
+    /// `covered`, `undercovered`, `conflicting` or `unknown`.
     pub solvency_status: String,
     pub confidence: String,
     pub source: Option<String>,
+    pub solvency_source: Option<String>,
+    pub guardian_audit: Option<GuardianAuditSummary>,
+    pub observed_at_unix_seconds: Option<u64>,
+    pub expires_at_unix_seconds: Option<u64>,
 }
 
 impl Default for FedimintReserveMetrics {
@@ -143,13 +157,56 @@ impl Default for FedimintReserveMetrics {
             pending_pegout_sats: None,
             pending_change_sats: None,
             pending_transaction_count: None,
+            liabilities_msat: None,
             liabilities_sats: None,
+            assets_msat: None,
+            net_assets_msat: None,
             coverage_ratio: None,
+            covered: None,
             solvency_status: "unknown".into(),
             confidence: "unknown".into(),
             source: None,
+            solvency_source: None,
+            guardian_audit: None,
+            observed_at_unix_seconds: None,
+            expires_at_unix_seconds: None,
         }
     }
+}
+
+/// How many guardians answered the audit and whether they agreed.
+#[derive(Clone, Debug, Serialize)]
+pub struct GuardianAuditSummary {
+    /// `agreed`, `agreed_with_dissent`, `conflicting` or `insufficient_responses`.
+    pub state: String,
+    pub guardian_count: u64,
+    pub threshold: u64,
+    pub queried: u64,
+    pub responded: u64,
+    pub agreeing: u64,
+    pub disagreeing: u64,
+    pub guardians: Vec<Value>,
+}
+
+/// Guardian-audit solvency counts as current for this long, then is stale
+/// (signal halved) until the retention limit, then unknown again.
+pub const SOLVENCY_FRESH_SECONDS: u64 = 120;
+pub const SOLVENCY_RETENTION_SECONDS: u64 = 900;
+
+/// Federation-level operational health. Separate from gateway liquidity,
+/// solvency and payment reliability.
+#[derive(Clone, Debug, Serialize)]
+pub struct FederationHealthMetrics {
+    /// `healthy` (guardian consensus answered), `bridge_only`, `unreachable`.
+    pub status: String,
+    pub bridge_reachable: bool,
+    pub consensus_reachable: Option<bool>,
+    pub guardian_count: Option<u64>,
+    pub guardians_responding: Option<u64>,
+    pub network: Option<String>,
+    pub consensus_version: Option<String>,
+    pub modules: Vec<String>,
+    pub observed_at_unix_seconds: u64,
 }
 
 /// Payment reliability evidence. Gateway discovery, registry reads and fee
@@ -176,6 +233,12 @@ impl Default for ReliabilityEvidence {
 /// Structured Fedimint evidence for display. `None` always means unknown.
 #[derive(Clone, Debug, Serialize)]
 pub struct FedimintMetrics {
+    /// Exact quote amounts in msat. Display sats round fees up; the gateway's
+    /// proportional fee stays in ppm (parts per million, 100 ppm = 1 bp).
+    pub amount_msat: Option<u64>,
+    pub federation_fee_msat: Option<u64>,
+    pub gateway_fee_msat: Option<u64>,
+    pub total_fee_msat: Option<u64>,
     pub wallet_balance_sats: Option<u64>,
     pub balance_source: Option<String>,
     pub required_balance_sats: Option<u64>,
@@ -187,6 +250,7 @@ pub struct FedimintMetrics {
     /// Gateways listed in the federation registry.
     pub gateways: Vec<FedimintGatewayMetrics>,
     pub reserve: FedimintReserveMetrics,
+    pub federation_health: Option<FederationHealthMetrics>,
     pub reliability: ReliabilityEvidence,
     pub observed_at_unix_seconds: u64,
 }
@@ -493,7 +557,7 @@ impl FedimintService {
                 Evidence::Unknown
             }
         };
-        let (balance_sats, network, balance_source, reserve) = match info {
+        let (balance_sats, network, balance_source, reserve, federation_config) = match info {
             Ok(value) => {
                 let entry = value.get(&config.federation_id).unwrap_or(&value);
                 let (balance, network) =
@@ -505,7 +569,11 @@ impl FedimintService {
                         .get("balance_source")
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned),
-                    entry.get("reserve").map(parse_reserve).unwrap_or_default(),
+                    entry
+                        .get("reserve")
+                        .map(|reserve| parse_reserve(reserve, now))
+                        .unwrap_or_default(),
+                    entry.get("config").cloned(),
                 )
             }
             Err(error) => {
@@ -515,9 +583,35 @@ impl FedimintService {
                     Evidence::Unknown,
                     None,
                     FedimintReserveMetrics::default(),
+                    None,
                 )
             }
         };
+        let federation_health = federation_health(
+            health.value() == Some(&ConnectorHealth::Healthy),
+            &reserve,
+            federation_config.as_ref(),
+            network.value().cloned(),
+            now,
+        );
+        // Guardian consensus answering is federation-level health evidence;
+        // the bridge answering alone stays low-confidence.
+        let health = match federation_health.status.as_str() {
+            "healthy" => Evidence::reported(
+                ConnectorHealth::Healthy,
+                EvidenceSource::Observer,
+                timestamp,
+                if federation_health.guardians_responding.is_some()
+                    && federation_health.guardians_responding == federation_health.guardian_count
+                {
+                    ConfidenceLevel::High
+                } else {
+                    ConfidenceLevel::Medium
+                },
+            ),
+            _ => health,
+        };
+        let (solvency, solvency_conflict) = solvency_evidence(&reserve, now);
         let gateway_metrics = gateways
             .value()
             .map(|items| {
@@ -550,13 +644,15 @@ impl FedimintService {
             fee: Evidence::Unknown,
             // Routing discovery is not a payment-success observation.
             reliability: Evidence::Unknown,
-            evidence: ConnectorEvidence::new(
-                id,
-                None,
-                health.clone(),
-                Evidence::Unknown,
-                Evidence::Unknown,
-            ),
+            evidence: {
+                let evidence =
+                    ConnectorEvidence::new(id, None, health.clone(), solvency, Evidence::Unknown);
+                if solvency_conflict {
+                    evidence.with_conflicting(ecashmesh_core::EvidenceField::Solvency)
+                } else {
+                    evidence
+                }
+            },
         };
         FederationObservation {
             config,
@@ -568,6 +664,10 @@ impl FedimintService {
             balance_sats,
             network,
             metrics: FedimintMetrics {
+                amount_msat: None,
+                federation_fee_msat: None,
+                gateway_fee_msat: None,
+                total_fee_msat: None,
                 wallet_balance_sats,
                 balance_source,
                 required_balance_sats: None,
@@ -577,6 +677,7 @@ impl FedimintService {
                 gateway_candidate_count: None,
                 gateways: gateway_metrics,
                 reserve,
+                federation_health: Some(federation_health),
                 reliability: ReliabilityEvidence::default(),
                 observed_at_unix_seconds: now,
             },
@@ -788,22 +889,165 @@ fn number_at(value: Option<&Value>, names: &[&str]) -> Option<u64> {
             .find_map(|name| value.get(*name).and_then(Value::as_u64))
     })
 }
-/// Reads bridge reserve evidence. Solvency is never derived here: without an
-/// authoritative liability figure, coverage and solvency stay unknown.
-fn parse_reserve(value: &Value) -> FedimintReserveMetrics {
+/// Reads bridge reserve evidence and, when present, the guardian audit.
+/// Liabilities, coverage and solvency are filled only from an audit that a
+/// consensus threshold of guardians returned identically.
+fn parse_reserve(value: &Value, now: u64) -> FedimintReserveMetrics {
     let source = value.get("source").and_then(Value::as_str);
-    if source != Some("walletv2_consensus") {
-        return FedimintReserveMetrics::default();
+    let mut metrics = if source == Some("walletv2_consensus") {
+        FedimintReserveMetrics {
+            reserve_sats: value.get("reserve_sats").and_then(Value::as_u64),
+            pending_pegout_sats: value.get("pending_pegout_sats").and_then(Value::as_u64),
+            pending_change_sats: value.get("pending_change_sats").and_then(Value::as_u64),
+            pending_transaction_count: value
+                .get("pending_transaction_count")
+                .and_then(Value::as_u64),
+            source: source.map(ToOwned::to_owned),
+            ..FedimintReserveMetrics::default()
+        }
+    } else {
+        FedimintReserveMetrics::default()
+    };
+    let Some(audit) = value
+        .get("guardian_audit")
+        .filter(|audit| audit["source"] == "guardian_admin_audit")
+    else {
+        return metrics;
+    };
+    let count = |name: &str| audit.get(name).and_then(Value::as_u64).unwrap_or_default();
+    let state = audit["state"].as_str().unwrap_or("insufficient_responses");
+    let summary = GuardianAuditSummary {
+        state: state.to_owned(),
+        guardian_count: count("guardian_count"),
+        threshold: count("threshold"),
+        queried: count("queried"),
+        responded: count("responded"),
+        agreeing: count("agreeing"),
+        disagreeing: count("disagreeing"),
+        guardians: audit["guardians"].as_array().cloned().unwrap_or_default(),
+    };
+    let observed_at = audit["observed_at_unix_seconds"].as_u64();
+    metrics.solvency_source = Some("guardian_admin_audit".into());
+    metrics.observed_at_unix_seconds = observed_at;
+    metrics.expires_at_unix_seconds =
+        observed_at.map(|at| at.saturating_add(SOLVENCY_RETENTION_SECONDS));
+    let agreed = matches!(state, "agreed" | "agreed_with_dissent")
+        && summary.threshold > 0
+        && summary.agreeing >= summary.threshold;
+    let expired = observed_at.is_none_or(|at| now.saturating_sub(at) > SOLVENCY_RETENTION_SECONDS);
+    match (
+        agreed,
+        audit["liabilities_msat"].as_u64(),
+        audit["assets_msat"].as_u64(),
+        audit["net_assets_msat"].as_i64(),
+    ) {
+        (true, Some(liabilities), Some(assets), Some(net)) if !expired => {
+            let covered = assets >= liabilities;
+            metrics.liabilities_msat = Some(liabilities);
+            metrics.liabilities_sats = Some(liabilities.div_ceil(1_000));
+            metrics.assets_msat = Some(assets);
+            metrics.net_assets_msat = Some(net);
+            #[allow(clippy::cast_precision_loss)] // Display ratio only; never ranked.
+            let ratio = (liabilities > 0).then(|| assets as f64 / liabilities as f64);
+            metrics.coverage_ratio = ratio;
+            metrics.covered = Some(covered);
+            metrics.solvency_status = if covered { "covered" } else { "undercovered" }.into();
+            metrics.confidence = if summary.agreeing == summary.guardian_count {
+                "high"
+            } else {
+                "medium"
+            }
+            .into();
+        }
+        _ if state == "conflicting" && !expired => {
+            metrics.solvency_status = "conflicting".into();
+            metrics.confidence = "none".into();
+        }
+        _ => {}
     }
-    FedimintReserveMetrics {
-        reserve_sats: value.get("reserve_sats").and_then(Value::as_u64),
-        pending_pegout_sats: value.get("pending_pegout_sats").and_then(Value::as_u64),
-        pending_change_sats: value.get("pending_change_sats").and_then(Value::as_u64),
-        pending_transaction_count: value
-            .get("pending_transaction_count")
-            .and_then(Value::as_u64),
-        source: source.map(ToOwned::to_owned),
-        ..FedimintReserveMetrics::default()
+    metrics.guardian_audit = Some(summary);
+    metrics
+}
+
+/// Maps audit-backed reserve metrics to the ranker's solvency evidence. The
+/// second value is `true` when guardians disagreed without a threshold
+/// majority: solvency is then unknown and carries the conflict risk.
+fn solvency_evidence(
+    metrics: &FedimintReserveMetrics,
+    now: u64,
+) -> (Evidence<ecashmesh_core::SolvencyStatus>, bool) {
+    use ecashmesh_core::SolvencyStatus;
+    let status = match metrics.solvency_status.as_str() {
+        "covered" => SolvencyStatus::Supported,
+        "undercovered" => SolvencyStatus::Concerning,
+        "conflicting" => return (Evidence::Unknown, true),
+        _ => return (Evidence::Unknown, false),
+    };
+    let Some(observed_at) = metrics.observed_at_unix_seconds else {
+        return (Evidence::Unknown, false);
+    };
+    let confidence = if metrics.confidence == "high" {
+        ConfidenceLevel::High
+    } else {
+        ConfidenceLevel::Medium
+    };
+    let timestamp = EvidenceTimestamp::from_unix_seconds(observed_at);
+    let evidence = if now.saturating_sub(observed_at) <= SOLVENCY_FRESH_SECONDS {
+        Evidence::reported(status, EvidenceSource::Connector, timestamp, confidence)
+    } else {
+        Evidence::reported_stale(status, EvidenceSource::Connector, timestamp, confidence)
+    };
+    (evidence, false)
+}
+
+fn federation_health(
+    bridge_reachable: bool,
+    reserve: &FedimintReserveMetrics,
+    config: Option<&Value>,
+    network: Option<String>,
+    now: u64,
+) -> FederationHealthMetrics {
+    let consensus_reachable = bridge_reachable.then_some(reserve.source.is_some());
+    let audit = reserve.guardian_audit.as_ref();
+    let mut modules = config
+        .and_then(|config| config.get("modules"))
+        .and_then(Value::as_object)
+        .map(|modules| {
+            modules
+                .values()
+                .filter_map(|module| module.get("kind").and_then(Value::as_str))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    modules.sort();
+    let status = match (bridge_reachable, consensus_reachable) {
+        (false, _) => "unreachable",
+        (true, Some(true)) => "healthy",
+        _ => "bridge_only",
+    };
+    FederationHealthMetrics {
+        status: status.into(),
+        bridge_reachable,
+        consensus_reachable,
+        guardian_count: config
+            .and_then(|config| config.pointer("/global/api_endpoints"))
+            .and_then(Value::as_object)
+            .map(|endpoints| endpoints.len() as u64)
+            .or_else(|| audit.map(|audit| audit.guardian_count)),
+        guardians_responding: audit.map(|audit| audit.responded),
+        network,
+        consensus_version: config
+            .and_then(|config| config.pointer("/global/consensus_version"))
+            .and_then(|version| {
+                Some(format!(
+                    "{}.{}",
+                    version["major"].as_u64()?,
+                    version["minor"].as_u64()?
+                ))
+            }),
+        modules,
+        observed_at_unix_seconds: now,
     }
 }
 
@@ -845,6 +1089,107 @@ fn parse_wallet_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn audited_reserve(
+        state: &str,
+        agreeing: u64,
+        liabilities: u64,
+        assets: u64,
+        at: u64,
+    ) -> Value {
+        let agreed = matches!(state, "agreed" | "agreed_with_dissent");
+        json!({
+            "source": "walletv2_consensus", "reserve_sats": assets / 1_000,
+            "pending_pegout_sats": 0, "pending_change_sats": 0, "pending_transaction_count": 0,
+            "guardian_audit": {
+                "source": "guardian_admin_audit", "state": state, "guardian_count": 4,
+                "threshold": 3, "queried": 4, "responded": 4, "agreeing": agreeing,
+                "disagreeing": 4 - agreeing,
+                "liabilities_msat": agreed.then_some(liabilities),
+                "assets_msat": agreed.then_some(assets),
+                "net_assets_msat": agreed.then(|| i64::try_from(assets).unwrap() - i64::try_from(liabilities).unwrap()),
+                "guardians": [], "observed_at_unix_seconds": at,
+            },
+        })
+    }
+
+    #[test]
+    fn guardian_audit_drives_solvency_with_agreement_based_confidence() {
+        use ecashmesh_core::SolvencyStatus;
+        let now = 10_000;
+        let covered = parse_reserve(
+            &audited_reserve("agreed", 4, 39_262_208, 39_784_000, now),
+            now,
+        );
+        assert_eq!(covered.solvency_status, "covered");
+        assert_eq!(covered.confidence, "high");
+        assert_eq!(covered.liabilities_sats, Some(39_263));
+        assert_eq!(covered.net_assets_msat, Some(521_792));
+        assert!((covered.coverage_ratio.unwrap() - 1.013_29).abs() < 1e-4);
+        let (evidence, conflict) = solvency_evidence(&covered, now);
+        assert!(!conflict);
+        let observation = evidence.observation().unwrap();
+        assert_eq!(observation.value, SolvencyStatus::Supported);
+        assert_eq!(observation.confidence, ConfidenceLevel::High);
+
+        // A threshold majority with one dissenting guardian is weaker evidence.
+        let dissent = parse_reserve(
+            &audited_reserve("agreed_with_dissent", 3, 1_000, 2_000, now),
+            now,
+        );
+        assert_eq!(dissent.confidence, "medium");
+        assert_eq!(
+            solvency_evidence(&dissent, now)
+                .0
+                .observation()
+                .unwrap()
+                .confidence,
+            ConfidenceLevel::Medium
+        );
+
+        let under = parse_reserve(&audited_reserve("agreed", 4, 2_000, 1_000, now), now);
+        assert_eq!(under.solvency_status, "undercovered");
+        assert_eq!(under.covered, Some(false));
+        assert_eq!(
+            solvency_evidence(&under, now).0.value(),
+            Some(&SolvencyStatus::Concerning)
+        );
+
+        // Disagreement without a threshold majority: no value, explicit conflict.
+        let conflicting = parse_reserve(&audited_reserve("conflicting", 2, 1, 2, now), now);
+        assert_eq!(conflicting.solvency_status, "conflicting");
+        assert_eq!(conflicting.liabilities_msat, None);
+        let (evidence, conflict) = solvency_evidence(&conflicting, now);
+        assert!(evidence.value().is_none());
+        assert!(conflict);
+
+        // Stale, then expired back to unknown.
+        assert!(
+            solvency_evidence(&covered, now + SOLVENCY_FRESH_SECONDS + 1)
+                .0
+                .is_stale()
+        );
+        let expired = parse_reserve(
+            &audited_reserve("agreed", 4, 1_000, 2_000, now),
+            now + SOLVENCY_RETENTION_SECONDS + 1,
+        );
+        assert_eq!(expired.solvency_status, "unknown");
+        assert_eq!(expired.liabilities_msat, None);
+    }
+
+    #[test]
+    fn reserve_without_audit_never_claims_solvency() {
+        let reserve = parse_reserve(
+            &json!({"source": "walletv2_consensus", "reserve_sats": 39_784, "pending_pegout_sats": 0,
+                    "pending_change_sats": 0, "pending_transaction_count": 0, "guardian_audit": null}),
+            1,
+        );
+        assert_eq!(reserve.reserve_sats, Some(39_784));
+        assert_eq!(reserve.liabilities_sats, None);
+        assert_eq!(reserve.coverage_ratio, None);
+        assert_eq!(reserve.solvency_status, "unknown");
+        assert_eq!(solvency_evidence(&reserve, 1), (Evidence::Unknown, false));
+    }
 
     #[test]
     fn zero_gateway_response_stays_empty() {

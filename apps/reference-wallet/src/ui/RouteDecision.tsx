@@ -6,11 +6,14 @@ import {
 import { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import type {
+  CashuMetrics,
+  EvidenceItem,
   EvidenceState,
   FedimintMetrics,
   LiquidityEvidence,
   Reason,
   PaymentSource,
+  ReliabilityEvidence,
   RouteDecision,
   ScoreContributions,
 } from "../ecashmesh/contracts";
@@ -111,8 +114,8 @@ function Settlement({ source }: { source: PaymentSource }) {
 }
 
 // Evidence values: `null` is unknown and is never shown as zero.
-const known = (value: number | boolean | null, unit = "") =>
-  value === null
+const known = (value: number | boolean | null | undefined, unit = "") =>
+  value === null || value === undefined
     ? "Unknown"
     : typeof value === "boolean"
       ? value
@@ -120,225 +123,499 @@ const known = (value: number | boolean | null, unit = "") =>
         : "No"
       : `${value.toLocaleString("en-US")}${unit}`;
 
+const time = (seconds: number | null | undefined) =>
+  seconds == null ? "Unknown" : new Date(seconds * 1000).toLocaleTimeString();
+
+const percentOf = (msat: number | null | undefined, amountMsat: number) =>
+  msat == null || amountMsat === 0
+    ? "Unknown"
+    : `${((msat / amountMsat) * 100).toFixed(3)}%`;
+
 /** The ranker's exact arithmetic for this source. */
 function ScoreMath({ breakdown }: { breakdown: ScoreContributions }) {
+  const uncapped =
+    breakdown.total_penalty_uncapped_basis_points ??
+    breakdown.risk_penalty_basis_points;
   return (
     <Section title="How the score was calculated">
       {breakdown.signals.map((item) => (
         <Row
           key={item.signal}
           label={`${humanize(item.signal)} (${item.weight_percent}%)`}
-          value={`${item.value_basis_points} → +${item.contribution_basis_points.toFixed(0)}`}
+          value={`${item.value_basis_points} × ${item.weight_percent}% = ${item.contribution_basis_points.toFixed(0)}`}
         />
       ))}
       <Row
         label="Weighted evidence score"
         value={`${breakdown.base_score_basis_points}`}
       />
-      {breakdown.risks.map((risk, index) => (
+      <Row label="Penalties (sum)" value={`−${uncapped}`} />
+      {uncapped !== breakdown.risk_penalty_basis_points && (
         <Row
-          key={`${risk.code}-${index}`}
-          label={humanize(risk.code)}
-          value={`−${risk.penalty_basis_points}`}
+          label="Penalty after 10000 cap"
+          value={`−${breakdown.risk_penalty_basis_points}`}
         />
-      ))}
+      )}
       <Row
-        label="Final score (floored at 0)"
+        label="Final score"
         value={`${breakdown.score_basis_points} / 10000`}
       />
       <Text style={styles.small}>
-        Equal final scores are ordered by lower fee, then fewer hops.
+        {breakdown.score_saturated_at_zero
+          ? "Penalties exceed the weighted score, so the score saturates at 0. "
+          : ""}
+        score = max(0, weighted − min(penalties, 10000)). Equal final scores are
+        ordered by lower fee, then fewer hops. Open Risks for each penalty.
       </Text>
     </Section>
   );
 }
 
-const liquidityResult: Record<LiquidityEvidence["outcome"], string> = {
+function PenaltyBreakdown({ breakdown }: { breakdown: ScoreContributions }) {
+  return (
+    <Section title="Penalties">
+      {(breakdown.penalty_categories ?? []).map((category) => (
+        <Row
+          key={category.category}
+          label={`${humanize(category.category)}${category.count > 1 ? ` ×${category.count}` : ""}`}
+          value={
+            category.count === 0 ? "0" : `−${category.penalty_basis_points}`
+          }
+        />
+      ))}
+      {breakdown.risks.map((risk, index) => (
+        <Row
+          key={`${risk.code}-${index}`}
+          label={`${humanize(risk.code)}${risk.field ? ` (${risk.field})` : ""} · ${risk.level ?? "route"}`}
+          value={`−${risk.penalty_basis_points}`}
+        />
+      ))}
+      <Row label="Total" value={`−${breakdown.risk_penalty_basis_points}`} />
+      <Text style={styles.small}>
+        Hop-level penalties concern this payment's route evidence;
+        connector-level penalties concern the source's own evidence. They are
+        separate facts in the model.
+      </Text>
+    </Section>
+  );
+}
+
+const probeResult: Record<string, string> = {
   routable: "Route available",
   insufficient_liquidity: "Insufficient liquidity",
   no_route: "No route",
   unknown: "Unknown (probe did not conclude)",
 };
 
+const basisLabel: Record<LiquidityEvidence["basis"], string> = {
+  active_probe: "Active Lightning probe",
+  channel_state: "Channel state (node's own balances)",
+  unknown: "Unknown",
+};
+
 /** Why this source has its liquidity score. */
-function LiquidityDetails({ evidence }: { evidence?: LiquidityEvidence }) {
+function LiquidityDetails({
+  evidence,
+  protocol,
+}: {
+  evidence?: LiquidityEvidence;
+  protocol?: string;
+}) {
   if (!evidence) {
     return (
       <Section title="Liquidity">
         <Row label="Lightning liquidity" value="Unknown" />
         <Text style={styles.small}>
-          No liquidity probe was available for this source.
+          {protocol === "fedimint"
+            ? "No lab liquidity evidence: the ranker uses the wallet balance, which covers only the ecash side."
+            : "No liquidity probe or channel state was available for this source."}
         </Text>
       </Section>
     );
   }
-  const probe = evidence.evidence_source === "lightning_probe";
+  const { probe, channel_state: channels } = evidence;
   return (
     <Section title="Liquidity">
-      <Row
-        label="Evidence"
-        value={
-          probe
-            ? "Verified by Lightning probe (regtest lab)"
-            : "Gateway channel balances (regtest lab)"
-        }
-      />
-      <Row label="Probed from" value={evidence.node} />
-      <Row
-        label={probe ? "Probed amount" : "Requested amount"}
-        value={known(evidence.probed_amount_sats, " sats")}
-      />
-      <Row label="Result" value={liquidityResult[evidence.outcome]} />
-      {evidence.total_outbound_sats !== null && (
-        <Row
-          label="Active outbound"
-          value={known(evidence.total_outbound_sats, " sats")}
-        />
-      )}
-      {evidence.failure_reason && (
-        <Row label="Detail" value={humanize(evidence.failure_reason)} />
-      )}
-      <Row
-        label="Observed"
-        value={new Date(
-          evidence.observed_at_unix_seconds * 1000,
-        ).toLocaleTimeString()}
-      />
-      <Row label="Evidence freshness" value={evidence.freshness} />
-      <Row label="Confidence" value={evidence.confidence} />
+      <Row label="Decided by" value={basisLabel[evidence.basis]} />
       <Row
         label="Used by ranking"
         value={evidence.applied_to_ranking ? "Yes" : "No"}
       />
+      <Row label="Confidence" value={evidence.confidence ?? "None"} />
+      <Row label="Freshness" value={evidence.freshness} />
+      <Row label="Amount" value={known(evidence.amount_sats, " sats")} />
+      {probe && (
+        <>
+          <Row
+            label="Probe"
+            value={`${probeResult[probe.outcome]} · ${probe.freshness}${probe.reused_from_cache ? " (cached)" : ""}`}
+          />
+          <Row label="Probed from" value={probe.node} />
+          <Row
+            label="Probed amount"
+            value={known(probe.probed_amount_sats, " sats")}
+          />
+          {probe.failure_reason && (
+            <Row label="Probe detail" value={humanize(probe.failure_reason)} />
+          )}
+          <Row
+            label="Probe observed / expires"
+            value={`${time(probe.observed_at_unix_seconds)} / ${time(probe.expires_at_unix_seconds)}`}
+          />
+        </>
+      )}
+      {channels && (
+        <>
+          <Row
+            label="Channel state"
+            value={`${channels.reachable ? "Read" : "Unavailable"} from ${channels.node} · ${channels.freshness}${channels.reused_from_cache ? " (cached)" : ""}`}
+          />
+          <Row
+            label="Active channels"
+            value={`${channels.active_channel_count} of ${channels.channel_count}`}
+          />
+          <Row
+            label="Outbound / inbound"
+            value={`${known(channels.outbound_sats, " sats")} / ${known(channels.inbound_sats, " sats")}`}
+          />
+          <Row
+            label="Direct channel to payee"
+            value={
+              channels.payee_direct_outbound_sats === null
+                ? "No"
+                : `Yes, ${known(channels.payee_direct_outbound_sats, " sats")} outbound`
+            }
+          />
+          {channels.error && <Row label="Latest read" value={channels.error} />}
+        </>
+      )}
       <Text style={styles.small}>
-        {probe && evidence.reached_destination === false
+        {probe?.reached_destination === false
           ? "The probe reached the invoice's route-hint hop, not the payee. "
           : ""}
-        Shows only whether this amount was routable when observed; it is not the
-        source's total liquidity.
+        Evidence is for this amount only, never the source's total liquidity.
+        Channel balances prove sufficiency only over a direct channel to the
+        payee; a failed probe is unknown, not zero.
       </Text>
     </Section>
   );
 }
 
-function FedimintEvidence({ metrics }: { metrics: FedimintMetrics }) {
-  const gateway = metrics.selected_gateway;
-  const reserve = metrics.reserve;
-  const reliability = metrics.reliability;
-  return (
-    <>
+function FundingSection({ metrics }: { metrics?: FedimintMetrics }) {
+  if (!metrics) {
+    return (
       <Section title="Funding">
-        <Row
-          label="Wallet balance"
-          value={known(metrics.wallet_balance_sats, " sats")}
-        />
-        <Row
-          label="Required (amount + fees)"
-          value={known(metrics.required_balance_sats, " sats")}
-        />
-        <Row
-          label="Headroom"
-          value={known(metrics.funding_headroom_sats, " sats")}
-        />
-        <Row label="Funding feasible" value={known(metrics.funding_feasible)} />
-        <Row
-          label="Balance source"
-          value={humanize(metrics.balance_source ?? "unknown")}
-        />
-      </Section>
-      <Section title="Gateway">
-        <Row
-          label="Selected gateway"
-          value={
-            gateway?.gateway_id ? compactId(gateway.gateway_id) : "Unknown"
-          }
-        />
-        <Row
-          label="Protocol"
-          value={gateway?.gateway_protocol?.toUpperCase() ?? "Unknown"}
-        />
-        <Row
-          label="Status"
-          value={humanize(gateway?.gateway_status ?? "unknown")}
-        />
-        <Row
-          label="Gateway fee"
-          value={known(gateway?.gateway_fee_sats ?? null, " sats")}
-        />
-        <Row
-          label="Fee schedule"
-          value={
-            gateway &&
-            gateway.fee_base_msat !== null &&
-            gateway.fee_ppm !== null
-              ? `${gateway.fee_base_msat} msat + ${gateway.fee_ppm} ppm`
-              : "Unknown"
-          }
-        />
-        <Row
-          label="Routing available"
-          value={known(gateway?.routing_available ?? null)}
-        />
-        <Row
-          label="Outbound liquidity"
-          value={
-            gateway?.outbound_liquidity_sats != null
-              ? known(gateway.outbound_liquidity_sats, " sats")
-              : `Unknown (${gateway?.liquidity_status ?? "unknown"})`
-          }
-        />
-        <Row
-          label="Gateway candidates"
-          value={known(metrics.gateway_candidate_count)}
-        />
-      </Section>
-      <Section title="Federation">
-        <Row
-          label="Federation reserve"
-          value={known(reserve.reserve_sats, " sats")}
-        />
-        <Row
-          label="Pending peg-outs"
-          value={known(reserve.pending_pegout_sats, " sats")}
-        />
-        <Row
-          label="Pending change"
-          value={known(reserve.pending_change_sats, " sats")}
-        />
-        <Row
-          label="Liabilities"
-          value={known(reserve.liabilities_sats, " sats")}
-        />
-        <Row
-          label="Solvency"
-          value={`${humanize(reserve.solvency_status)} · confidence ${reserve.confidence}`}
-        />
+        <Row label="Wallet balance" value="Held by the wallet" />
         <Text style={styles.small}>
-          Reserve is not solvency: outstanding ecash liabilities are not
-          published by the federation.
+          Cashu proofs stay in the wallet; EcashMesh never sees them, so funding
+          is checked by the wallet when paying.
         </Text>
       </Section>
+    );
+  }
+  return (
+    <Section title="Funding">
+      <Row
+        label="Wallet balance"
+        value={known(metrics.wallet_balance_sats, " sats")}
+      />
+      <Row
+        label="Required (amount + all fees)"
+        value={known(metrics.required_balance_sats, " sats")}
+      />
+      <Row
+        label="Headroom"
+        value={known(metrics.funding_headroom_sats, " sats")}
+      />
+      <Row label="Feasible" value={known(metrics.funding_feasible)} />
+      <Row
+        label="Balance source"
+        value={humanize(metrics.balance_source ?? "unknown")}
+      />
+    </Section>
+  );
+}
+
+function FeesSection({
+  route,
+  metrics,
+  cashu,
+}: {
+  route: PaymentSource;
+  metrics?: FedimintMetrics;
+  cashu?: CashuMetrics;
+}) {
+  const fee = route.score_contributions?.signals.find(
+    (signal) => signal.signal === "fee_reasonableness",
+  );
+  const amountMsat = metrics?.amount_msat ?? 0;
+  const gateway = metrics?.selected_gateway;
+  return (
+    <Section title="Fees">
+      {metrics ? (
+        <>
+          <Row
+            label="Federation fee"
+            value={known(metrics.federation_fee_msat, " msat")}
+          />
+          <Row
+            label="Gateway fee"
+            value={known(metrics.gateway_fee_msat, " msat")}
+          />
+          <Row
+            label="Gateway schedule"
+            value={
+              gateway?.fee_base_msat != null && gateway.fee_ppm != null
+                ? `${gateway.fee_base_msat} msat + ${gateway.fee_ppm} ppm (${(gateway.fee_ppm / 100).toFixed(0)} bp)`
+                : "Unknown"
+            }
+          />
+          <Row
+            label="Total fee"
+            value={`${known(metrics.total_fee_msat, " msat")} → ${known(route.fee.amount, " sats")} (rounded up)`}
+          />
+          <Row
+            label="Fee of payment"
+            value={percentOf(metrics.total_fee_msat, amountMsat)}
+          />
+        </>
+      ) : (
+        <>
+          <Row
+            label="Melt fee reserve"
+            value={known(cashu?.melt_fee_reserve_sats, " sats")}
+          />
+          <Row
+            label="Input fee"
+            value={
+              cashu?.input_fees_ppk
+                ? cashu.input_fees_ppk
+                    .map((item) => `${item.input_fee_ppk} ppk`)
+                    .join(", ")
+                : "Unknown"
+            }
+          />
+        </>
+      )}
+      <Row
+        label="Fee reasonableness"
+        value={
+          fee ? `${fee.value_basis_points} / 10000 (zero at 1%)` : "Unknown"
+        }
+      />
+      <Text style={styles.small}>
+        ppm is parts per million: 3000 ppm = 0.3% = 30 bp. The ranker uses the
+        total fee in whole sats as basis points of the payment.
+      </Text>
+    </Section>
+  );
+}
+
+function FederationSection({ metrics }: { metrics: FedimintMetrics }) {
+  const reserve = metrics.reserve;
+  const audit = reserve.guardian_audit;
+  const health = metrics.federation_health;
+  return (
+    <Section title="Federation">
+      <Row
+        label="Health"
+        value={
+          health
+            ? `${humanize(health.status)} · ${known(health.guardians_responding)}/${known(health.guardian_count)} guardians`
+            : "Unknown"
+        }
+      />
+      {health && (
+        <Row
+          label="Modules / version"
+          value={`${health.modules.join(", ") || "Unknown"} · v${health.consensus_version ?? "?"}`}
+        />
+      )}
+      <Row label="Reserve" value={known(reserve.reserve_sats, " sats")} />
+      <Row
+        label="Liabilities"
+        value={known(reserve.liabilities_msat, " msat")}
+      />
+      <Row label="Assets" value={known(reserve.assets_msat, " msat")} />
+      <Row label="Net assets" value={known(reserve.net_assets_msat, " msat")} />
+      <Row
+        label="Coverage"
+        value={
+          reserve.coverage_ratio == null
+            ? "Unknown"
+            : reserve.coverage_ratio.toFixed(4)
+        }
+      />
+      <Row
+        label="Solvency"
+        value={`${humanize(reserve.solvency_status)} · confidence ${reserve.confidence}`}
+      />
+      <Row
+        label="Guardian audit"
+        value={
+          audit
+            ? `${audit.agreeing}/${audit.guardian_count} agree (${humanize(audit.state)}, threshold ${audit.threshold})`
+            : "Not available"
+        }
+      />
+      <Row
+        label="Pending peg-outs / change"
+        value={`${known(reserve.pending_pegout_sats, " sats")} / ${known(reserve.pending_change_sats, " sats")}`}
+      />
+      <Text style={styles.small}>
+        Liabilities come only from an audit agreed by a guardian threshold;
+        wallet balance and reserve are never used as liabilities. Pending funds
+        are not spendable reserve.
+      </Text>
+    </Section>
+  );
+}
+
+function MintSection({ cashu }: { cashu: CashuMetrics }) {
+  return (
+    <Section title="Mint">
+      <Row label="Health" value={humanize(cashu.mint_health ?? "unknown")} />
+      <Row label="Melt quote" value={cashu.quote_available ? "Yes" : "No"} />
+      <Row
+        label="Quote expires"
+        value={time(cashu.melt_quote_expires_at_unix_seconds)}
+      />
+      <Row
+        label="Keysets / denominations"
+        value={`${known(cashu.keyset_count)} / ${known(cashu.denomination_count)}`}
+      />
+      <Row label="Solvency" value={humanize(cashu.solvency_status)} />
+      <Text style={styles.small}>{cashu.solvency_limitation}</Text>
+    </Section>
+  );
+}
+
+function GatewaySection({ metrics }: { metrics: FedimintMetrics }) {
+  const gateway = metrics.selected_gateway;
+  const health = metrics.gateway_health;
+  return (
+    <Section title="Gateway">
+      <Row
+        label="Gateway"
+        value={gateway?.gateway_id ? compactId(gateway.gateway_id) : "Unknown"}
+      />
+      <Row
+        label="Protocol"
+        value={gateway?.gateway_protocol?.toUpperCase() ?? "Unknown"}
+      />
+      <Row label="Status" value={humanize(health?.status ?? "unknown")} />
+      <Row label="Registered" value={known(health?.registered)} />
+      <Row
+        label="Routing available"
+        value={known(gateway?.routing_available ?? null)}
+      />
+      <Row
+        label="Channels"
+        value={
+          health?.channel_count == null
+            ? "Unknown"
+            : `${health.active_channel_count} active of ${health.channel_count}`
+        }
+      />
+      <Row
+        label="Outbound / inbound"
+        value={`${known(health?.outbound_liquidity_sats, " sats")} / ${known(health?.inbound_liquidity_sats, " sats")}`}
+      />
+      <Row
+        label="Liquidity"
+        value={humanize(health?.liquidity_status ?? "unknown")}
+      />
+      <Row label="Candidates" value={known(metrics.gateway_candidate_count)} />
+      <Text style={styles.small}>
+        Gateway health is not liquidity and not payment success.
+      </Text>
+    </Section>
+  );
+}
+
+function ReliabilitySection({
+  reliability,
+}: {
+  reliability?: ReliabilityEvidence;
+}) {
+  if (!reliability || reliability.success_rate_basis_points === null) {
+    return (
       <Section title="Reliability">
-        <Row
-          label="Payment history"
-          value={
-            reliability.successful_payments === null
-              ? "None recorded"
-              : `${reliability.successful_payments} succeeded / ${reliability.failed_payments ?? "unknown"} failed`
-          }
-        />
-        <Row label="Confidence" value={reliability.confidence} />
-        <Row
-          label="Observed"
-          value={new Date(
-            metrics.observed_at_unix_seconds * 1000,
-          ).toLocaleTimeString()}
-        />
+        <Row label="Payment history" value="None recorded" />
         <Text style={styles.small}>
-          Gateway discovery and fee quotes are not counted as payment successes.
+          Reliability is unknown until real payments are recorded. Probes,
+          gateway discovery and fee quotes never count.
         </Text>
       </Section>
-    </>
+    );
+  }
+  return (
+    <Section title="Reliability">
+      <Row
+        label="Success rate"
+        value={`${(reliability.success_rate_basis_points / 100).toFixed(1)}%`}
+      />
+      <Row
+        label="Attempts"
+        value={`${reliability.successful_payments} succeeded / ${reliability.failed_payments} failed`}
+      />
+      <Row
+        label="Failures"
+        value={`${reliability.liquidity_failures} liquidity, ${reliability.infrastructure_failures} infrastructure`}
+      />
+      {reliability.funding_failures_excluded > 0 && (
+        <Row
+          label="Payer funding failures"
+          value={`${reliability.funding_failures_excluded} (excluded)`}
+        />
+      )}
+      <Row
+        label="Recent outcomes"
+        value={reliability.recent_outcomes.map(humanize).join(", ")}
+      />
+      <Row
+        label="Consecutive failures"
+        value={known(reliability.consecutive_failures)}
+      />
+      <Row
+        label="Last success / failure"
+        value={`${time(reliability.last_success_at_unix_seconds)} / ${time(reliability.last_failure_at_unix_seconds)}`}
+      />
+      <Row
+        label="Freshness / confidence"
+        value={`${reliability.freshness} / ${reliability.confidence}`}
+      />
+    </Section>
+  );
+}
+
+function EvidenceInventory({ items }: { items: EvidenceItem[] }) {
+  return (
+    <Section title="Evidence">
+      {items.map((item) => (
+        <View key={item.parameter} style={local.pathCard}>
+          <View style={{ flex: 1, gap: 4 }}>
+            <Row
+              label={humanize(item.parameter)}
+              value={humanize(item.classification)}
+            />
+            <Text style={styles.small}>
+              {item.source} · {item.freshness}
+              {item.confidence ? ` · ${item.confidence} confidence` : ""}
+              {item.observed_at_unix_seconds
+                ? ` · ${time(item.observed_at_unix_seconds)}`
+                : ""}
+              {item.ranking_signal
+                ? ` · ranks ${humanize(item.ranking_signal)}`
+                : ""}
+            </Text>
+            {item.limitation && (
+              <Text style={styles.small}>Limitation: {item.limitation}</Text>
+            )}
+          </View>
+        </View>
+      ))}
+    </Section>
   );
 }
 
@@ -673,10 +950,29 @@ export function RouteDetails({
         </>
       )}
       {activeTab === "evidence" && (
-        <LiquidityDetails evidence={route.liquidity_evidence} />
-      )}
-      {activeTab === "evidence" && route.fedimint_metrics && (
-        <FedimintEvidence metrics={route.fedimint_metrics} />
+        <>
+          <FundingSection metrics={route.fedimint_metrics} />
+          <FeesSection
+            route={route}
+            metrics={route.fedimint_metrics}
+            cashu={route.cashu_metrics}
+          />
+          <LiquidityDetails
+            evidence={route.liquidity_evidence}
+            protocol={route.protocol}
+          />
+          {route.fedimint_metrics && (
+            <FederationSection metrics={route.fedimint_metrics} />
+          )}
+          {route.cashu_metrics && <MintSection cashu={route.cashu_metrics} />}
+          {route.fedimint_metrics && (
+            <GatewaySection metrics={route.fedimint_metrics} />
+          )}
+          <ReliabilitySection reliability={route.reliability_evidence} />
+          {route.evidence_items && route.evidence_items.length > 0 && (
+            <EvidenceInventory items={route.evidence_items} />
+          )}
+        </>
       )}
       {activeTab === "evidence" && (
         <Section title="Evidence">
@@ -725,6 +1021,9 @@ export function RouteDetails({
             );
           })}
         </Section>
+      )}
+      {activeTab === "risks" && route.score_contributions && (
+        <PenaltyBreakdown breakdown={route.score_contributions} />
       )}
       {activeTab === "risks" && (
         <Section title="Risks">

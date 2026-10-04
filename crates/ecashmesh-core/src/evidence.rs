@@ -1,6 +1,7 @@
 //! Connector evidence, provenance, freshness, and aggregation primitives.
 
 use crate::model::{ConnectorId, ReliabilityInfo};
+use crate::risk::EvidenceField;
 
 /// A Unix timestamp in whole seconds associated with an observation.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -356,6 +357,10 @@ pub struct ConnectorEvidence {
     pub solvency: Evidence<SolvencyStatus>,
     /// Recent payment reliability observation.
     pub reliability: Evidence<ReliabilityInfo>,
+    /// Facts for which usable independent observations disagreed. The
+    /// corresponding field must then be [`Evidence::Unknown`]: no single
+    /// disputed value is trusted, and the disagreement itself is the risk.
+    pub conflicting: Vec<EvidenceField>,
 }
 
 impl ConnectorEvidence {
@@ -374,7 +379,17 @@ impl ConnectorEvidence {
             health,
             solvency,
             reliability,
+            conflicting: Vec::new(),
         }
+    }
+
+    /// Records that independent observations of `field` disagreed.
+    #[must_use]
+    pub fn with_conflicting(mut self, field: EvidenceField) -> Self {
+        if !self.conflicting.contains(&field) {
+            self.conflicting.push(field);
+        }
+        self
     }
 }
 

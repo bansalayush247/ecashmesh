@@ -176,12 +176,25 @@ pub fn evaluate_connector_evidence(
 
     evaluate_evidence_field(&evidence.health, EvidenceField::Health, policy, &mut risks);
 
+    // A disputed fact is not merely missing: it carries the conflict risk
+    // instead of the unknown risk, never both.
+    let disputed = |field| evidence.conflicting.contains(&field);
     match &evidence.solvency {
+        Evidence::Unknown if disputed(EvidenceField::Solvency) => {
+            risks.push(RiskFactor::ConflictingEvidence {
+                field: EvidenceField::Solvency,
+            });
+        }
         Evidence::Unknown => risks.push(RiskFactor::UnknownSolvency),
         solvency => evaluate_evidence_field(solvency, EvidenceField::Solvency, policy, &mut risks),
     }
 
     match &evidence.reliability {
+        Evidence::Unknown if disputed(EvidenceField::Reliability) => {
+            risks.push(RiskFactor::ConflictingEvidence {
+                field: EvidenceField::Reliability,
+            });
+        }
         Evidence::Unknown => risks.push(RiskFactor::UnknownReliability),
         reliability => {
             evaluate_evidence_field(reliability, EvidenceField::Reliability, policy, &mut risks);
@@ -359,6 +372,26 @@ mod tests {
                 RiskFactor::UnknownReliability,
             ]
         );
+    }
+
+    #[test]
+    fn disputed_solvency_is_a_conflict_not_an_unknown() {
+        let evidence = connector(
+            Some(FIRST_SEEN),
+            Evidence::known(ConnectorHealth::Healthy, NOW),
+            Evidence::unknown(),
+            Evidence::known(reliability(9_900, 100), NOW),
+        )
+        .with_conflicting(EvidenceField::Solvency);
+
+        let risks = evaluate_connector_evidence(&evidence, EvidenceRiskPolicy::default(), NOW);
+        assert_eq!(
+            risks,
+            vec![RiskFactor::ConflictingEvidence {
+                field: EvidenceField::Solvency,
+            }]
+        );
+        assert_eq!(risks[0].reason_code(), "conflicting_evidence");
     }
 
     #[test]

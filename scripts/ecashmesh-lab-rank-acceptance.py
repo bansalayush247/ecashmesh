@@ -7,6 +7,7 @@ federations. No source is paid. It refuses non-regtest invoices and
 non-loopback endpoints.
 
     scripts/ecashmesh-lab-rank-acceptance.py [amount_sats] [--json out.json]
+        [--invoice lnbcrt...] [--verify-topology]
 """
 
 import argparse
@@ -93,78 +94,140 @@ def label(source_id, result):
     return source_id
 
 
-def probes(result):
-    """Every liquidity observation, including excluded sources and 422s."""
-    observations = (result.get("live") or {}).get("quote_observations") or (
+def observations(result, kind):
+    """Every observation of a kind, including excluded sources and 422s."""
+    items = (result.get("live") or {}).get("quote_observations") or (
         (result.get("error") or {}).get("diagnostics") or {}).get("quote_observations") or []
-    return [o for o in observations if o.get("kind") == "lightning_liquidity_probe"]
+    return [o for o in items if o.get("kind") == kind]
 
 
 def probe_report(result, labels):
-    for o in sorted(probes(result), key=lambda o: labels.get(o["connector"], o["connector"])):
+    name = lambda o: labels.get(o["connector"], o["connector"])[:20]
+    for o in sorted(observations(result, "lightning_liquidity_probe"), key=name):
         v = o["value"]
-        detail = v.get("failure_reason") or ""
-        if v.get("total_outbound_sats") is not None:
-            detail = f"active outbound {v['total_outbound_sats']} sats in {v['active_channel_count']} channels; {detail}"
-        if v.get("routing_fee_msat") is not None:
-            detail = f"routing fee {v['routing_fee_msat']} msat {detail}"
-        print(f"   PROBE {labels.get(o['connector'], o['connector'])[:20]:<20} {v['evidence_source']:<21} "
-              f"from {v['node']:<12} node={str(v.get('node_pubkey'))[:12]} {v['probed_amount_sats']} sats -> "
-              f"{v['outcome']} conf={v['confidence']} {o['state']} effect={o['effect']} {detail.strip()}")
+        fee = f"routing fee {v['routing_fee_msat']} msat " if v.get("routing_fee_msat") is not None else ""
+        print(f"   PROBE   {name(o):<20} from {v['node']:<14} {v['probed_amount_sats']} sats -> {v['outcome']} "
+              f"conf={v['confidence']} {o['state']} effect={o['effect']} {fee}{v.get('failure_reason') or ''}".rstrip())
+    for o in sorted(observations(result, "lightning_channel_state"), key=name):
+        v = o["value"]
+        direct = v.get("payee_direct_outbound_sats")
+        print(f"   CHANNEL {name(o):<20} {v['node']:<14} reachable={v['reachable']} state={v.get('node_state')} "
+              f"active={v['active_channel_count']}/{v['channel_count']} outbound={v['outbound_sats']} "
+              f"inbound={v['inbound_sats']} payee_direct={direct} {o['state']} effect={o['effect']} {v.get('error') or ''}".rstrip())
 
 
 def liquidity_label(route):
     evidence = route.get("liquidity_evidence")
     if not evidence:
-        return "no probe (wallet balance)" if route.get("protocol") == "fedimint" else "unknown"
+        return "wallet balance only (Lightning leg unknown)" if route.get("protocol") == "fedimint" else "unknown"
     used = "used" if evidence["applied_to_ranking"] else "not used"
-    return f"{evidence['outcome']} {evidence['confidence']} {evidence['freshness']} ({used})"
+    return f"{evidence['basis']} {evidence.get('confidence')} {evidence['freshness']} ({used})"
+
+
+def signal_table(route):
+    return {s["signal"]: s["value_basis_points"] for s in route["score_contributions"]["signals"]}
 
 
 def report(result):
     rows = ranked(result)
-    print(f"{'#':>2} {'source':<28} {'score':>5} {'base':>5} {'pen':>5}  "
+    print(f"{'#':>2} {'source':<22} {'score':>5} {'base':>5} {'pen':>5}  "
           f"{'liq':>5} {'rel':>5} {'fee':>5} {'fresh':>5} {'solv':>5} {'hist':>5}  fee_sats  liquidity_evidence")
     for index, route in enumerate(rows, 1):
         c = route["score_contributions"]
-        signals = {s["signal"]: s["value_basis_points"] for s in c["signals"]}
-        print(f"{index:>2} {route['source_label'][:28]:<28} {c['score_basis_points']:>5} "
+        signals = signal_table(route)
+        print(f"{index:>2} {route['source_label'][:22]:<22} {c['score_basis_points']:>5} "
               f"{c['base_score_basis_points']:>5} {c['risk_penalty_basis_points']:>5}  "
               f"{signals['liquidity_confidence']:>5} {signals['reliability']:>5} "
               f"{signals['fee_reasonableness']:>5} {signals['evidence_freshness']:>5} "
               f"{signals['solvency_confidence']:>5} {signals['historical_behavior']:>5}  "
               f"{route['fee']['amount']:>8}  {liquidity_label(route)}")
+    print("   penalties (bp):")
+    for route in rows:
+        c = route["score_contributions"]
+        parts = ", ".join(f"{p['category']} {p['penalty_basis_points']}" for p in c["penalty_categories"] if p["count"])
+        print(f"   {route['source_label'][:22]:<22} total {c['total_penalty_uncapped_basis_points']} "
+              f"(capped {c['risk_penalty_basis_points']}{', score saturated at 0' if c['score_saturated_at_zero'] else ''}): {parts}")
+    for route in rows:
+        rel = route.get("reliability_evidence") or {}
+        print(f"   RELIABILITY {route['source_label'][:22]:<22} rate={rel.get('success_rate_basis_points')} "
+              f"ok={rel.get('successful_payments')} failed={rel.get('failed_payments')} "
+              f"(liquidity {rel.get('liquidity_failures')}, infra {rel.get('infrastructure_failures')}, "
+              f"funding excluded {rel.get('funding_failures_excluded')}) recent={rel.get('recent_outcomes')} "
+              f"{rel.get('freshness')} conf={rel.get('confidence')}")
     for route in rows:
         metrics = route.get("fedimint_metrics")
         if not metrics:
             continue
-        gateway = metrics.get("selected_gateway") or {}
+        gateway = metrics.get("gateway_health") or {}
         reserve = metrics["reserve"]
-        print(f"   {route['source_label']}: wallet={metrics['wallet_balance_sats']} "
-              f"required={metrics['required_balance_sats']} headroom={metrics['funding_headroom_sats']} "
-              f"feasible={metrics['funding_feasible']} ({metrics['balance_source']}) | "
-              f"gateway={gateway.get('gateway_protocol')} {gateway.get('gateway_status')} "
-              f"fee={gateway.get('gateway_fee_sats')}sat base={gateway.get('fee_base_msat')}msat "
-              f"ppm={gateway.get('fee_ppm')} routing={gateway.get('routing_available')} "
-              f"liquidity={gateway.get('outbound_liquidity_sats')}/{gateway.get('liquidity_status')} "
-              f"candidates={metrics['gateway_candidate_count']} | reserve={reserve['reserve_sats']} "
-              f"pegout={reserve['pending_pegout_sats']} change={reserve['pending_change_sats']} "
-              f"liabilities={reserve['liabilities_sats']} solvency={reserve['solvency_status']} | "
-              f"reliability={metrics['reliability']['confidence']}")
+        audit = reserve.get("guardian_audit") or {}
+        health = metrics.get("federation_health") or {}
+        print(f"   {route['source_label']}: funding wallet={metrics['wallet_balance_sats']} required={metrics['required_balance_sats']} "
+              f"headroom={metrics['funding_headroom_sats']} feasible={metrics['funding_feasible']} | fees msat "
+              f"federation={metrics.get('federation_fee_msat')} gateway={metrics.get('gateway_fee_msat')} "
+              f"total={metrics.get('total_fee_msat')} (gateway base={metrics['selected_gateway'].get('fee_base_msat')} "
+              f"ppm={metrics['selected_gateway'].get('fee_ppm')})")
+        print(f"      gateway {gateway.get('status')} registered={gateway.get('registered')} {gateway.get('protocol')} "
+              f"routing={gateway.get('routing_available')} active={gateway.get('active_channel_count')}/{gateway.get('channel_count')} "
+              f"outbound={gateway.get('outbound_liquidity_sats')} inbound={gateway.get('inbound_liquidity_sats')} "
+              f"liquidity={gateway.get('liquidity_status')} | federation {health.get('status')} "
+              f"guardians={health.get('guardians_responding')}/{health.get('guardian_count')} v{health.get('consensus_version')}")
+        print(f"      reserve={reserve['reserve_sats']} pegout={reserve['pending_pegout_sats']} change={reserve['pending_change_sats']} "
+              f"liabilities_msat={reserve.get('liabilities_msat')} assets_msat={reserve.get('assets_msat')} "
+              f"net={reserve.get('net_assets_msat')} coverage={reserve.get('coverage_ratio') and round(reserve['coverage_ratio'], 4)} "
+              f"solvency={reserve['solvency_status']} conf={reserve['confidence']} audit={audit.get('agreeing')}/{audit.get('guardian_count')} "
+              f"{audit.get('state')}")
+    for route in rows:
+        metrics = route.get("cashu_metrics")
+        if metrics:
+            print(f"   {route['source_label']}: mint {metrics['mint_health']} keysets={metrics['keyset_count']} "
+                  f"melt_reserve={metrics['melt_fee_reserve_sats']} input_fee_ppk={[f['input_fee_ppk'] for f in metrics['input_fees_ppk'] or []]} "
+                  f"quote_expiry={metrics['melt_quote_expires_at_unix_seconds']} solvency={metrics['solvency_status']}")
     for excluded in result.get("excluded_sources", []):
         print(f"   EXCLUDED {excluded['source_id']}: {excluded['reason']}")
     for estimate in result.get("gateway_estimated_sources", []):
         print(f"   GATEWAY-ESTIMATE-ONLY {estimate['source_id']}: {estimate['reason']}")
 
 
+def verify_topology(result):
+    """All four Fedimint sources must be ranked with a registered LNv2 gateway
+    that is reachable, actively connected, has outbound liquidity and fresh
+    liquidity evidence. Returns the list of failures."""
+    failures = []
+    fedimint = [r for r in ranked(result) if r.get("protocol") == "fedimint"]
+    if len(fedimint) != 4:
+        failures.append(f"expected 4 ranked Fedimint sources, got {len(fedimint)}")
+    for route in fedimint:
+        label = route["source_label"]
+        gateway = (route.get("fedimint_metrics") or {}).get("gateway_health") or {}
+        liquidity = route.get("liquidity_evidence") or {}
+        checks = {
+            "registered gateway": gateway.get("registered") is True,
+            "gateway bound to this federation's quote": gateway.get("quote_verified") is True,
+            "LNv2 protocol": gateway.get("protocol") == "lnv2",
+            "gateway reachable": gateway.get("reachable") is True,
+            "active Lightning channel": (gateway.get("active_channel_count") or 0) > 0,
+            "non-zero outbound liquidity": (gateway.get("outbound_liquidity_sats") or 0) > 0,
+            "fresh liquidity evidence": liquidity.get("freshness") == "fresh" and liquidity.get("applied_to_ranking") is True,
+        }
+        failures.extend(f"{label}: {name}" for name, ok in checks.items() if not ok)
+    return failures
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("amount", nargs="?", type=int, default=1000)
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--invoice", help="re-evaluate this regtest invoice instead of creating one")
+    parser.add_argument("--verify-topology", action="store_true",
+                        help="fail unless all four Fedimint gateways are genuinely usable")
     args = parser.parse_args()
-    invoice = payee_invoice(args.amount)
+    invoice = args.invoice or payee_invoice(args.amount)
+    if not invoice.startswith("lnbcrt"):
+        sys.exit("refusing: not a regtest invoice")
     status, result = evaluate(args.amount, invoice)
     if args.json:
+        result["_acceptance_invoice"] = invoice
         args.json.write_text(json.dumps(result, indent=2))
     labels = {o["connector"]: o.get("label") or o["connector"]
               for o in (result.get("connector_observations")
@@ -183,6 +246,12 @@ def main():
           f"ranked={len(rows)} excluded={len(excluded)}")
     report(result)
     probe_report(result, labels)
+    if args.verify_topology:
+        failures = verify_topology(result)
+        for failure in failures:
+            print(f"   TOPOLOGY FAIL {failure}")
+        print("   TOPOLOGY " + ("FAILED" if failures else "OK: 4 Fedimint gateways registered, LNv2, reachable, active, funded, fresh evidence"))
+        return 1 if failures else 0
     return 0
 
 

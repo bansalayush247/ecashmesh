@@ -24,7 +24,9 @@ use tower_http::cors::CorsLayer;
 
 mod comparison;
 mod connectors;
+mod evidence_items;
 mod federation_setup;
+mod history;
 mod lab;
 mod live;
 mod payment;
@@ -406,6 +408,7 @@ async fn evaluate_using(
         service,
         provider.fedimint_service(),
         provider.liquidity_probes(),
+        provider.lab_history(),
         &batch,
         sources,
         live_destination,
@@ -485,6 +488,9 @@ async fn evaluate_using(
     );
     response.apply_fedimint_details(&batch.fedimint_observations, &evaluation.quote_observations);
     response.apply_liquidity_evidence(&evaluation.quote_observations);
+    response.apply_cashu_details(&batch.live_observations, &evaluation.quote_observations);
+    response.apply_reliability_evidence(&evaluation.quote_observations);
+    response.apply_evidence_items();
     response.gateway_estimated_sources = evaluation.gateway_estimated_sources;
     let ranked_ids = std::iter::once(&response.recommended_source)
         .chain(&response.alternative_sources)
@@ -538,8 +544,18 @@ fn gateway_comparison_diagnostic(
 fn liquidity_issue<'a>(quotes: &'a [serde_json::Value], id: &str) -> Option<&'a str> {
     quotes
         .iter()
-        .find(|value| value["connector"] == id && value["kind"] == "lightning_liquidity_probe")
-        .and_then(|value| value["issue"]["message"].as_str())
+        .filter(|value| {
+            value["connector"] == id
+                && matches!(
+                    value["kind"].as_str(),
+                    Some(
+                        "lightning_liquidity"
+                            | "lightning_liquidity_probe"
+                            | "lightning_channel_state"
+                    )
+                )
+        })
+        .find_map(|value| value["issue"]["message"].as_str())
 }
 
 fn source_diagnostics(
@@ -1393,6 +1409,9 @@ impl EvaluateResponse {
                 .map(|mut metrics| {
                     metrics["reserve"] = json!(observation.metrics.reserve);
                     metrics["gateways"] = json!(observation.metrics.gateways);
+                    metrics["federation_health"] = json!(observation.metrics.federation_health);
+                    metrics["gateway_health"] =
+                        evidence_items::gateway_health(&metrics, quotes, &route.source_id);
                     metrics
                 });
         }
@@ -1403,18 +1422,98 @@ impl EvaluateResponse {
         for route in
             std::iter::once(&mut self.recommended_source).chain(&mut self.alternative_sources)
         {
-            route.liquidity_evidence = quotes
+            let find = |kind: &str| {
+                quotes
+                    .iter()
+                    .find(|quote| quote["kind"] == kind && quote["connector"] == route.source_id)
+            };
+            let detail = |quote: &serde_json::Value| {
+                let mut value = quote["value"].clone();
+                value["freshness"] = quote["state"].clone();
+                value["effect"] = quote["effect"].clone();
+                value
+            };
+            route.liquidity_evidence = find("lightning_liquidity").map(|summary| {
+                let mut evidence = summary["value"].clone();
+                evidence["freshness"] = summary["state"].clone();
+                evidence["effect"] = summary["effect"].clone();
+                evidence["probe"] = find("lightning_liquidity_probe").map_or(json!(null), detail);
+                evidence["channel_state"] =
+                    find("lightning_channel_state").map_or(json!(null), detail);
+                evidence
+            });
+        }
+        self.sync_legacy_route_fields();
+    }
+
+    fn apply_reliability_evidence(&mut self, quotes: &[serde_json::Value]) {
+        for route in
+            std::iter::once(&mut self.recommended_source).chain(&mut self.alternative_sources)
+        {
+            route.reliability_evidence = quotes
                 .iter()
                 .find(|quote| {
-                    quote["kind"] == "lightning_liquidity_probe"
-                        && quote["connector"] == route.source_id
+                    quote["kind"] == "payment_reliability" && quote["connector"] == route.source_id
                 })
-                .map(|quote| {
-                    let mut evidence = quote["value"].clone();
-                    evidence["freshness"] = quote["state"].clone();
-                    evidence["applied_to_ranking"] = json!(quote["effect"] == "liquidity");
-                    evidence
-                });
+                .map(|quote| quote["value"].clone());
+            if let (Some(metrics), Some(reliability)) = (
+                route.fedimint_metrics.as_mut(),
+                route.reliability_evidence.as_ref(),
+            ) {
+                metrics["reliability"] = reliability.clone();
+            }
+        }
+        self.sync_legacy_route_fields();
+    }
+
+    /// Cashu parity: what the public NUT endpoints and the melt quote show.
+    /// Mint solvency is not observable through the Cashu protocol and stays
+    /// unknown; quote availability is never treated as solvency.
+    fn apply_cashu_details(
+        &mut self,
+        observations: &[ecashmesh_cashu::CashuObservation],
+        quotes: &[serde_json::Value],
+    ) {
+        for route in
+            std::iter::once(&mut self.recommended_source).chain(&mut self.alternative_sources)
+        {
+            let Some(observation) = observations
+                .iter()
+                .find(|observation| observation.id.as_str() == route.source_id)
+            else {
+                continue;
+            };
+            let melt = quotes.iter().find(|quote| {
+                quote["kind"] == "source_melt_quote" && quote["connector"] == route.source_id
+            });
+            let keysets = observation.public_keysets.value();
+            route.cashu_metrics = Some(json!({
+                "mint_url": observation.mint_url,
+                "mint_health": observation.health.value().map(|health| connector_health_code(*health)),
+                "endpoints_reachable": observation.availability.value(),
+                "observed_at_unix_seconds": observation.evaluated_at.unix_seconds(),
+                "expires_at_unix_seconds": observation.expires_at_unix_seconds,
+                "quote_available": melt.is_some_and(|quote| quote["state"] == "known"),
+                "melt_quote_id": melt.and_then(|quote| quote["value"]["quote_id"].as_str()),
+                "melt_fee_reserve_sats": melt.and_then(|quote| quote["value"]["fee_reserve_sats"].as_u64()),
+                "melt_quote_expires_at_unix_seconds": melt.and_then(|quote| quote["value"]["expiry"].as_u64()),
+                "keyset_count": keysets.map(Vec::len),
+                "denomination_count": keysets.map(|keysets| keysets.iter().map(|keyset| keyset.keys.len()).sum::<usize>()),
+                "input_fees_ppk": observation.input_fees.value().map(|fees| fees.iter().map(|fee| json!({"keyset_id": fee.id, "unit": fee.unit, "active": fee.active, "input_fee_ppk": fee.input_fee_ppk.unwrap_or(0)})).collect::<Vec<_>>()),
+                "supported_units": observation.supported_units.value(),
+                "solvency_status": "unknown",
+                "solvency_limitation": "Cashu exposes no liabilities endpoint in this lab's CDK version; quote availability and reachability are not solvency evidence",
+            }));
+        }
+        self.sync_legacy_route_fields();
+    }
+
+    /// One row per evidence parameter, classified by how it was obtained.
+    fn apply_evidence_items(&mut self) {
+        for route in
+            std::iter::once(&mut self.recommended_source).chain(&mut self.alternative_sources)
+        {
+            route.evidence_items = evidence_items::for_route(route);
         }
         self.sync_legacy_route_fields();
     }
@@ -1464,6 +1563,15 @@ pub(crate) struct EvaluatedRouteResponse {
     /// Regtest-lab, amount-specific Lightning liquidity evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     liquidity_evidence: Option<serde_json::Value>,
+    /// Regtest-lab payment reliability from real recorded payments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reliability_evidence: Option<serde_json::Value>,
+    /// Structured Cashu mint, quote and fee evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cashu_metrics: Option<serde_json::Value>,
+    /// Every evidence parameter with provenance, freshness and limitations.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    evidence_items: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1471,8 +1579,25 @@ struct ScoreContributionsResponse {
     signals: Vec<SignalContributionResponse>,
     base_score_basis_points: u16,
     risks: Vec<RiskPenaltyResponse>,
+    /// Every penalty category, including those that did not apply.
+    penalty_categories: Vec<PenaltyCategoryResponse>,
+    /// Sum of all penalties before the cap.
+    total_penalty_uncapped_basis_points: u32,
+    penalty_cap_basis_points: u16,
+    /// `min(total_penalty_uncapped, penalty_cap)`.
     risk_penalty_basis_points: u16,
+    /// The penalty exceeded the base score, so the score saturated at zero.
+    score_saturated_at_zero: bool,
     score_basis_points: u16,
+    formula: &'static str,
+}
+
+#[derive(Clone, Serialize)]
+struct PenaltyCategoryResponse {
+    category: &'static str,
+    count: usize,
+    penalty_basis_points: u32,
+    note: Option<&'static str>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1487,7 +1612,112 @@ struct SignalContributionResponse {
 #[derive(Clone, Serialize)]
 struct RiskPenaltyResponse {
     code: &'static str,
+    /// `hop` (route-level evidence for this traversal) or `connector`
+    /// (the source's own evidence).
+    level: &'static str,
+    /// The fact concerned, for stale/weak/conflicting evidence.
+    field: Option<&'static str>,
     penalty_basis_points: u16,
+}
+
+/// The ranker caps the summed penalty at the maximum signal (`routing.rs`).
+const PENALTY_CAP_BASIS_POINTS: u16 = 10_000;
+
+/// Number of risks the ranker derives from a hop's own evidence; they precede
+/// the connector-evidence risks for that hop (`routing::route_risks`).
+fn hop_risk_count(hop: &ecashmesh_core::RouteHop, amount: Amount) -> usize {
+    let not_fresh =
+        |freshness: EvidenceFreshness| usize::from(freshness != EvidenceFreshness::Fresh);
+    not_fresh(hop.liquidity.freshness())
+        + not_fresh(hop.fee.freshness())
+        + not_fresh(hop.reliability.freshness())
+        + usize::from(
+            matches!(&hop.liquidity, Evidence::Stale(observation) if !observation.value.can_cover(amount)),
+        )
+        + usize::from(!hop.capabilities.can_send)
+}
+
+const fn risk_field(risk: &ecashmesh_core::RiskFactor) -> Option<&'static str> {
+    use ecashmesh_core::{EvidenceField, RiskFactor};
+    let field = match risk {
+        RiskFactor::StaleEvidence { field, .. }
+        | RiskFactor::WeakEvidence { field, .. }
+        | RiskFactor::ConflictingEvidence { field } => *field,
+        _ => return None,
+    };
+    Some(match field {
+        EvidenceField::Health => "health",
+        EvidenceField::Solvency => "solvency",
+        EvidenceField::Reliability => "reliability",
+        EvidenceField::Liquidity => "liquidity",
+        EvidenceField::Fee => "fee",
+    })
+}
+
+fn penalty_categories(risks: &[RiskPenaltyResponse]) -> Vec<PenaltyCategoryResponse> {
+    let category = |name: &'static str,
+                    note: Option<&'static str>,
+                    matches: &dyn Fn(&RiskPenaltyResponse) -> bool| {
+        let matching = risks
+            .iter()
+            .filter(|risk| matches(risk))
+            .collect::<Vec<_>>();
+        PenaltyCategoryResponse {
+            category: name,
+            count: matching.len(),
+            penalty_basis_points: matching
+                .iter()
+                .map(|risk| u32::from(risk.penalty_basis_points))
+                .sum(),
+            note,
+        }
+    };
+    vec![
+        category("unknown_liquidity", None, &|r| {
+            r.code == "unknown_liquidity"
+        }),
+        category("unknown_fee", None, &|r| r.code == "unknown_fee"),
+        category(
+            "unknown_reliability_hop",
+            Some("route-level reliability of this traversal"),
+            &|r| r.code == "unknown_reliability" && r.level == "hop",
+        ),
+        category(
+            "unknown_reliability_connector",
+            Some("the source's own payment reliability; a separate fact in the model"),
+            &|r| r.code == "unknown_reliability" && r.level == "connector",
+        ),
+        category("unknown_solvency", None, &|r| r.code == "unknown_solvency"),
+        category(
+            "unknown_history",
+            Some(
+                "the model has no separate history risk; missing history appears as new_or_unobserved",
+            ),
+            &|_| false,
+        ),
+        category("stale", None, &|r| {
+            matches!(
+                r.code,
+                "stale_liquidity" | "stale_fee" | "stale_reliability" | "stale_evidence"
+            )
+        }),
+        category("weak_evidence", None, &|r| r.code == "weak_evidence"),
+        category("poor_reliability", None, &|r| {
+            matches!(r.code, "poor_recent_reliability" | "low_reliability")
+        }),
+        category("conflicting_evidence", None, &|r| {
+            r.code == "conflicting_evidence"
+        }),
+        category("new_or_unobserved", None, &|r| {
+            r.code == "new_or_unobserved_connector"
+        }),
+        category("other", None, &|r| {
+            matches!(
+                r.code,
+                "insufficient_liquidity" | "missing_capability" | "other"
+            )
+        }),
+    ]
 }
 
 impl ScoreContributionsResponse {
@@ -1533,6 +1763,28 @@ impl ScoreContributionsResponse {
                 .map(|(_, weight, _)| u32::from(*weight))
                 .sum::<u32>(),
         );
+        // Single-hop live routes: the hop's own risks come first.
+        let hop_risks = match route.candidate.hops.as_slice() {
+            [hop] => hop_risk_count(hop, route.candidate.amount),
+            _ => 0,
+        };
+        let single_hop = route.candidate.hops.len() == 1;
+        let risks = route
+            .quality
+            .risk_factors
+            .iter()
+            .enumerate()
+            .map(|(index, risk)| RiskPenaltyResponse {
+                code: risk.reason_code(),
+                level: match (single_hop, index < hop_risks) {
+                    (false, _) => "route",
+                    (true, true) => "hop",
+                    (true, false) => "connector",
+                },
+                field: risk_field(risk),
+                penalty_basis_points: config.risk_penalties.for_risk(risk),
+            })
+            .collect::<Vec<_>>();
         Self {
             signals: signals
                 .into_iter()
@@ -1544,17 +1796,17 @@ impl ScoreContributionsResponse {
                 })
                 .collect(),
             base_score_basis_points: route.base_score,
-            risks: route
-                .quality
-                .risk_factors
+            penalty_categories: penalty_categories(&risks),
+            total_penalty_uncapped_basis_points: risks
                 .iter()
-                .map(|risk| RiskPenaltyResponse {
-                    code: risk.reason_code(),
-                    penalty_basis_points: config.risk_penalties.for_risk(risk),
-                })
-                .collect(),
+                .map(|risk| u32::from(risk.penalty_basis_points))
+                .sum(),
+            penalty_cap_basis_points: PENALTY_CAP_BASIS_POINTS,
+            risks,
             risk_penalty_basis_points: route.risk_penalty,
+            score_saturated_at_zero: route.risk_penalty > route.base_score,
             score_basis_points: route.score,
+            formula: "score = max(0, base_score - min(sum(penalties), 10000)); base_score = floor(sum(signal_bp * weight_percent) / 100)",
         }
     }
 }
@@ -1611,6 +1863,9 @@ impl EvaluatedRouteResponse {
             score_contributions: ScoreContributionsResponse::from_ranked(route),
             fedimint_metrics: None,
             liquidity_evidence: None,
+            reliability_evidence: None,
+            cashu_metrics: None,
+            evidence_items: Vec::new(),
         }
     }
 }

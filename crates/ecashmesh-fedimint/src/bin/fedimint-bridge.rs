@@ -5,7 +5,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, ensure};
@@ -73,7 +73,22 @@ struct RegtestClient {
     cli: PathBuf,
     // `fedimint-cli` holds the client's exclusive RocksDB lock while running.
     lock: Mutex<()>,
+    /// Regtest guardian API password for the read-only `admin audit`. Passed to
+    /// `fedimint-cli` through its environment, never as an argument.
+    guardian_password: Option<String>,
+    audit: Mutex<Option<(Instant, Value)>>,
+    audit_refreshing: std::sync::atomic::AtomicBool,
 }
+
+/// Guardian audits are consensus state; re-query at most this often.
+const GUARDIAN_AUDIT_TTL: Duration = Duration::from_secs(15);
+/// One guardian's audit normally answers in ~0.25 s; an unresponsive guardian
+/// is recorded as unavailable rather than delaying the others.
+const GUARDIAN_AUDIT_TIMEOUT: Duration = Duration::from_millis(1_500);
+/// A cached audit is served while refreshing only if it is still well inside
+/// the consumer's 120 s solvency freshness window; older ones are refreshed
+/// inline so an idle bridge never hands out stale solvency.
+const GUARDIAN_AUDIT_SERVE_STALE: Duration = Duration::from_secs(90);
 
 const LNV2_GATEWAY_LIST_TIMEOUT: Duration = Duration::from_millis(750);
 const LNV2_GATEWAY_PROBE_BUDGET: Duration = Duration::from_millis(1_500);
@@ -210,6 +225,9 @@ fn load_regtest_clients() -> anyhow::Result<HashMap<FederationId, RegtestClient>
     ensure!(cli.is_file(), "ECASHMESH_LAB_FEDIMINT_CLI does not exist");
     let names: HashMap<String, String> =
         serde_json::from_str(&mapping).context("invalid regtest client mapping")?;
+    let guardian_password = env::var("ECASHMESH_LAB_GUARDIAN_PASSWORD")
+        .ok()
+        .filter(|password| !password.is_empty());
     let mut clients = HashMap::new();
     for (federation, name) in names {
         let id = federation
@@ -231,6 +249,9 @@ fn load_regtest_clients() -> anyhow::Result<HashMap<FederationId, RegtestClient>
                 data_dir,
                 cli: cli.clone(),
                 lock: Mutex::new(()),
+                guardian_password: guardian_password.clone(),
+                audit: Mutex::new(None),
+                audit_refreshing: std::sync::atomic::AtomicBool::new(false),
             },
         );
     }
@@ -243,12 +264,30 @@ fn valid_regtest_client_name(name: &str) -> bool {
 
 /// Runs one read-only or non-committing `fedimint-cli` command.
 async fn regtest_cli(client: &RegtestClient, args: &[&str]) -> anyhow::Result<Value> {
+    regtest_cli_with_env(client, args, &[]).await
+}
+
+async fn regtest_cli_with_env(
+    client: &RegtestClient,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> anyhow::Result<Value> {
+    regtest_cli_bounded(client, args, envs, REGTEST_CLI_TIMEOUT).await
+}
+
+async fn regtest_cli_bounded(
+    client: &RegtestClient,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    timeout: Duration,
+) -> anyhow::Result<Value> {
     let _guard = client.lock.lock().await;
     let output = tokio::time::timeout(
-        REGTEST_CLI_TIMEOUT,
+        timeout,
         tokio::process::Command::new(&client.cli)
             .arg(format!("--data-dir={}", client.data_dir.display()))
             .args(args)
+            .envs(envs.iter().copied())
             .kill_on_drop(true)
             .output(),
     )
@@ -265,6 +304,164 @@ async fn regtest_cli(client: &RegtestClient, args: &[&str]) -> anyhow::Result<Va
         anyhow::bail!("fedimint-cli {} failed: {stderr}", args.join(" "));
     }
     serde_json::from_slice(&output.stdout).context("invalid fedimint-cli output")
+}
+
+/// One guardian's `admin audit`: module net assets in msat. Negative module
+/// balances are federation liabilities (outstanding ecash, open contracts);
+/// positive ones are assets (on-chain wallet, funded contracts).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GuardianAudit {
+    liabilities_msat: u64,
+    assets_msat: u64,
+    net_assets_msat: i64,
+    modules: Vec<(String, i64)>,
+}
+
+fn parse_guardian_audit(value: &Value) -> anyhow::Result<GuardianAudit> {
+    let summaries = value
+        .get("module_summaries")
+        .and_then(Value::as_object)
+        .context("audit has no module summaries")?;
+    let mut modules = Vec::new();
+    let (mut liabilities, mut assets) = (0_u64, 0_u64);
+    for summary in summaries.values() {
+        let kind = summary["kind"].as_str().context("audit module kind")?;
+        let net = summary["net_assets"]
+            .as_i64()
+            .context("audit module net assets")?;
+        if net < 0 {
+            liabilities = liabilities.saturating_add(net.unsigned_abs());
+        } else {
+            assets = assets.saturating_add(net.unsigned_abs());
+        }
+        modules.push((kind.to_owned(), net));
+    }
+    modules.sort();
+    let net_assets_msat = value["net_assets"].as_i64().context("audit net assets")?;
+    ensure!(
+        i128::from(assets) - i128::from(liabilities) == i128::from(net_assets_msat),
+        "audit module totals do not match its net assets"
+    );
+    Ok(GuardianAudit {
+        liabilities_msat: liabilities,
+        assets_msat: assets,
+        net_assets_msat,
+        modules,
+    })
+}
+
+/// Combines per-guardian audits. A value is accepted only when at least a
+/// consensus threshold of guardians returned exactly the same audit; any other
+/// differing response is recorded as a disagreement.
+fn aggregate_guardian_audits(
+    guardian_count: usize,
+    results: &[(String, Result<GuardianAudit, String>)],
+    observed_at: u64,
+) -> Value {
+    let threshold = guardian_count - guardian_count.saturating_sub(1) / 3;
+    let responses = results
+        .iter()
+        .filter_map(|(_, result)| result.as_ref().ok())
+        .collect::<Vec<_>>();
+    let mut groups: Vec<(&GuardianAudit, usize)> = Vec::new();
+    for audit in &responses {
+        if let Some(group) = groups.iter_mut().find(|(value, _)| value == audit) {
+            group.1 += 1;
+        } else {
+            groups.push((audit, 1));
+        }
+    }
+    groups.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let agreeing = groups.first().map_or(0, |(_, count)| *count);
+    let disagreeing = responses.len() - agreeing;
+    let agreed = groups
+        .first()
+        .filter(|(_, count)| *count >= threshold)
+        .map(|(audit, _)| *audit);
+    let state = match (agreed, disagreeing) {
+        (Some(_), 0) => "agreed",
+        (Some(_), _) => "agreed_with_dissent",
+        (None, 0) => "insufficient_responses",
+        (None, _) => "conflicting",
+    };
+    json!({
+        "source": "guardian_admin_audit",
+        "state": state,
+        "guardian_count": guardian_count,
+        "threshold": threshold,
+        "queried": results.len(),
+        "responded": responses.len(),
+        "agreeing": agreeing,
+        "disagreeing": disagreeing,
+        "liabilities_msat": agreed.map(|audit| audit.liabilities_msat),
+        "assets_msat": agreed.map(|audit| audit.assets_msat),
+        "net_assets_msat": agreed.map(|audit| audit.net_assets_msat),
+        "modules": agreed.map(|audit| audit.modules.iter().map(|(kind, net)| json!({"kind": kind, "net_assets_msat": net})).collect::<Vec<_>>()),
+        "guardians": results.iter().map(|(peer, result)| match result {
+            Ok(audit) => json!({"peer": peer, "status": "responded", "liabilities_msat": audit.liabilities_msat, "assets_msat": audit.assets_msat, "net_assets_msat": audit.net_assets_msat}),
+            Err(error) => json!({"peer": peer, "status": "unavailable", "error": error}),
+        }).collect::<Vec<_>>(),
+        "observed_at_unix_seconds": observed_at,
+    })
+}
+
+/// Regtest lab only: the read-only guardian `admin audit`, queried from every
+/// guardian with the lab's guardian credentials. A cached audit younger than
+/// the TTL is returned as is; one younger than the serve-stale limit is
+/// returned (with its own observed time) while a background refresh runs;
+/// otherwise the audit is refreshed inline.
+async fn regtest_guardian_audit(
+    client: &Arc<BridgeState>,
+    federation_id: FederationId,
+    peers: Vec<String>,
+) -> Option<Value> {
+    let regtest = client.regtest_clients.get(&federation_id)?;
+    regtest.guardian_password.as_deref()?;
+    let cached = regtest.audit.lock().await.clone();
+    match cached {
+        Some((at, audit)) if at.elapsed() < GUARDIAN_AUDIT_TTL => Some(audit),
+        Some((at, audit)) if at.elapsed() < GUARDIAN_AUDIT_SERVE_STALE => {
+            use std::sync::atomic::Ordering;
+            if !regtest.audit_refreshing.swap(true, Ordering::SeqCst) {
+                let bridge = Arc::clone(client);
+                tokio::spawn(async move {
+                    if let Some(regtest) = bridge.regtest_clients.get(&federation_id) {
+                        refresh_guardian_audit(regtest, &peers).await;
+                        regtest.audit_refreshing.store(false, Ordering::SeqCst);
+                    }
+                });
+            }
+            Some(audit)
+        }
+        _ => Some(refresh_guardian_audit(regtest, &peers).await),
+    }
+}
+
+async fn refresh_guardian_audit(client: &RegtestClient, peers: &[String]) -> Value {
+    let password = client.guardian_password.as_deref().unwrap_or_default();
+    let mut results = Vec::with_capacity(peers.len());
+    for peer_id in peers {
+        let result = regtest_cli_bounded(
+            client,
+            &["admin", "audit"],
+            &[("FM_OUR_ID", peer_id), ("FM_PASSWORD_API", password)],
+            GUARDIAN_AUDIT_TIMEOUT,
+        )
+        .await
+        .and_then(|value| parse_guardian_audit(&value))
+        // Errors never contain the password; keep only the first line.
+        .map_err(|error| {
+            format!("{error:#}")
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        });
+        results.push((peer_id.clone(), result));
+    }
+    let audit = aggregate_guardian_audits(peers.len(), &results, now_unix());
+    *client.audit.lock().await = Some((Instant::now(), audit.clone()));
+    audit
 }
 
 /// The mapped lab wallet's own ecash balance, bound to the expected federation.
@@ -904,8 +1101,21 @@ async fn info(State(b): State<Arc<BridgeState>>, h: HeaderMap) -> HttpResult<Jso
         futures::future::join_all(clients.into_iter().map(|(federation_id, entry, client)| {
             let b = &b;
             async move {
-                let (balance, reserve) =
-                    tokio::join!(b.balance_msats(federation_id, &client), b.reserve(&client));
+                let peers = client
+                    .config()
+                    .await
+                    .global
+                    .api_endpoints
+                    .keys()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                let audit = regtest_guardian_audit(b, federation_id, peers);
+                let (balance, mut reserve, audit) = tokio::join!(
+                    b.balance_msats(federation_id, &client),
+                    b.reserve(&client),
+                    audit
+                );
+                reserve["guardian_audit"] = audit.unwrap_or(Value::Null);
                 let (balance, balance_source) = match balance {
                     Ok((balance, source)) => (Some(balance), Some(source)),
                     Err(error) => {
@@ -1578,6 +1788,100 @@ mod tests {
         assert!(valid_regtest_client_name("fed-D-0"));
         assert!(!valid_regtest_client_name("fed-A"));
         assert!(!valid_regtest_client_name("../../wallet"));
+    }
+
+    #[test]
+    fn guardian_audits_require_a_threshold_and_record_disagreement() {
+        let audit = |liabilities: i64, assets: i64| {
+            parse_guardian_audit(&json!({
+                "module_summaries": {
+                    "0": {"kind": "lnv2", "net_assets": 0},
+                    "2": {"kind": "mintv2", "net_assets": -liabilities},
+                    "4": {"kind": "walletv2", "net_assets": assets},
+                },
+                "net_assets": assets - liabilities,
+            }))
+        };
+        let good = audit(39_262_208, 39_784_000).unwrap();
+        assert_eq!(good.liabilities_msat, 39_262_208);
+        assert_eq!(good.assets_msat, 39_784_000);
+        assert_eq!(good.net_assets_msat, 521_792);
+        // Totals that do not add up are not an audit.
+        assert!(
+            parse_guardian_audit(&json!({"module_summaries": {"2": {"kind": "mintv2", "net_assets": -5}}, "net_assets": 0}))
+                .is_err()
+        );
+        let other = audit(39_262_208, 30_000_000).unwrap();
+        let peer = |id: &str, result: Result<GuardianAudit, String>| (id.to_owned(), result);
+        let all = [
+            peer("0", Ok(good.clone())),
+            peer("1", Ok(good.clone())),
+            peer("2", Ok(good.clone())),
+            peer("3", Ok(good.clone())),
+        ];
+        let agreed = aggregate_guardian_audits(4, &all, 1);
+        assert_eq!(agreed["state"], "agreed");
+        assert_eq!(agreed["threshold"], 3);
+        assert_eq!(agreed["agreeing"], 4);
+        assert_eq!(agreed["liabilities_msat"], 39_262_208);
+
+        let dissent = aggregate_guardian_audits(
+            4,
+            &[
+                peer("0", Ok(good.clone())),
+                peer("1", Ok(good.clone())),
+                peer("2", Ok(good.clone())),
+                peer("3", Ok(other.clone())),
+            ],
+            1,
+        );
+        assert_eq!(dissent["state"], "agreed_with_dissent");
+        assert_eq!(
+            (
+                dissent["agreeing"].as_u64(),
+                dissent["disagreeing"].as_u64()
+            ),
+            (Some(3), Some(1))
+        );
+
+        let unavailable = aggregate_guardian_audits(
+            4,
+            &[
+                peer("0", Ok(good.clone())),
+                peer("1", Ok(good.clone())),
+                peer("2", Ok(good.clone())),
+                peer("3", Err("timed out".into())),
+            ],
+            1,
+        );
+        assert_eq!(unavailable["state"], "agreed");
+        assert_eq!(unavailable["responded"], 3);
+
+        let conflicting = aggregate_guardian_audits(
+            4,
+            &[
+                peer("0", Ok(good.clone())),
+                peer("1", Ok(good)),
+                peer("2", Ok(other.clone())),
+                peer("3", Ok(other)),
+            ],
+            1,
+        );
+        assert_eq!(conflicting["state"], "conflicting");
+        assert!(conflicting["liabilities_msat"].is_null());
+
+        let too_few = aggregate_guardian_audits(
+            4,
+            &[
+                peer("0", Ok(audit(1, 2).unwrap())),
+                peer("1", Ok(audit(1, 2).unwrap())),
+                peer("2", Err("down".into())),
+                peer("3", Err("down".into())),
+            ],
+            1,
+        );
+        assert_eq!(too_few["state"], "insufficient_responses");
+        assert!(too_few["assets_msat"].is_null());
     }
 
     #[test]

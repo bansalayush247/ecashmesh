@@ -210,6 +210,50 @@ impl MockMint {
                     }
                     body = evidence.to_string();
                 }
+                if first == "GET /v2/admin/info HTTP/1.1" && mode.starts_with("fed_audit_") {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let (state, agreeing, liabilities, assets) = match mode {
+                        "fed_audit_agreed" => ("agreed", 4, json!(39_262_208), json!(39_784_000)),
+                        "fed_audit_dissent" => (
+                            "agreed_with_dissent",
+                            3,
+                            json!(39_262_208),
+                            json!(39_784_000),
+                        ),
+                        "fed_audit_undercovered" => {
+                            ("agreed", 4, json!(40_000_000), json!(30_000_000))
+                        }
+                        _ => ("conflicting", 2, json!(null), json!(null)),
+                    };
+                    let net = liabilities
+                        .as_i64()
+                        .zip(assets.as_i64())
+                        .map(|(l, a)| a - l);
+                    let audit = (mode != "fed_audit_none").then(|| {
+                        json!({
+                            "source": "guardian_admin_audit", "state": state, "guardian_count": 4,
+                            "threshold": 3, "queried": 4, "responded": 4, "agreeing": agreeing,
+                            "disagreeing": 4 - agreeing, "liabilities_msat": liabilities,
+                            "assets_msat": assets, "net_assets_msat": net, "guardians": [],
+                            "observed_at_unix_seconds": now,
+                        })
+                    });
+                    body = json!({
+                        "network": "bitcoin",
+                        "config": {"global": {"api_endpoints": {"0": {}, "1": {}, "2": {}, "3": {}},
+                            "consensus_version": {"major": 2, "minor": 1}},
+                            "modules": {"0": {"kind": "lnv2"}, "2": {"kind": "mintv2"}, "4": {"kind": "walletv2"}}},
+                        "reserve": {
+                            "source": "walletv2_consensus", "reserve_sats": 39_784, "pending_pegout_sats": 0,
+                            "pending_change_sats": 0, "pending_transaction_count": 0,
+                            "guardian_audit": audit,
+                        },
+                    })
+                    .to_string();
+                }
                 if first.contains("/directory ") {
                     body = json!([{"url":directory_url}]).to_string();
                 }

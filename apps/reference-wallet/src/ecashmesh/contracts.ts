@@ -59,8 +59,53 @@ const fedimintGatewayMetricsSchema = z
     liquidity_status: z.string(),
   })
   .passthrough();
+const guardianAuditSchema = z
+  .object({
+    state: z.string(),
+    guardian_count: unsigned,
+    threshold: unsigned,
+    queried: unsigned,
+    responded: unsigned,
+    agreeing: unsigned,
+    disagreeing: unsigned,
+  })
+  .passthrough();
+const federationHealthSchema = z
+  .object({
+    status: z.string(),
+    bridge_reachable: z.boolean(),
+    consensus_reachable: z.boolean().nullable(),
+    guardian_count: unsigned.nullable(),
+    guardians_responding: unsigned.nullable(),
+    network: z.string().nullable(),
+    consensus_version: z.string().nullable(),
+    modules: z.array(z.string()),
+  })
+  .passthrough();
+const gatewayHealthSchema = z
+  .object({
+    status: z.string(),
+    registered: z.boolean().nullable(),
+    protocol: z.string().nullable(),
+    quote_verified: z.boolean(),
+    routing_available: z.boolean().nullable(),
+    reachable: z.boolean().nullable(),
+    node_state: z.string().nullable(),
+    active: z.boolean().nullable(),
+    channel_count: unsigned.nullable(),
+    active_channel_count: unsigned.nullable(),
+    outbound_liquidity_sats: unsigned.nullable(),
+    inbound_liquidity_sats: unsigned.nullable(),
+    liquidity_status: z.string(),
+    freshness: z.string().nullable(),
+  })
+  .passthrough();
 const fedimintMetricsSchema = z
   .object({
+    amount_msat: unsigned.nullable().optional(),
+    federation_fee_msat: unsigned.nullable().optional(),
+    gateway_fee_msat: unsigned.nullable().optional(),
+    total_fee_msat: unsigned.nullable().optional(),
     wallet_balance_sats: unsigned.nullable(),
     balance_source: z.string().nullable(),
     required_balance_sats: unsigned.nullable(),
@@ -76,25 +121,27 @@ const fedimintMetricsSchema = z
         pending_change_sats: unsigned.nullable(),
         pending_transaction_count: unsigned.nullable(),
         liabilities_sats: unsigned.nullable(),
+        liabilities_msat: unsigned.nullable().optional(),
+        assets_msat: unsigned.nullable().optional(),
+        net_assets_msat: z.number().int().nullable().optional(),
         coverage_ratio: z.number().nullable(),
+        covered: z.boolean().nullable().optional(),
         solvency_status: z.string(),
         confidence: z.string(),
         source: z.string().nullable(),
+        solvency_source: z.string().nullable().optional(),
+        guardian_audit: guardianAuditSchema.nullable().optional(),
+        observed_at_unix_seconds: unsigned.nullable().optional(),
       })
       .passthrough(),
-    reliability: z
-      .object({
-        successful_payments: unsigned.nullable(),
-        failed_payments: unsigned.nullable(),
-        success_rate_basis_points: unsigned.nullable(),
-        confidence: z.string(),
-      })
-      .passthrough(),
+    federation_health: federationHealthSchema.nullable().optional(),
+    gateway_health: gatewayHealthSchema.nullable().optional(),
+    reliability: z.object({}).passthrough(),
     observed_at_unix_seconds: unsigned,
   })
   .passthrough();
 export type FedimintMetrics = z.infer<typeof fedimintMetricsSchema>;
-// Exact ranker inputs: score = base_score - risk_penalty (floored at zero).
+// Exact ranker inputs: score = max(0, base_score - min(sum(penalties), 10000)).
 const scoreContributionsSchema = z
   .object({
     signals: z.array(
@@ -110,18 +157,38 @@ const scoreContributionsSchema = z
     base_score_basis_points: z.number().int().min(0).max(10000),
     risks: z.array(
       z
-        .object({ code: z.string(), penalty_basis_points: unsigned })
+        .object({
+          code: z.string(),
+          level: z.string().optional(),
+          field: z.string().nullable().optional(),
+          penalty_basis_points: unsigned,
+        })
         .passthrough(),
     ),
+    penalty_categories: z
+      .array(
+        z
+          .object({
+            category: z.string(),
+            count: unsigned,
+            penalty_basis_points: unsigned,
+            note: z.string().nullable(),
+          })
+          .passthrough(),
+      )
+      .optional(),
+    total_penalty_uncapped_basis_points: unsigned.optional(),
+    penalty_cap_basis_points: unsigned.optional(),
     risk_penalty_basis_points: z.number().int().min(0).max(10000),
+    score_saturated_at_zero: z.boolean().optional(),
     score_basis_points: z.number().int().min(0).max(10000),
+    formula: z.string().optional(),
   })
   .passthrough();
 export type ScoreContributions = z.infer<typeof scoreContributionsSchema>;
 // Regtest-lab, amount-specific Lightning liquidity evidence (no credentials).
-const liquidityEvidenceSchema = z
+const probeSchema = z
   .object({
-    evidence_source: z.enum(["lightning_probe", "gateway_channel_state"]),
     node: z.string(),
     probed_amount_sats: unsigned,
     outcome: z.enum([
@@ -132,15 +199,114 @@ const liquidityEvidenceSchema = z
     ]),
     failure_reason: z.string().nullable(),
     reached_destination: z.boolean().nullable(),
-    total_outbound_sats: unsigned.nullable(),
+    routing_fee_msat: unsigned.nullable(),
     confidence: z.string(),
     observed_at_unix_seconds: unsigned,
     expires_at_unix_seconds: unsigned,
+    reused_from_cache: z.boolean(),
     freshness: z.string(),
+    effect: z.string(),
+  })
+  .passthrough();
+const channelStateSchema = z
+  .object({
+    method: z.enum(["gateway_channel_state", "lnd_channel_state"]),
+    node: z.string(),
+    reachable: z.boolean(),
+    node_state: z.string().nullable(),
+    channel_count: unsigned,
+    active_channel_count: unsigned,
+    outbound_sats: unsigned,
+    inbound_sats: unsigned,
+    payee_direct_outbound_sats: unsigned.nullable(),
+    error: z.string().nullable(),
+    observed_at_unix_seconds: unsigned,
+    expires_at_unix_seconds: unsigned,
+    reused_from_cache: z.boolean(),
+    freshness: z.string(),
+    effect: z.string(),
+  })
+  .passthrough();
+const liquidityEvidenceSchema = z
+  .object({
+    basis: z.enum(["active_probe", "channel_state", "unknown"]),
     applied_to_ranking: z.boolean(),
+    confidence: z.string().nullable(),
+    observed_at_unix_seconds: unsigned.nullable(),
+    amount_sats: unsigned,
+    freshness: z.string(),
+    effect: z.string(),
+    probe: probeSchema.nullable(),
+    channel_state: channelStateSchema.nullable(),
   })
   .passthrough();
 export type LiquidityEvidence = z.infer<typeof liquidityEvidenceSchema>;
+// Real regtest payment outcomes; probes and quotes never count.
+const reliabilityEvidenceSchema = z
+  .object({
+    window_seconds: unsigned,
+    attempts: unsigned,
+    counted_attempts: unsigned,
+    successful_payments: unsigned,
+    failed_payments: unsigned,
+    liquidity_failures: unsigned,
+    infrastructure_failures: unsigned,
+    funding_failures_excluded: unsigned,
+    success_rate_basis_points: unsigned.nullable(),
+    recent_success_rate_basis_points: unsigned.nullable(),
+    recent_outcomes: z.array(z.string()),
+    consecutive_failures: unsigned,
+    last_success_at_unix_seconds: unsigned.nullable(),
+    last_failure_at_unix_seconds: unsigned.nullable(),
+    last_failure_reason: z.string().nullable(),
+    first_observed_at_unix_seconds: unsigned.nullable(),
+    observed_at_unix_seconds: unsigned.nullable(),
+    freshness: z.string(),
+    confidence: z.string(),
+  })
+  .passthrough();
+export type ReliabilityEvidence = z.infer<typeof reliabilityEvidenceSchema>;
+const cashuMetricsSchema = z
+  .object({
+    mint_health: z.string().nullable(),
+    endpoints_reachable: z.boolean().nullable(),
+    quote_available: z.boolean(),
+    melt_fee_reserve_sats: unsigned.nullable(),
+    melt_quote_expires_at_unix_seconds: unsigned.nullable(),
+    keyset_count: unsigned.nullable(),
+    denomination_count: unsigned.nullable(),
+    input_fees_ppk: z
+      .array(
+        z
+          .object({ keyset_id: z.string(), input_fee_ppk: unsigned })
+          .passthrough(),
+      )
+      .nullable(),
+    solvency_status: z.string(),
+    solvency_limitation: z.string(),
+  })
+  .passthrough();
+export type CashuMetrics = z.infer<typeof cashuMetricsSchema>;
+const evidenceItemSchema = z
+  .object({
+    parameter: z.string(),
+    value: z.unknown(),
+    classification: z.enum([
+      "authoritative",
+      "measured",
+      "inferred",
+      "unknown",
+    ]),
+    source: z.string(),
+    observed_at_unix_seconds: unsigned.nullable(),
+    expires_at_unix_seconds: unsigned.nullable(),
+    freshness: z.string(),
+    confidence: z.string().nullable(),
+    ranking_signal: z.string().nullable(),
+    limitation: z.string().nullable(),
+  })
+  .passthrough();
+export type EvidenceItem = z.infer<typeof evidenceItemSchema>;
 /** A custody/payment source evaluated for one normalized payment target. */
 export const paymentSourceSchema = z
   .object({
@@ -184,6 +350,9 @@ export const paymentSourceSchema = z
     score_contributions: scoreContributionsSchema.optional(),
     fedimint_metrics: fedimintMetricsSchema.optional(),
     liquidity_evidence: liquidityEvidenceSchema.optional(),
+    reliability_evidence: reliabilityEvidenceSchema.optional(),
+    cashu_metrics: cashuMetricsSchema.optional(),
+    evidence_items: z.array(evidenceItemSchema).optional(),
   })
   .passthrough();
 // Compatibility export for integrations that still import the old type name.

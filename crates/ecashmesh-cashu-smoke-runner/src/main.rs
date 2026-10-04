@@ -248,21 +248,32 @@ async fn cross_mint(
     }))
 }
 
-async fn create_quote(index: &str, mint_url: &str, wallet_path: PathBuf) -> Result<Value> {
+async fn create_quote(
+    index: &str,
+    mint_url: &str,
+    wallet_path: PathBuf,
+    amount_sat: u64,
+) -> Result<Value> {
     let wallet = wallet(mint_url, wallet_path).await?;
     let before = wallet.total_balance().await?;
     let quote = wallet
         .mint_quote(
             PaymentMethod::BOLT11,
-            Some(Amount::from(MELT_AMOUNT_SAT)),
+            Some(Amount::from(amount_sat)),
             None,
             None,
         )
         .await
         .context("creating real destination mint quote")?;
     Ok(
-        json!({"mint":index,"quote_id":quote.id,"invoice":quote.request,"amount_sat":MELT_AMOUNT_SAT,"balance_before_sat":before.to_string()}),
+        json!({"mint":index,"quote_id":quote.id,"invoice":quote.request,"amount_sat":amount_sat,"balance_before_sat":before.to_string()}),
     )
+}
+
+async fn balance(index: &str, mint_url: &str, wallet_path: PathBuf) -> Result<Value> {
+    let wallet = wallet(mint_url, wallet_path).await?;
+    let balance = wallet.total_balance().await?;
+    Ok(json!({"mint":index,"balance_sat":balance.to_string()}))
 }
 
 async fn claim_quote(
@@ -347,7 +358,19 @@ async fn main() -> Result<()> {
             let index = args.next().context("mint index is required")?;
             let url = args.next().context("mint URL is required")?;
             let wallet_path = PathBuf::from(args.next().context("wallet path is required")?);
-            create_quote(&index, &url, wallet_path).await?
+            let amount = args
+                .next()
+                .map(|amount| amount.parse::<u64>())
+                .transpose()
+                .context("quote amount must be whole sats")?
+                .unwrap_or(MELT_AMOUNT_SAT);
+            create_quote(&index, &url, wallet_path, amount).await?
+        }
+        "balance" => {
+            let index = args.next().context("mint index is required")?;
+            let url = args.next().context("mint URL is required")?;
+            let wallet_path = PathBuf::from(args.next().context("wallet path is required")?);
+            balance(&index, &url, wallet_path).await?
         }
         "claim" => {
             let index = args.next().context("mint index is required")?;

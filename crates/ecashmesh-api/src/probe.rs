@@ -9,6 +9,11 @@
 //! LND's `EstimateRouteFee` with a payment request sends a non-settling probe
 //! payment: an HTLC with a random payment hash, which the destination cannot
 //! settle and must fail. The probed amount is briefly in flight on the route.
+//!
+//! Channel state (gateway `/list_channels`, LND `/v1/channels`) is a separate
+//! kind of evidence: authoritative local balances. It can prove insufficiency
+//! (active outbound below the amount) and, only for a direct active channel to
+//! the invoice payee, sufficiency at medium confidence. It is never a probe.
 
 use std::{collections::BTreeMap, env, fmt::Write as _, fs, time::Duration};
 
@@ -47,9 +52,136 @@ pub(crate) enum ProbeOutcome {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProbeMethod {
     LightningProbe,
-    /// Authoritative channel balances, used where no probe API exists. Only
-    /// ever concludes "insufficient"; balances alone never prove a route.
+}
+
+/// Where channel-state evidence was read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ChannelStateMethod {
+    /// Fedimint gateway admin API `/list_channels` + `/info`.
     GatewayChannelState,
+    /// LND `/v1/channels` + `/v1/getinfo` (readonly macaroon).
+    LndChannelState,
+}
+
+/// One channel peer, as reported by the source's own node.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct ChannelPeer {
+    pub remote_pubkey: String,
+    pub active: bool,
+    pub capacity_sats: Option<u64>,
+    pub outbound_sats: u64,
+    pub inbound_sats: u64,
+}
+
+/// Authoritative channel balances of a source's own Lightning node. Contains no
+/// credentials.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ChannelState {
+    pub source_id: String,
+    pub method: ChannelStateMethod,
+    pub node: String,
+    pub node_pubkey: Option<String>,
+    /// The node answered the channel listing.
+    pub reachable: bool,
+    /// Gateway state (`Running`) or LND sync state.
+    pub node_state: Option<String>,
+    pub synced_to_chain: Option<bool>,
+    pub network: Option<String>,
+    pub channel_count: u64,
+    pub active_channel_count: u64,
+    /// Spendable outbound over active channels (reserve excluded).
+    pub outbound_sats: u64,
+    /// Receivable inbound over active channels (remote reserve excluded).
+    pub inbound_sats: u64,
+    pub payee_pubkey: Option<String>,
+    /// Largest spendable outbound on an active channel directly to the payee.
+    pub payee_direct_outbound_sats: Option<u64>,
+    pub peers: Vec<ChannelPeer>,
+    pub error: Option<String>,
+    pub observed_at_unix_seconds: u64,
+    pub expires_at_unix_seconds: u64,
+    /// The latest read failed; this is the last good observation (stale once
+    /// older than the fresh window, discarded after retention).
+    pub reused_from_cache: bool,
+    pub regtest_lab: bool,
+}
+
+impl ChannelState {
+    fn new(source_id: &str, method: ChannelStateMethod, node: &str, now: u64) -> Self {
+        Self {
+            source_id: source_id.to_owned(),
+            method,
+            node: node.to_owned(),
+            node_pubkey: None,
+            reachable: false,
+            node_state: None,
+            synced_to_chain: None,
+            network: None,
+            channel_count: 0,
+            active_channel_count: 0,
+            outbound_sats: 0,
+            inbound_sats: 0,
+            payee_pubkey: None,
+            payee_direct_outbound_sats: None,
+            peers: Vec::new(),
+            error: None,
+            observed_at_unix_seconds: now,
+            expires_at_unix_seconds: now.saturating_add(PROBE_FRESH_SECONDS),
+            reused_from_cache: false,
+            regtest_lab: true,
+        }
+    }
+
+    fn unreachable(mut self, error: String) -> Self {
+        self.error = Some(error);
+        self
+    }
+
+    fn with_peers(mut self, peers: Vec<ChannelPeer>, payee: Option<&str>) -> Self {
+        self.reachable = true;
+        self.channel_count = peers.len() as u64;
+        let active = peers.iter().filter(|peer| peer.active).collect::<Vec<_>>();
+        self.active_channel_count = active.len() as u64;
+        self.outbound_sats = active.iter().map(|peer| peer.outbound_sats).sum();
+        self.inbound_sats = active.iter().map(|peer| peer.inbound_sats).sum();
+        self.payee_pubkey = payee.map(ToOwned::to_owned);
+        self.payee_direct_outbound_sats = payee.and_then(|payee| {
+            active
+                .iter()
+                .filter(|peer| peer.remote_pubkey == payee)
+                .map(|peer| peer.outbound_sats)
+                .max()
+        });
+        self.peers = peers;
+        self
+    }
+
+    pub(crate) fn freshness(&self, now: u64) -> &'static str {
+        freshness(self.observed_at_unix_seconds, now)
+    }
+
+    /// Re-targets cached balances at another payee; balances do not depend on
+    /// the amount, so only the payee-specific field changes.
+    fn for_payee(&self, payee: Option<&str>) -> Self {
+        let peers = self.peers.clone();
+        let mut state = self.clone();
+        if self.reachable {
+            state = state.with_peers(peers, payee);
+        }
+        state
+    }
+}
+
+fn freshness(observed_at: u64, now: u64) -> &'static str {
+    let age = now.saturating_sub(observed_at);
+    if age <= PROBE_FRESH_SECONDS {
+        "fresh"
+    } else if age <= PROBE_RETENTION_SECONDS {
+        "stale"
+    } else {
+        "expired"
+    }
 }
 
 /// Structured evidence returned to the API and UI. Contains no credentials.
@@ -67,8 +199,6 @@ pub(crate) struct LiquidityEvidence {
     /// `false` when LND could only probe up to a route-hint hop.
     pub reached_destination: Option<bool>,
     pub routing_fee_msat: Option<u64>,
-    pub total_outbound_sats: Option<u64>,
-    pub active_channel_count: Option<u64>,
     pub confidence: &'static str,
     pub observed_at_unix_seconds: u64,
     pub expires_at_unix_seconds: u64,
@@ -94,8 +224,6 @@ impl LiquidityEvidence {
             failure_reason: None,
             reached_destination: None,
             routing_fee_msat: None,
-            total_outbound_sats: None,
-            active_channel_count: None,
             confidence: "none",
             observed_at_unix_seconds: now,
             expires_at_unix_seconds: now.saturating_add(PROBE_FRESH_SECONDS),
@@ -112,14 +240,7 @@ impl LiquidityEvidence {
     }
 
     pub(crate) fn freshness(&self, now: u64) -> &'static str {
-        let age = now.saturating_sub(self.observed_at_unix_seconds);
-        if age <= PROBE_FRESH_SECONDS {
-            "fresh"
-        } else if age <= PROBE_RETENTION_SECONDS {
-            "stale"
-        } else {
-            "expired"
-        }
+        freshness(self.observed_at_unix_seconds, now)
     }
 
     /// Whether this cached observation answers a new request. Payee-dependent
@@ -137,8 +258,6 @@ impl LiquidityEvidence {
             (ProbeMethod::LightningProbe, ProbeOutcome::NoRoute) => {
                 same_invoice && amount >= self.probed_amount_sats
             }
-            // Channel totals are re-evaluated for the new amount.
-            (ProbeMethod::GatewayChannelState, _) => self.total_outbound_sats.is_some(),
             (_, ProbeOutcome::Unknown) => false,
         }
     }
@@ -155,7 +274,7 @@ pub(crate) enum ProbeEffect {
     Keep,
 }
 
-/// Maps evidence to the ranker's existing liquidity evidence model.
+/// Maps probe evidence to the ranker's existing liquidity evidence model.
 ///
 /// A routable probe supports exactly the probed amount (`maximum` unknown).
 /// Its confidence becomes the 0–10000 liquidity signal through the ranker's
@@ -172,13 +291,13 @@ pub(crate) fn effect(evidence: &LiquidityEvidence, amount: Amount, now: u64) -> 
             } else {
                 ConfidenceLevel::Medium
             };
-            let value = LiquidityInfo::new(Amount::from_sats(evidence.probed_amount_sats), None);
-            let observed = EvidenceTimestamp::from_unix_seconds(evidence.observed_at_unix_seconds);
-            ProbeEffect::Liquidity(if freshness == "fresh" {
-                Evidence::reported(value, EvidenceSource::Observer, observed, confidence)
-            } else {
-                Evidence::reported_stale(value, EvidenceSource::Observer, observed, confidence)
-            })
+            ProbeEffect::Liquidity(liquidity(
+                evidence.probed_amount_sats,
+                EvidenceSource::Observer,
+                evidence.observed_at_unix_seconds,
+                confidence,
+                freshness,
+            ))
         }
         // Exclusion needs current evidence; stale "insufficient" may be outdated.
         ProbeOutcome::InsufficientLiquidity | ProbeOutcome::NoRoute
@@ -190,16 +309,100 @@ pub(crate) fn effect(evidence: &LiquidityEvidence, amount: Amount, now: u64) -> 
     }
 }
 
+fn liquidity(
+    amount_sats: u64,
+    source: EvidenceSource,
+    observed_at: u64,
+    confidence: ConfidenceLevel,
+    freshness: &str,
+) -> Evidence<LiquidityInfo> {
+    let value = LiquidityInfo::new(Amount::from_sats(amount_sats), None);
+    let observed = EvidenceTimestamp::from_unix_seconds(observed_at);
+    if freshness == "fresh" {
+        Evidence::reported(value, source, observed, confidence)
+    } else {
+        Evidence::reported_stale(value, source, observed, confidence)
+    }
+}
+
+/// Maps channel state to liquidity evidence.
+///
+/// - Fresh, reachable, active outbound below the amount: excluded. No route
+///   can carry more than the node's total spendable outbound.
+/// - An active channel directly to the payee whose spendable outbound covers
+///   the amount: medium-confidence liquidity for exactly this amount (no hop
+///   in between; HTLC limits are not checked, so never high).
+/// - Anything else (enough balance but no direct channel, unreachable,
+///   expired): no conclusion.
+pub(crate) fn channel_effect(state: &ChannelState, amount: Amount, now: u64) -> ProbeEffect {
+    let freshness = state.freshness(now);
+    if !state.reachable || freshness == "expired" {
+        return ProbeEffect::Keep;
+    }
+    if state.outbound_sats < amount.sats() {
+        return if freshness == "fresh" {
+            ProbeEffect::Exclude(format!(
+                "{} {} has {} sats of active outbound Lightning liquidity ({} active of {} channels); it cannot route {} sats",
+                match state.method {
+                    ChannelStateMethod::GatewayChannelState => "Gateway",
+                    ChannelStateMethod::LndChannelState => "Lightning node",
+                },
+                state.node,
+                state.outbound_sats,
+                state.active_channel_count,
+                state.channel_count,
+                amount.sats()
+            ))
+        } else {
+            ProbeEffect::Keep
+        };
+    }
+    match state.payee_direct_outbound_sats {
+        Some(direct) if direct >= amount.sats() => ProbeEffect::Liquidity(liquidity(
+            amount.sats(),
+            EvidenceSource::Connector,
+            state.observed_at_unix_seconds,
+            ConfidenceLevel::Medium,
+            freshness,
+        )),
+        _ => ProbeEffect::Keep,
+    }
+}
+
+/// Which evidence decided a source's liquidity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LiquidityBasis {
+    ActiveProbe,
+    ChannelState,
+    Unknown,
+}
+
+/// Combines both kinds of evidence. Authoritative channel insufficiency wins;
+/// then a conclusive probe; then direct-channel sufficiency; else unknown.
+pub(crate) fn combined_effect(
+    probe: Option<&LiquidityEvidence>,
+    channels: Option<&ChannelState>,
+    amount: Amount,
+    now: u64,
+) -> (ProbeEffect, LiquidityBasis) {
+    let channel = channels.map(|state| channel_effect(state, amount, now));
+    if let Some(ProbeEffect::Exclude(reason)) = channel {
+        return (ProbeEffect::Exclude(reason), LiquidityBasis::ChannelState);
+    }
+    match probe.map(|probe| effect(probe, amount, now)) {
+        Some(ProbeEffect::Keep) | None => {}
+        Some(conclusive) => return (conclusive, LiquidityBasis::ActiveProbe),
+    }
+    match channel {
+        Some(liquidity @ ProbeEffect::Liquidity(_)) => (liquidity, LiquidityBasis::ChannelState),
+        _ => (ProbeEffect::Keep, LiquidityBasis::Unknown),
+    }
+}
+
 fn exclusion_reason(evidence: &LiquidityEvidence, amount: Amount) -> String {
-    match (evidence.evidence_source, evidence.outcome) {
-        (ProbeMethod::GatewayChannelState, _) => format!(
-            "Gateway {} has {} sats of active outbound Lightning liquidity ({} active channels); it cannot route {} sats",
-            evidence.node,
-            evidence.total_outbound_sats.unwrap_or_default(),
-            evidence.active_channel_count.unwrap_or_default(),
-            amount.sats()
-        ),
-        (_, ProbeOutcome::NoRoute) => format!(
+    match evidence.outcome {
+        ProbeOutcome::NoRoute => format!(
             "Lightning probe from {} found no route for {} sats",
             evidence.node,
             amount.sats()
@@ -224,51 +427,102 @@ pub(crate) fn classify_lnd(reason: &str) -> ProbeOutcome {
     }
 }
 
-/// Channel balances can show insufficiency, never sufficiency.
-pub(crate) fn classify_channels(channels: &[Value], amount: u64) -> (ProbeOutcome, u64, u64) {
-    let active = channels
+/// Gateway `/list_channels` entries (outbound/inbound already exclude reserves).
+pub(crate) fn gateway_peers(channels: &[Value]) -> Vec<ChannelPeer> {
+    channels
         .iter()
-        .filter(|channel| channel["is_active"] == true)
-        .collect::<Vec<_>>();
-    let outbound = active
-        .iter()
-        .filter_map(|channel| channel["outbound_liquidity_sats"].as_u64())
-        .sum::<u64>();
-    let outcome = if outbound < amount {
-        ProbeOutcome::InsufficientLiquidity
-    } else {
-        ProbeOutcome::Unknown
+        .map(|channel| ChannelPeer {
+            remote_pubkey: channel["remote_pubkey"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            active: channel["is_active"] == true,
+            capacity_sats: channel["channel_size_sats"].as_u64(),
+            outbound_sats: channel["outbound_liquidity_sats"]
+                .as_u64()
+                .unwrap_or_default(),
+            inbound_sats: channel["inbound_liquidity_sats"]
+                .as_u64()
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// LND `/v1/channels` entries. Balances are strings; the channel reserve on
+/// each side is not spendable and is subtracted.
+pub(crate) fn lnd_peers(channels: &[Value]) -> Vec<ChannelPeer> {
+    let number = |value: &Value| {
+        value
+            .as_str()
+            .and_then(|text| text.parse::<u64>().ok())
+            .or_else(|| value.as_u64())
+            .unwrap_or_default()
     };
-    (outcome, outbound, active.len() as u64)
+    channels
+        .iter()
+        .map(|channel| ChannelPeer {
+            remote_pubkey: channel["remote_pubkey"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            active: channel["active"] == true,
+            capacity_sats: Some(number(&channel["capacity"])),
+            outbound_sats: number(&channel["local_balance"])
+                .saturating_sub(number(&channel["local_constraints"]["chan_reserve_sat"])),
+            inbound_sats: number(&channel["remote_balance"])
+                .saturating_sub(number(&channel["remote_constraints"]["chan_reserve_sat"])),
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-enum TargetConfig {
-    Lnd {
-        node: String,
-        rest_url: String,
-        tls_cert: String,
-        macaroon: String,
-    },
-    GatewayChannels {
-        node: String,
-        api_url: String,
-    },
+#[serde(deny_unknown_fields)]
+struct LndConfig {
+    node: String,
+    rest_url: String,
+    tls_cert: String,
+    macaroon: String,
 }
 
-enum Target {
-    Lnd {
-        node: String,
-        rest_url: String,
-        macaroon_hex: String,
-        client: reqwest::Client,
-    },
-    GatewayChannels {
-        node: String,
-        api_url: String,
-        client: reqwest::Client,
-    },
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GatewayConfig {
+    node: String,
+    api_url: String,
+}
+
+/// Per source: an LND node to probe from, a gateway whose channels to read,
+/// or both. Channel state comes from the gateway when configured, else LND.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetConfig {
+    lnd: Option<LndConfig>,
+    gateway_channels: Option<GatewayConfig>,
+}
+
+struct Lnd {
+    node: String,
+    rest_url: String,
+    macaroon_hex: String,
+    client: reqwest::Client,
+}
+
+struct Gateway {
+    node: String,
+    api_url: String,
+    client: reqwest::Client,
+}
+
+struct Target {
+    lnd: Option<Lnd>,
+    gateway: Option<Gateway>,
+}
+
+/// Everything known about one source's Lightning liquidity for one request.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SourceLiquidity {
+    pub probe: Option<LiquidityEvidence>,
+    pub channels: Option<ChannelState>,
 }
 
 #[derive(Default)]
@@ -276,6 +530,7 @@ struct ProbeState {
     last_attempt_unix_seconds: Option<u64>,
     last: Option<LiquidityEvidence>,
     last_invoice: Option<String>,
+    channels: Option<ChannelState>,
 }
 
 /// Explicitly mapped, server-side probe origins. Credentials never leave this
@@ -408,20 +663,25 @@ impl LiquidityProbes {
         let mut targets = BTreeMap::new();
         let mut needs_password = false;
         for (source_id, config) in configs {
-            let target = match config {
-                TargetConfig::Lnd {
+            if config.lnd.is_none() && config.gateway_channels.is_none() {
+                return Err(format!(
+                    "{source_id}: configure lnd and/or gateway_channels"
+                ));
+            }
+            let lnd = match config.lnd {
+                Some(LndConfig {
                     node,
                     rest_url,
                     tls_cert,
                     macaroon,
-                } => {
+                }) => {
                     let pem = fs::read_to_string(&tls_cert)
                         .map_err(|_| format!("{source_id}: cannot read LND TLS certificate"))?;
                     let certificate = pem_certificate_der(&pem)
                         .ok_or_else(|| format!("{source_id}: invalid LND TLS certificate"))?;
                     let macaroon = fs::read(&macaroon)
                         .map_err(|_| format!("{source_id}: cannot read LND macaroon"))?;
-                    Target::Lnd {
+                    Some(Lnd {
                         node,
                         rest_url: loopback(&rest_url, &["https"])?,
                         macaroon_hex: macaroon.iter().fold(String::new(), |mut hex, byte| {
@@ -429,18 +689,25 @@ impl LiquidityProbes {
                             hex
                         }),
                         client: http_client(Some(certificate))?,
-                    }
+                    })
                 }
-                TargetConfig::GatewayChannels { node, api_url } => {
+                None => None,
+            };
+            let gateway = match config.gateway_channels {
+                Some(GatewayConfig { node, api_url }) => {
                     needs_password = true;
-                    Target::GatewayChannels {
+                    Some(Gateway {
                         node,
                         api_url: loopback(&api_url, &["http", "https"])?,
                         client: http_client(None)?,
-                    }
+                    })
                 }
+                None => None,
             };
-            targets.insert(source_id, (target, Mutex::new(ProbeState::default())));
+            targets.insert(
+                source_id,
+                (Target { lnd, gateway }, Mutex::new(ProbeState::default())),
+            );
         }
         let gateway_password = env::var("ECASHMESH_LAB_GATEWAY_PASSWORD").ok();
         if needs_password && gateway_password.is_none() {
@@ -458,120 +725,216 @@ impl LiquidityProbes {
         self.targets.contains_key(source_id)
     }
 
-    /// Returns amount-specific evidence for a mapped source, probing at most
-    /// once per interval and reusing cached evidence only where it applies.
-    pub(crate) async fn probe(
+    /// Returns amount-specific evidence for a mapped source: an LND probe (if
+    /// configured) and channel state, each read at most once per interval.
+    /// Cached probes are reused only where they logically apply.
+    pub(crate) async fn read(
         &self,
         source_id: &str,
         invoice: &str,
+        payee: Option<&str>,
         amount: Amount,
         now: u64,
-    ) -> Option<LiquidityEvidence> {
+    ) -> Option<SourceLiquidity> {
         let (target, state) = self.targets.get(source_id)?;
         let mut state = state.lock().await;
         let same_invoice = state.last_invoice.as_deref() == Some(invoice);
-        if state
+        let rate_limited = state
             .last_attempt_unix_seconds
-            .is_some_and(|last| now.saturating_sub(last) < PROBE_MIN_INTERVAL_SECONDS)
-        {
-            return Some(match state.last.as_ref() {
-                Some(last)
-                    if last.freshness(now) != "expired"
-                        && last.applies_to(amount.sats(), same_invoice) =>
-                {
-                    reuse(last, amount.sats())
-                }
-                _ => LiquidityEvidence::new(
-                    source_id,
-                    target.method(),
-                    target.node(),
-                    amount.sats(),
+            .is_some_and(|last| now.saturating_sub(last) < PROBE_MIN_INTERVAL_SECONDS);
+        if rate_limited {
+            return Some(state.cached(
+                source_id,
+                target.lnd.as_ref().map(|lnd| lnd.node.as_str()),
+                Request {
+                    invoice,
+                    payee,
+                    amount,
                     now,
-                )
-                .unknown("probe rate limited; no applicable recent evidence"),
-            });
+                    same_invoice,
+                },
+            ));
         }
         state.last_attempt_unix_seconds = Some(now);
-        let evidence = match target {
-            Target::Lnd {
-                node,
-                rest_url,
-                macaroon_hex,
-                client,
-            } => {
-                lnd_probe(
-                    LiquidityEvidence::new(
-                        source_id,
-                        ProbeMethod::LightningProbe,
-                        node,
-                        amount.sats(),
-                        now,
-                    ),
-                    client,
-                    rest_url,
-                    macaroon_hex,
-                    invoice,
-                )
-                .await
-            }
-            Target::GatewayChannels {
-                node,
-                api_url,
-                client,
-            } => {
-                gateway_channels(
-                    LiquidityEvidence::new(
-                        source_id,
-                        ProbeMethod::GatewayChannelState,
-                        node,
-                        amount.sats(),
-                        now,
-                    ),
-                    client,
-                    api_url,
-                    self.gateway_password.as_deref().unwrap_or_default(),
-                )
-                .await
+        let probe = async {
+            match &target.lnd {
+                Some(lnd) => Some(
+                    lnd_probe(
+                        LiquidityEvidence::new(
+                            source_id,
+                            ProbeMethod::LightningProbe,
+                            &lnd.node,
+                            amount.sats(),
+                            now,
+                        ),
+                        lnd,
+                        invoice,
+                    )
+                    .await,
+                ),
+                None => None,
             }
         };
-        if evidence.outcome != ProbeOutcome::Unknown
-            || evidence.evidence_source == ProbeMethod::GatewayChannelState
-        {
-            state.last = Some(evidence.clone());
-            state.last_invoice = Some(invoice.to_owned());
-        }
-        Some(evidence)
+        let channels = async {
+            if let Some(gateway) = &target.gateway {
+                Some(
+                    gateway_channels(
+                        ChannelState::new(
+                            source_id,
+                            ChannelStateMethod::GatewayChannelState,
+                            &gateway.node,
+                            now,
+                        ),
+                        gateway,
+                        self.gateway_password.as_deref().unwrap_or_default(),
+                        payee,
+                    )
+                    .await,
+                )
+            } else if let Some(lnd) = &target.lnd {
+                Some(
+                    lnd_channels(
+                        ChannelState::new(
+                            source_id,
+                            ChannelStateMethod::LndChannelState,
+                            &lnd.node,
+                            now,
+                        ),
+                        lnd,
+                        payee,
+                    )
+                    .await,
+                )
+            } else {
+                None
+            }
+        };
+        let (probe, channels) = tokio::join!(probe, channels);
+        Some(state.settle(
+            probe,
+            channels,
+            Request {
+                invoice,
+                payee,
+                amount,
+                now,
+                same_invoice,
+            },
+        ))
     }
 }
 
-impl Target {
-    fn node(&self) -> &str {
-        match self {
-            Self::Lnd { node, .. } | Self::GatewayChannels { node, .. } => node,
-        }
+#[derive(Clone, Copy)]
+struct Request<'a> {
+    invoice: &'a str,
+    payee: Option<&'a str>,
+    amount: Amount,
+    now: u64,
+    same_invoice: bool,
+}
+
+impl ProbeState {
+    /// Within the rate-limit interval: only cached evidence that logically
+    /// applies; otherwise an unknown probe result.
+    fn cached(
+        &self,
+        source_id: &str,
+        lnd_node: Option<&str>,
+        request: Request<'_>,
+    ) -> SourceLiquidity {
+        let Request {
+            payee,
+            amount,
+            now,
+            same_invoice,
+            ..
+        } = request;
+        let probe = lnd_node.map(|node| match self.last.as_ref() {
+            Some(last)
+                if last.freshness(now) != "expired"
+                    && last.applies_to(amount.sats(), same_invoice) =>
+            {
+                reuse(last)
+            }
+            _ => LiquidityEvidence::new(
+                source_id,
+                ProbeMethod::LightningProbe,
+                node,
+                amount.sats(),
+                now,
+            )
+            .unknown("probe rate limited; no applicable recent evidence"),
+        });
+        let channels = self
+            .channels
+            .as_ref()
+            .filter(|channels| channels.freshness(now) != "expired")
+            .map(|channels| {
+                let mut cached = channels.for_payee(payee);
+                cached.reused_from_cache = true;
+                cached
+            });
+        SourceLiquidity { probe, channels }
     }
 
-    const fn method(&self) -> ProbeMethod {
-        match self {
-            Self::Lnd { .. } => ProbeMethod::LightningProbe,
-            Self::GatewayChannels { .. } => ProbeMethod::GatewayChannelState,
+    /// Records conclusive reads. A technical failure is not evidence; the
+    /// last conclusive observation still is, where it applies, until it
+    /// expires: it is then stale (signal halved, stale risk), never fresh.
+    fn settle(
+        &mut self,
+        mut probe: Option<LiquidityEvidence>,
+        mut channels: Option<ChannelState>,
+        request: Request<'_>,
+    ) -> SourceLiquidity {
+        let Request {
+            invoice,
+            payee,
+            amount,
+            now,
+            same_invoice,
+        } = request;
+        match probe.as_ref() {
+            Some(fresh) if fresh.outcome != ProbeOutcome::Unknown => {
+                self.last.clone_from(&probe);
+                self.last_invoice = Some(invoice.to_owned());
+            }
+            Some(failed) => {
+                if let Some(last) = self.last.as_ref().filter(|last| {
+                    last.freshness(now) != "expired" && last.applies_to(amount.sats(), same_invoice)
+                }) {
+                    let mut cached = reuse(last);
+                    cached.failure_reason = Some(format!(
+                        "latest probe failed ({}); last conclusive probe reused",
+                        failed.failure_reason.as_deref().unwrap_or("unknown")
+                    ));
+                    probe = Some(cached);
+                }
+            }
+            None => {}
         }
+        match channels.as_ref() {
+            Some(fresh) if fresh.reachable => self.channels.clone_from(&channels),
+            Some(failed) => {
+                if let Some(last) = self
+                    .channels
+                    .as_ref()
+                    .filter(|last| last.freshness(now) != "expired")
+                {
+                    let mut cached = last.for_payee(payee);
+                    cached.reused_from_cache = true;
+                    cached.error.clone_from(&failed.error);
+                    channels = Some(cached);
+                }
+            }
+            None => {}
+        }
+        SourceLiquidity { probe, channels }
     }
 }
 
-fn reuse(last: &LiquidityEvidence, amount: u64) -> LiquidityEvidence {
+fn reuse(last: &LiquidityEvidence) -> LiquidityEvidence {
     let mut evidence = last.clone();
     evidence.reused_from_cache = true;
-    if evidence.evidence_source == ProbeMethod::GatewayChannelState {
-        // Re-evaluate the same authoritative totals for the new amount.
-        let outbound = evidence.total_outbound_sats.unwrap_or_default();
-        evidence.outcome = if outbound < amount {
-            ProbeOutcome::InsufficientLiquidity
-        } else {
-            ProbeOutcome::Unknown
-        };
-        evidence.probed_amount_sats = amount;
-    }
     evidence
 }
 
@@ -600,13 +963,8 @@ async fn lnd_get(client: &reqwest::Client, url: String, macaroon: &str) -> Resul
         .map_err(|error| error.without_url().to_string())
 }
 
-async fn lnd_probe(
-    mut evidence: LiquidityEvidence,
-    client: &reqwest::Client,
-    rest_url: &str,
-    macaroon: &str,
-    invoice: &str,
-) -> LiquidityEvidence {
+async fn lnd_probe(mut evidence: LiquidityEvidence, lnd: &Lnd, invoice: &str) -> LiquidityEvidence {
+    let (client, rest_url, macaroon) = (&lnd.client, &lnd.rest_url, lnd.macaroon_hex.as_str());
     let (info, decoded) = tokio::join!(
         lnd_get(client, format!("{rest_url}/v1/getinfo"), macaroon),
         lnd_get(client, format!("{rest_url}/v1/payreq/{invoice}"), macaroon),
@@ -661,15 +1019,49 @@ async fn lnd_probe(
     evidence
 }
 
+async fn lnd_channels(mut state: ChannelState, lnd: &Lnd, payee: Option<&str>) -> ChannelState {
+    let (info, channels) = tokio::join!(
+        lnd_get(
+            &lnd.client,
+            format!("{}/v1/getinfo", lnd.rest_url),
+            &lnd.macaroon_hex
+        ),
+        lnd_get(
+            &lnd.client,
+            format!("{}/v1/channels", lnd.rest_url),
+            &lnd.macaroon_hex
+        ),
+    );
+    let channels = match channels {
+        Ok(channels) => channels["channels"].as_array().cloned().unwrap_or_default(),
+        Err(error) => return state.unreachable(format!("LND unavailable: {error}")),
+    };
+    if let Ok(info) = info {
+        state.node_pubkey = info["identity_pubkey"].as_str().map(ToOwned::to_owned);
+        state.synced_to_chain = info["synced_to_chain"].as_bool();
+        state.node_state = Some(
+            if info["synced_to_chain"] == true {
+                "synced"
+            } else {
+                "syncing"
+            }
+            .into(),
+        );
+        state.network = info["chains"][0]["network"].as_str().map(ToOwned::to_owned);
+    }
+    state.with_peers(lnd_peers(&channels), payee)
+}
+
 async fn gateway_channels(
-    mut evidence: LiquidityEvidence,
-    client: &reqwest::Client,
-    api_url: &str,
+    mut state: ChannelState,
+    gateway: &Gateway,
     password: &str,
-) -> LiquidityEvidence {
+    payee: Option<&str>,
+) -> ChannelState {
     let request = |path: &str| {
-        client
-            .get(format!("{api_url}{path}"))
+        gateway
+            .client
+            .get(format!("{}{path}", gateway.api_url))
             .bearer_auth(password)
             .send()
     };
@@ -677,32 +1069,27 @@ async fn gateway_channels(
     let channels: Vec<Value> = match channels.and_then(reqwest::Response::error_for_status) {
         Ok(response) => match response.json().await {
             Ok(channels) => channels,
-            Err(error) => return evidence.unknown(error.without_url().to_string()),
+            Err(error) => return state.unreachable(error.without_url().to_string()),
         },
         Err(error) => {
-            return evidence.unknown(format!("gateway unavailable: {}", describe(&error)));
+            return state.unreachable(format!("gateway unavailable: {}", describe(&error)));
         }
     };
     if let Ok(response) = info.and_then(reqwest::Response::error_for_status)
         && let Ok(info) = response.json::<Value>().await
     {
-        evidence.node_pubkey = info
-            .pointer("/lightning_info/connected/public_key")
-            .and_then(Value::as_str)
+        let connected = info.pointer("/lightning_info/connected");
+        state.node_pubkey = connected
+            .and_then(|connected| connected["public_key"].as_str())
             .map(ToOwned::to_owned);
+        state.synced_to_chain =
+            connected.and_then(|connected| connected["synced_to_chain"].as_bool());
+        state.network = connected
+            .and_then(|connected| connected["network"].as_str())
+            .map(ToOwned::to_owned);
+        state.node_state = info["gateway_state"].as_str().map(ToOwned::to_owned);
     }
-    let (outcome, outbound, active) = classify_channels(&channels, evidence.probed_amount_sats);
-    evidence.outcome = outcome;
-    evidence.total_outbound_sats = Some(outbound);
-    evidence.active_channel_count = Some(active);
-    evidence.confidence = if outcome == ProbeOutcome::Unknown {
-        evidence.failure_reason =
-            Some("channel balances cover the amount but do not prove a route; not probed".into());
-        "none"
-    } else {
-        "high"
-    };
-    evidence
+    state.with_peers(gateway_peers(&channels), payee)
 }
 
 #[cfg(test)]
@@ -858,43 +1245,159 @@ mod tests {
         assert!(!short.applies_to(1_000, true));
     }
 
-    #[test]
-    fn channel_state_concludes_only_insufficiency() {
-        assert_eq!(
-            classify_channels(&[], 1_000),
-            (ProbeOutcome::InsufficientLiquidity, 0, 0)
-        );
-        let channels = [
-            json!({"is_active": true, "outbound_liquidity_sats": 722_931}),
-            json!({"is_active": false, "outbound_liquidity_sats": 5_000_000}),
-        ];
-        assert_eq!(
-            classify_channels(&channels, 800_000),
-            (ProbeOutcome::InsufficientLiquidity, 722_931, 1)
-        );
-        // Enough balance is not a route: no liquidity claim is made.
-        assert_eq!(classify_channels(&channels, 1_000).0, ProbeOutcome::Unknown);
-        let mut zero = LiquidityEvidence::new(
+    fn channels(peers: Vec<ChannelPeer>, payee: Option<&str>) -> ChannelState {
+        ChannelState::new(
             "fedimint:b",
-            ProbeMethod::GatewayChannelState,
+            ChannelStateMethod::GatewayChannelState,
             "gateway-B",
-            1_000,
             NOW,
-        );
-        zero.outcome = ProbeOutcome::InsufficientLiquidity;
-        zero.total_outbound_sats = Some(0);
-        zero.active_channel_count = Some(0);
-        let ProbeEffect::Exclude(reason) = effect(&zero, Amount::from_sats(1_000), NOW) else {
+        )
+        .with_peers(peers, payee)
+    }
+
+    fn peer(remote: &str, active: bool, outbound: u64) -> ChannelPeer {
+        ChannelPeer {
+            remote_pubkey: remote.into(),
+            active,
+            capacity_sats: Some(1_000_000),
+            outbound_sats: outbound,
+            inbound_sats: 1_000,
+        }
+    }
+
+    #[test]
+    fn channel_state_excludes_on_insufficiency_and_proves_only_direct_channels() {
+        // No channels at all: authoritative insufficiency.
+        let ProbeEffect::Exclude(reason) = channel_effect(
+            &channels(vec![], Some("02payee")),
+            Amount::from_sats(1_000),
+            NOW,
+        ) else {
             panic!("zero outbound channels exclude");
         };
         assert!(reason.contains("0 sats of active outbound"));
-        // Reuse re-evaluates the authoritative totals for a different amount.
-        let mut gateway_a = zero.clone();
-        gateway_a.total_outbound_sats = Some(722_931);
-        assert_eq!(reuse(&gateway_a, 1_000).outcome, ProbeOutcome::Unknown);
+        // Inactive channels do not count towards outbound.
+        let state = channels(
+            vec![
+                peer("02payee", true, 722_931),
+                peer("02other", false, 5_000_000),
+            ],
+            Some("02payee"),
+        );
+        assert_eq!((state.channel_count, state.active_channel_count), (2, 1));
+        assert_eq!(state.outbound_sats, 722_931);
+        assert!(matches!(
+            channel_effect(&state, Amount::from_sats(800_000), NOW),
+            ProbeEffect::Exclude(_)
+        ));
+        // A direct active channel to the payee: medium confidence, exactly the
+        // requested amount, never the channel's capacity.
+        let ProbeEffect::Liquidity(evidence) =
+            channel_effect(&state, Amount::from_sats(30_000), NOW)
+        else {
+            panic!("direct channel proves sufficiency");
+        };
+        let observation = evidence.observation().unwrap();
+        assert_eq!(observation.confidence, ConfidenceLevel::Medium);
+        assert_eq!(observation.source, EvidenceSource::Connector);
+        assert_eq!(observation.value.available, Amount::from_sats(30_000));
+        assert_eq!(observation.value.maximum, None);
+        // Enough balance but no direct channel to this payee: no conclusion.
+        let elsewhere = state.for_payee(Some("02someone-else"));
+        assert_eq!(elsewhere.payee_direct_outbound_sats, None);
         assert_eq!(
-            reuse(&gateway_a, 800_000).outcome,
-            ProbeOutcome::InsufficientLiquidity
+            channel_effect(&elsewhere, Amount::from_sats(30_000), NOW),
+            ProbeEffect::Keep
+        );
+        // Unreachable gateway: unknown, not zero.
+        let down = ChannelState::new(
+            "fedimint:b",
+            ChannelStateMethod::GatewayChannelState,
+            "gateway-B",
+            NOW,
+        )
+        .unreachable("gateway unavailable".into());
+        assert_eq!(down.outbound_sats, 0);
+        assert_eq!(
+            channel_effect(&down, Amount::from_sats(1), NOW),
+            ProbeEffect::Keep
+        );
+        // Stale insufficiency never excludes; expired says nothing.
+        assert_eq!(
+            channel_effect(
+                &channels(vec![], None),
+                Amount::from_sats(1),
+                NOW + PROBE_FRESH_SECONDS + 1
+            ),
+            ProbeEffect::Keep
+        );
+        let ProbeEffect::Liquidity(aged) = channel_effect(
+            &state,
+            Amount::from_sats(30_000),
+            NOW + PROBE_FRESH_SECONDS + 1,
+        ) else {
+            panic!("stale direct channel is stale liquidity");
+        };
+        assert!(aged.is_stale());
+        assert_eq!(
+            channel_effect(
+                &state,
+                Amount::from_sats(30_000),
+                NOW + PROBE_RETENTION_SECONDS + 1
+            ),
+            ProbeEffect::Keep
+        );
+    }
+
+    #[test]
+    fn combined_liquidity_prefers_authoritative_insufficiency_then_probes() {
+        let amount = Amount::from_sats(1_000);
+        let direct = channels(vec![peer("02payee", true, 500_000)], Some("02payee"));
+        // Probe success outranks the medium channel-state conclusion.
+        let (effect, basis) =
+            combined_effect(Some(&routable(1_000, true)), Some(&direct), amount, NOW);
+        assert_eq!(basis, LiquidityBasis::ActiveProbe);
+        let ProbeEffect::Liquidity(evidence) = effect else {
+            panic!()
+        };
+        assert_eq!(
+            evidence.observation().unwrap().confidence,
+            ConfidenceLevel::High
+        );
+        // A failed probe (technical) falls back to channel state.
+        let failed = routable(1_000, true).unknown("timeout");
+        let (_, basis) = combined_effect(Some(&failed), Some(&direct), amount, NOW);
+        assert_eq!(basis, LiquidityBasis::ChannelState);
+        // Authoritative insufficiency wins over everything.
+        let empty = channels(vec![], Some("02payee"));
+        let (effect, basis) =
+            combined_effect(Some(&routable(1_000, true)), Some(&empty), amount, NOW);
+        assert_eq!(basis, LiquidityBasis::ChannelState);
+        assert!(matches!(effect, ProbeEffect::Exclude(_)));
+        // Nothing conclusive: unknown.
+        assert_eq!(
+            combined_effect(Some(&failed), None, amount, NOW),
+            (ProbeEffect::Keep, LiquidityBasis::Unknown)
+        );
+    }
+
+    #[test]
+    fn lnd_channel_balances_exclude_reserves() {
+        let peers = lnd_peers(&[json!({
+            "remote_pubkey": "02payee", "active": true, "capacity": "1500000",
+            "local_balance": "737931", "remote_balance": "745003",
+            "local_constraints": {"chan_reserve_sat": "15000"},
+            "remote_constraints": {"chan_reserve_sat": "15000"},
+        })]);
+        assert_eq!(peers[0].outbound_sats, 722_931);
+        assert_eq!(peers[0].inbound_sats, 730_003);
+        let gateway = gateway_peers(&[json!({
+            "remote_pubkey": "02payee", "is_active": true, "channel_size_sats": 400_000,
+            "outbound_liquidity_sats": 296_000, "inbound_liquidity_sats": 96_000,
+        })]);
+        assert_eq!(
+            (gateway[0].outbound_sats, gateway[0].inbound_sats),
+            (296_000, 96_000)
         );
     }
 

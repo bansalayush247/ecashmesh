@@ -22,7 +22,10 @@ use ecashmesh_fedimint::{FederationObservation, FedimintQuote, FedimintService};
 use serde_json::{Value, json};
 
 use crate::connectors::{ConnectorBatch, unix_now};
-use crate::probe::{LiquidityEvidence, LiquidityProbes, ProbeEffect};
+use crate::history::LabHistory;
+use crate::probe::{
+    ChannelState, LiquidityBasis, LiquidityEvidence, LiquidityProbes, ProbeEffect, SourceLiquidity,
+};
 
 /// A destination normalized by backend code before discovery or quote requests.
 #[derive(Clone, Debug)]
@@ -100,10 +103,12 @@ pub(super) struct LiveNoRoute {
 /// Builds only declared Cashu-to-Lightning edges for the normalized destination
 /// and evaluates the resulting immutable graph through the Phase 9 router.
 #[allow(clippy::too_many_lines)] // Keeps the full live feasibility chain and its exact no-route diagnostics together.
+#[allow(clippy::too_many_arguments)] // Each optional lab evidence source is an explicit input.
 pub(super) async fn evaluate(
     service: &Arc<DiscoveryService>,
     fedimint: &Arc<FedimintService>,
     probes: Option<&LiquidityProbes>,
+    history: Option<&LabHistory>,
     batch: &ConnectorBatch,
     sources: Vec<ConnectorSnapshot>,
     destination: LiveDestination,
@@ -321,7 +326,9 @@ pub(super) async fn evaluate(
             (source.id.clone(), result)
         })
     }));
-    // Regtest-lab only: amount-specific probes from each source's own node.
+    // Regtest-lab only: amount-specific probes and channel state from each
+    // source's own node, bound to the invoice's payee.
+    let payee = payee_pubkey(invoice.as_str());
     let probe_reads = futures::future::join_all(
         sources
             .iter()
@@ -329,14 +336,29 @@ pub(super) async fn evaluate(
             .filter_map(|source| {
                 let probes = probes?;
                 let invoice = &invoice;
+                let payee = payee.as_deref();
                 Some(async move {
                     let evidence = probes
-                        .probe(source.id.as_str(), invoice.as_str(), amount, unix_now())
+                        .read(
+                            source.id.as_str(),
+                            invoice.as_str(),
+                            payee,
+                            amount,
+                            unix_now(),
+                        )
                         .await;
                     (source.id.clone(), evidence)
                 })
             }),
     );
+    // Real payment outcomes only; unknown until the lab executor records one.
+    let reliability = history.map(|history| {
+        let ids = sources
+            .iter()
+            .map(|source| source.id.as_str())
+            .collect::<Vec<_>>();
+        history.reliability(&ids, unix_now())
+    });
     let (fedimint_reads, cashu_reads, probe_reads) =
         tokio::join!(fedimint_reads, cashu_reads, probe_reads);
     let mut probe_reads = probe_reads
@@ -427,7 +449,7 @@ pub(super) async fn evaluate(
             // Funding is already gated by the quote; a probe measures the
             // gateway's Lightning leg, which wallet balance cannot show.
             let evidence = probe_reads.remove(&source.id);
-            if let Some(reason) = apply_liquidity_probe(
+            if let Some(reason) = apply_liquidity(
                 &mut source,
                 evidence,
                 quote.selected_gateway_id.as_deref(),
@@ -494,7 +516,7 @@ pub(super) async fn evaluate(
         let mut source = source;
         let evidence = probe_reads.remove(&source.id);
         if let Some(reason) =
-            apply_liquidity_probe(&mut source, evidence, None, amount, &mut quote_observations)
+            apply_liquidity(&mut source, evidence, None, amount, &mut quote_observations)
         {
             no_route_details.push(format!("{}: {reason}", source.id));
             continue;
@@ -520,11 +542,40 @@ pub(super) async fn evaluate(
         live_sources.push(source);
     }
     // Evidence for sources that failed earlier remains inspectable.
-    quote_observations.extend(
-        probe_reads
-            .values()
-            .map(|evidence| probe_json(evidence, "not_applied", None)),
-    );
+    for liquidity in probe_reads.values() {
+        quote_observations.extend(
+            liquidity
+                .probe
+                .iter()
+                .map(|evidence| probe_json(evidence, "not_applied", None)),
+        );
+        quote_observations.extend(
+            liquidity
+                .channels
+                .iter()
+                .map(|state| channel_json(state, "not_applied", None)),
+        );
+    }
+    if let Some(reliability) = &reliability {
+        for source in &mut live_sources {
+            if let Some(stats) = reliability.get(source.id.as_str()) {
+                apply_reliability(source, stats);
+            }
+        }
+        quote_observations.extend(reliability.values().map(|stats| {
+            json!({
+                "kind": "payment_reliability",
+                "connector": stats.source_id,
+                "state": stats.freshness,
+                "value": stats,
+            })
+        }));
+    }
+    if let Some(history) = history {
+        history
+            .record(&history_records(&quote_observations, amount))
+            .await;
+    }
     if live_sources.is_empty() {
         if no_route_details.is_empty() {
             no_route_details.push("No source connectors can quote an executable route".into());
@@ -746,47 +797,134 @@ pub(super) async fn evaluate(
 
 /// Applies regtest-lab liquidity evidence to one quote-backed source and
 /// records it. Returns an exclusion reason when the source cannot route the
-/// amount. A Fedimint probe must come from the gateway the quote selected.
-fn apply_liquidity_probe(
+/// amount. Fedimint evidence must come from the gateway the quote selected.
+fn apply_liquidity(
     source: &mut ConnectorSnapshot,
-    evidence: Option<LiquidityEvidence>,
+    evidence: Option<SourceLiquidity>,
     selected_gateway: Option<&str>,
     amount: Amount,
     observations: &mut Vec<Value>,
 ) -> Option<String> {
-    let evidence = evidence?;
-    if let (Some(node), Some(gateway)) = (evidence.node_pubkey.as_deref(), selected_gateway)
-        && node != gateway
-    {
-        observations.push(probe_json(
-            &evidence,
-            "not_applied",
-            Some((
-                "PROBE_NODE_NOT_SELECTED_GATEWAY",
-                "probed node is not the quoted gateway".into(),
-            )),
-        ));
-        return None;
-    }
-    match crate::probe::effect(&evidence, amount, unix_now()) {
+    let SourceLiquidity { probe, channels } = evidence?;
+    let not_selected = |node: Option<&str>| matches!((node, selected_gateway), (Some(node), Some(gateway)) if node != gateway);
+    let issue = || {
+        Some((
+            "PROBE_NODE_NOT_SELECTED_GATEWAY",
+            "evidence is from a node other than the quoted gateway".to_owned(),
+        ))
+    };
+    let probe = match probe {
+        Some(probe) if not_selected(probe.node_pubkey.as_deref()) => {
+            observations.push(probe_json(&probe, "not_applied", issue()));
+            None
+        }
+        probe => probe,
+    };
+    let channels = match channels {
+        Some(state) if not_selected(state.node_pubkey.as_deref()) => {
+            observations.push(channel_json(&state, "not_applied", issue()));
+            None
+        }
+        state => state,
+    };
+    let now = unix_now();
+    let (effect, basis) =
+        crate::probe::combined_effect(probe.as_ref(), channels.as_ref(), amount, now);
+    let (label, issue, exclusion) = match effect {
         ProbeEffect::Liquidity(liquidity) => {
             source.liquidity = liquidity;
-            observations.push(probe_json(&evidence, "liquidity", None));
-            None
+            ("liquidity", None, None)
         }
-        ProbeEffect::Exclude(reason) => {
-            observations.push(probe_json(
-                &evidence,
-                "excluded",
-                Some(("LIGHTNING_LIQUIDITY_UNAVAILABLE", reason.clone())),
-            ));
-            Some(reason)
-        }
-        ProbeEffect::Keep => {
-            observations.push(probe_json(&evidence, "none", None));
-            None
-        }
+        ProbeEffect::Exclude(reason) => (
+            "excluded",
+            Some(("LIGHTNING_LIQUIDITY_UNAVAILABLE", reason.clone())),
+            Some(reason),
+        ),
+        ProbeEffect::Keep => ("none", None, None),
+    };
+    let decided = |which: LiquidityBasis| if basis == which { label } else { "supporting" };
+    if let Some(probe) = &probe {
+        observations.push(probe_json(
+            probe,
+            decided(LiquidityBasis::ActiveProbe),
+            (basis == LiquidityBasis::ActiveProbe)
+                .then(|| issue.clone())
+                .flatten(),
+        ));
     }
+    if let Some(state) = &channels {
+        observations.push(channel_json(
+            state,
+            decided(LiquidityBasis::ChannelState),
+            (basis == LiquidityBasis::ChannelState)
+                .then(|| issue.clone())
+                .flatten(),
+        ));
+    }
+    observations.push(json!({
+        "kind": "lightning_liquidity",
+        "connector": source.id.as_str(),
+        "state": match source.liquidity.freshness() {
+            ecashmesh_core::EvidenceFreshness::Fresh => "fresh",
+            ecashmesh_core::EvidenceFreshness::Stale => "stale",
+            ecashmesh_core::EvidenceFreshness::Unknown => "unknown",
+        },
+        "effect": label,
+        "value": {
+            "basis": basis,
+            "applied_to_ranking": label == "liquidity",
+            "confidence": source.liquidity.observation().map(|observation| confidence_code(observation.confidence)),
+            "observed_at_unix_seconds": source.liquidity.observation().map(|observation| observation.observed_at.unix_seconds()),
+            "amount_sats": amount.sats(),
+        },
+        "issue": issue.map(|(code, message)| json!({"code": code, "message": message})),
+    }));
+    exclusion
+}
+
+/// Real payment outcomes become both the hop's and the connector's
+/// reliability (the model keeps the two levels separate; in this single-hop
+/// graph both describe payments through this source). The earliest recorded
+/// observation is the connector's first-observed time.
+fn apply_reliability(source: &mut ConnectorSnapshot, stats: &crate::history::ReliabilityStats) {
+    let evidence = crate::history::evidence(stats);
+    source.reliability = evidence.clone();
+    source.evidence.reliability = evidence;
+    if let Some(first) = stats.first_observed_at_unix_seconds {
+        source.evidence.first_observed_at = Some(EvidenceTimestamp::from_unix_seconds(first));
+    }
+}
+
+/// One persisted observation per source: liquidity and gateway state as seen
+/// for this amount. Never a payment outcome.
+fn history_records(observations: &[Value], amount: Amount) -> Vec<Value> {
+    let now = unix_now();
+    observations
+        .iter()
+        .filter(|observation| observation["kind"] == "lightning_liquidity")
+        .map(|summary| {
+            let source = summary["connector"].clone();
+            let find = |kind: &str| {
+                observations
+                    .iter()
+                    .find(|observation| observation["kind"] == kind && observation["connector"] == source)
+                    .map(|observation| &observation["value"])
+            };
+            let channels = find("lightning_channel_state");
+            json!({
+                "kind": "liquidity_observation",
+                "source_id": source,
+                "timestamp": now,
+                "amount_sats": amount.sats(),
+                "basis": summary["value"]["basis"],
+                "effect": summary["effect"],
+                "probe_outcome": find("lightning_liquidity_probe").map(|probe| probe["outcome"].clone()),
+                "channel_outbound_sats": channels.map(|state| state["outbound_sats"].clone()),
+                "active_channel_count": channels.map(|state| state["active_channel_count"].clone()),
+                "node_state": channels.map(|state| state["node_state"].clone()),
+            })
+        })
+        .collect()
 }
 
 fn probe_json(evidence: &LiquidityEvidence, effect: &str, issue: Option<(&str, String)>) -> Value {
@@ -798,6 +936,35 @@ fn probe_json(evidence: &LiquidityEvidence, effect: &str, issue: Option<(&str, S
         "value": evidence,
         "issue": issue.map(|(code, message)| json!({"code": code, "message": message})),
     })
+}
+
+fn channel_json(state: &ChannelState, effect: &str, issue: Option<(&str, String)>) -> Value {
+    json!({
+        "kind": "lightning_channel_state",
+        "connector": state.source_id,
+        "state": state.freshness(unix_now()),
+        "effect": effect,
+        "value": state,
+        "issue": issue.map(|(code, message)| json!({"code": code, "message": message})),
+    })
+}
+
+const fn confidence_code(confidence: ConfidenceLevel) -> &'static str {
+    match confidence {
+        ConfidenceLevel::None => "none",
+        ConfidenceLevel::Low => "low",
+        ConfidenceLevel::Medium => "medium",
+        ConfidenceLevel::High => "high",
+    }
+}
+
+/// The invoice's payee node, used to recognise a direct channel. `None` when
+/// the invoice cannot be decoded (channel state then proves nothing).
+fn payee_pubkey(invoice: &str) -> Option<String> {
+    invoice
+        .parse::<lightning_invoice::Bolt11Invoice>()
+        .ok()
+        .map(|invoice| invoice.get_payee_pub_key().to_string())
 }
 
 fn health_observation(evidence: &Evidence<ConnectorHealth>) -> HealthObservation {

@@ -26,22 +26,22 @@ Observed live values, reproduced exactly:
 | Cashu | 0 | 0 | 0 (20 sats = 200 bp) | 3333 (2 of 6 fresh) | 0 | 0 | 49995 / 100 = **499** |
 | Cashu, liq 10000 | 10000 | 0 | 0 | 3333 | 0 | 0 | 299995 / 100 = **2999** |
 
-No unit mismatch was found. Two consequences matter for probing: a known
-liquidity observation also raises freshness (Cashu 3333 → 5000, so the real
-Cashu base with a probe is 3250, not 2999), and the Fedimint penalty of 3250
-counts unknown reliability twice (hop and connector evidence are separate
-fields in the model). That double count is a design choice, not changed here.
+No unit mismatch was found. A known liquidity observation also raises
+freshness (one of the six inputs). The penalty audit (including the two
+`unknown_reliability` risks) is in [regtest evidence](regtest-evidence.md#risk-model-audit).
 
 ## Mechanism
 
 `crates/ecashmesh-api/src/probe.rs`, configured by
-`ECASHMESH_LAB_LIQUIDITY_PROBES` (JSON, source ID → origin). It is refused at
-startup unless `PAYMENT_ENVIRONMENT=regtest` and `ECASHMESH_LAB_MODE=true`.
+`ECASHMESH_LAB_LIQUIDITY_PROBES` (JSON, source ID → `lnd` and/or
+`gateway_channels`). It is refused at startup unless
+`PAYMENT_ENVIRONMENT=regtest` and `ECASHMESH_LAB_MODE=true`. The lab
+generates it (`scripts/ecashmesh-lab-config.py`).
 
-| Origin | Used for | Call |
+| Origin | Used for | Calls |
 |---|---|---|
-| `lnd` (`rest_url`, `tls_cert`, `macaroon`) | Cashu mints (`cashu-lnd-A…D`, from each mint's `config.toml`), Fedimint A (gateway A's LND) | `GET /v1/getinfo`, `GET /v1/payreq/{invoice}`, `POST /v2/router/route/estimatefee` |
-| `gateway_channels` (`api_url`) | Fedimint B–D (LDK gateways, no probe API) | `GET /list_channels`, `GET /info`, bearer `ECASHMESH_LAB_GATEWAY_PASSWORD` |
+| `lnd` (`rest_url`, `tls_cert`, `macaroon`) | Cashu mints (`cashu-lnd-A…D`), Fedimint A (gateway A's LND) | Probe: `GET /v1/getinfo`, `GET /v1/payreq/{invoice}`, `POST /v2/router/route/estimatefee`. Channel state when no gateway is configured: `GET /v1/channels` |
+| `gateway_channels` (`api_url`) | Fedimint A–D | `GET /list_channels`, `GET /info`, bearer `ECASHMESH_LAB_GATEWAY_PASSWORD` |
 
 - Loopback URLs only; LND with the **readonly** macaroon and its own
   `tls.cert` pinned byte-for-byte (LND marks it as a CA, which WebPKI rejects
@@ -49,50 +49,45 @@ startup unless `PAYMENT_ENVIRONMENT=regtest` and `ECASHMESH_LAB_MODE=true`.
 - `estimatefee` with a payment request sends a **non-settling probe payment**:
   an HTLC with a random hash that the payee must fail. The amount is briefly
   in flight; nothing can settle and no EcashMesh payment API is involved.
-- A Fedimint probe is used only if the probing node is the gateway the bridge
-  quote selected.
+- The invoice payee is decoded server-side (`lightning-invoice`) to recognise
+  a direct channel.
+- Fedimint evidence is used only if the probing/channel node is the gateway
+  the bridge quote selected (its Lightning node key).
 - Credentials stay server-side; the API returns only the evidence below.
 
-## Evidence and its effect on ranking
+## Two kinds of evidence, one decision
 
-Each observation records source, method (`lightning_probe` or
-`gateway_channel_state`), node and pubkey, payee, probed amount, outcome,
-LND failure reason, whether the payee itself was reached, observed time,
-expiry, confidence and a regtest flag.
+**Active probe** (`lightning_probe`): source, node and pubkey, payee, probed
+amount, outcome, LND failure reason, whether the payee itself was reached,
+observed time, expiry, confidence.
 
-| Outcome | Effect |
-|---|---|
-| `routable`, payee reached | Liquidity = probed amount (no maximum), Observer, **High** → 10000 |
-| `routable`, only a route-hint hop reached (private payee) | Same, **Medium** → 6000 |
-| `insufficient_liquidity` (`FAILURE_REASON_INSUFFICIENT_BALANCE`) or `no_route` | Source excluded with the reason; no balance is invented |
-| Gateway channels: active outbound < amount | Excluded (authoritative channel state, distinct method) |
-| Gateway channels: outbound ≥ amount | Unknown: balances never prove a route |
-| Timeout, RPC/TLS error, other failure reasons | Unknown; existing liquidity evidence is kept |
+**Channel state** (`gateway_channel_state` / `lnd_channel_state`): channel
+count, active channels, spendable outbound and receivable inbound over active
+channels (channel reserves excluded), per-peer balances, the largest outbound
+on an active channel directly to the payee, node state (`Running`/`synced`),
+network, observed time, expiry.
+
+Decision per source (`probe::combined_effect`), in order:
+
+| Evidence | Effect | Basis |
+|---|---|---|
+| Fresh channel state: active outbound < amount | Excluded (no route can carry more than the node's total spendable outbound) | `channel_state` |
+| Probe `routable`, payee reached | Liquidity = probed amount (no maximum), Observer, **High** → 10000 | `active_probe` |
+| Probe `routable`, only a route-hint hop reached | Same, **Medium** → 6000 | `active_probe` |
+| Fresh probe `insufficient_liquidity` / `no_route` | Excluded with the reason; no balance is invented | `active_probe` |
+| Active direct channel to the payee with outbound ≥ amount | Liquidity = the amount, Connector, **Medium** → 6000 (HTLC limits are not visible in balances, so never High) | `channel_state` |
+| Outbound ≥ amount but no direct channel to the payee | Unknown (supporting evidence only) | `unknown` |
+| Timeout, RPC/TLS error, unreachable gateway | Unknown; existing liquidity evidence is kept | `unknown` |
 
 A probe is never payment history and never touches reliability, solvency or
-historical behaviour.
+historical behaviour. A successful probe of X sats says nothing about X+1.
 
 ## Freshness
 
-Probe evidence is Known for 30 s, then Stale (ranker halves the signal and adds
-`stale_liquidity`) until 120 s, then discarded. Stale "insufficient" evidence
-never excludes a source. Each node is probed at most once per 2 s; within that
-interval, cached evidence is reused only where it logically applies (routable
-at X ⇒ routable at ≤ X for the same invoice; insufficient local balance at X ⇒
-insufficient at ≥ X), otherwise the result is unknown.
-
-## Running in the lab
-
-```sh
-export ECASHMESH_LAB_GATEWAY_PASSWORD=...   # regtest gateway admin password
-export ECASHMESH_LAB_LIQUIDITY_PROBES='{
-  "cashu:mint-a": {"lnd": {"node": "cashu-lnd-A", "rest_url": "https://localhost:39412",
-    "tls_cert": ".regtest/ecashmesh-lab/cashu-lnd-A/tls.cert",
-    "macaroon": ".regtest/ecashmesh-lab/cashu-lnd-A/data/chain/bitcoin/regtest/readonly.macaroon"}},
-  "fedimint:<federation-B-id>": {"gateway_channels": {"node": "gateway-B", "api_url": "http://127.0.0.1:39101"}}
-}'
-```
-
-`scripts/ecashmesh-lab-rank-acceptance.py <amount>` prints each source's
-liquidity evidence and every probe, including excluded sources and failed
-evaluations.
+Probe and channel evidence is Known for 30 s, then Stale (ranker halves the
+signal and adds `stale_liquidity`) until 120 s, then discarded. Stale
+"insufficient" evidence never excludes a source. Each node is read at most
+once per 2 s. When a read fails technically, the last conclusive observation
+is reused where it still applies (routable at X ⇒ routable at ≤ X for the same
+invoice; insufficient local balance at X ⇒ insufficient at ≥ X; channel
+balances for any amount), marked `reused_from_cache`, and ages normally.
