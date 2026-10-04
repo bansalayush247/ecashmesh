@@ -24,7 +24,20 @@ stop_lab_pid() {
   esac
 }
 
-lab_ports=( $(seq 39000 39063) $(seq 39100 39103) $(seq 39200 39203) $(seq 39300 39303) 39400 39401 39402 $(seq 5100 5103) )
+cashu_lnd_runtime_ports() {
+  local runtime="$state/cashu-lightning-backends.json"
+  [[ -f "$runtime" ]] || return 0
+  python3 - "$runtime" <<'PY'
+import json, sys
+
+for backend in json.load(open(sys.argv[1])).get("backends", {}).values():
+    for field in ("p2p_port", "rpc_port", "rest_port"):
+        value = backend.get(field)
+        if isinstance(value, int):
+            print(value)
+PY
+}
+lab_ports=( $(seq 39000 39063) $(seq 39100 39103) $(seq 39200 39203) $(seq 39300 39303) $(seq 39400 39402) $(cashu_lnd_runtime_ports) $(seq 5100 5103) )
 port_listeners() {
   local port="$1"
   lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true
@@ -109,6 +122,11 @@ for pid_file in "$state"/cashu-*.pid; do
   kill "$pid"
 done
 if same_process "$state/lnd-2.pid" "$state/lnd-2.start"; then kill "$(<"$state/lnd-2.pid")"; fi
+for backend in A B C D; do
+  if same_process "$state/cashu-lnd-$backend.pid" "$state/cashu-lnd-$backend.start"; then
+    kill "$(<"$state/cashu-lnd-$backend.pid")"
+  fi
+done
 # A supervisor crash can prevent ProcessHandle drops from running.  Reap only
 # listeners on deterministic lab ports whose command line proves they belong
 # to this isolated state root; do not touch another process using the port.
@@ -132,5 +150,5 @@ fi
 wait_for_port_release || exit 78
 rm -f "$state/lab.pid" "$state/lab.start" "$state/runner.pid" "$state/runner.start" \
   "$state"/cashu-*.pid "$state"/cashu-*.start "$state/fedimint-ready" "$state/fedimint-runtime.env" \
-  "$state/fedimint-attestation.json" "$state/topology-attestation.json"
+  "$state"/cashu-lnd-*.pid "$state"/cashu-lnd-*.start "$state/fedimint-attestation.json" "$state/topology-attestation.json"
 echo "EcashMesh interoperability lab stopped; logs and result artifacts were preserved."

@@ -48,11 +48,24 @@ finally:
     s.close()
 PY
 }
+cashu_lnd_runtime_ports() {
+  local runtime="$state/cashu-lightning-backends.json"
+  [[ -f "$runtime" ]] || return 0
+  python3 - "$runtime" <<'PY'
+import json, sys
+
+for backend in json.load(open(sys.argv[1])).get("backends", {}).values():
+    for field in ("p2p_port", "rpc_port", "rest_port"):
+        value = backend.get(field)
+        if isinstance(value, int):
+            print(value)
+PY
+}
 wait_for_required_ports() {
   local attempt port pid command evidence found_listener
   for attempt in $(seq 1 60); do
     evidence='[]'
-    for port in $(seq 39000 39063) $(seq 39100 39103) $(seq 39200 39203) $(seq 39300 39303) 39400 39401 39402 $(seq 5100 5103); do
+    for port in $(seq 39000 39063) $(seq 39100 39103) $(seq 39200 39203) $(seq 39300 39303) $(seq 39400 39402) $(cashu_lnd_runtime_ports) $(seq 5100 5103); do
       if ! port_free "$port"; then
         found_listener=0
         while IFS= read -r pid; do
@@ -117,7 +130,7 @@ wait_for_required_ports
 rm -f "$state/lab.pid" "$state/lab.start" "$state/runner.pid" "$state/runner.start" \
   "$state/fedimint-ready" "$state/fedimint-runtime.env" "$state/fedimint-attestation.json" \
   "$state/topology-attestation.json" "$state/startup-diagnostics.json" \
-  "$state/results.json" "$state/results.json.tmp" "$state/route-evidence.json"
+  "$state/results.json" "$state/results.json.tmp" "$state/route-evidence.json" "$state/cashu-lightning-backends.json"
 rm -f "$cashu_diagnostics"
 [[ "${PAYMENT_ENVIRONMENT:-regtest}" == regtest ]] || fail "PAYMENT_ENVIRONMENT must be regtest"
 [[ "${ECASHMESH_LAB_MODE:-true}" == true ]] || fail "ECASHMESH_LAB_MODE must be true"
@@ -126,7 +139,7 @@ require_loopback "127.0.0.1"
 # A stopped topology is archived before the next start. This keeps its daemon
 # logs and mint/Fedimint evidence while ensuring DKG and mint initialization
 # always use clean, isolated runtime directories.
-if [[ -d "$state/fedimint" || -d "$state/cashu" || -d "$state/lnd-2" ]]; then
+if [[ -d "$state/fedimint" || -d "$state/cashu" || -d "$state/lnd-2" || -d "$state/cashu-lnd-A" || -d "$state/cashu-lnd-B" || -d "$state/cashu-lnd-C" || -d "$state/cashu-lnd-D" ]]; then
   archive="$state/archive/$(date +%Y%m%d%H%M%S)"
   mkdir -p "$archive"
   [[ ! -d "$state/fedimint" ]] || mv "$state/fedimint" "$archive/fedimint"
@@ -135,6 +148,9 @@ if [[ -d "$state/fedimint" || -d "$state/cashu" || -d "$state/lnd-2" ]]; then
   # wallet/chain database across a new bitcoind instance causes a rescan of a
   # disconnected chain and prevents newly funded outputs from appearing.
   [[ ! -d "$state/lnd-2" ]] || mv "$state/lnd-2" "$archive/lnd-2"
+  for cashu_backend in A B C D; do
+    [[ ! -d "$state/cashu-lnd-$cashu_backend" ]] || mv "$state/cashu-lnd-$cashu_backend" "$archive/cashu-lnd-$cashu_backend"
+  done
 fi
 
 # The exact upstream revisions are deliberately copied into the lab state.  No
@@ -579,9 +595,465 @@ p12_invoice="$(sed -n '1p' <<<"$payment_12")"; p12_preimage="$(sed -n '2p' <<<"$
 p21_invoice="$(sed -n '1p' <<<"$payment_21")"; p21_preimage="$(sed -n '2p' <<<"$payment_21")"; p21_settled="$(sed -n '3p' <<<"$payment_21")"; p21_latency="$(sed -n '4p' <<<"$payment_21")"
 lightning_diag "$(python3 -c 'import json,sys; print(json.dumps({"payments":{"lnd1_to_lnd2":{"invoice":sys.argv[1],"amount_sat":1000,"payment_status":"SUCCEEDED","settled":sys.argv[2],"preimage":sys.argv[3],"latency_ms":int(sys.argv[4]),"failure_reason":None},"lnd2_to_lnd1":{"invoice":sys.argv[5],"amount_sat":1000,"payment_status":"SUCCEEDED","settled":sys.argv[6],"preimage":sys.argv[7],"latency_ms":int(sys.argv[8]),"failure_reason":None}},"payment_lnd1_to_lnd2":"READY","payment_lnd2_to_lnd1":"READY","lightning_ready":"READY"}))' "$p12_invoice" "$p12_settled" "$p12_preimage" "$p12_latency" "$p21_invoice" "$p21_settled" "$p21_preimage" "$p21_latency")"
 
+# LND #2 remains the dedicated Phase 1 Lightning participant. Cashu A-D use
+# four fresh lnddirs and identities, so no mint can create and pay an invoice
+# through the same backend. Each balanced spoke gives its two endpoints equal
+# outbound liquidity, including C -> D through A.
+cashu_lnd_dir_A="$state/cashu-lnd-A"; cashu_lnd_dir_B="$state/cashu-lnd-B"; cashu_lnd_dir_C="$state/cashu-lnd-C"; cashu_lnd_dir_D="$state/cashu-lnd-D"
+# macOS supplies Bash 3.2, so use indirect scalar access rather than Bash 4
+# associative arrays. The launcher must work from an ordinary local terminal.
+cashu_lnd_value() {
+  local index="$1"
+  local field="$2"
+  local variable="cashu_lnd_${field}_${index}"
+  printf '%s' "${!variable:-}"
+}
+cashu_lnd_set() {
+  local index="$1"
+  local field="$2"
+  local variable="cashu_lnd_${field}_${index}"
+  printf -v "$variable" '%s' "$3"
+}
+cashu_lnd_port_min=39410
+cashu_lnd_port_max=39499
+cashu_lnd_next_port="$cashu_lnd_port_min"
+cashu_lnd_allocate_port() {
+  local candidate
+  for candidate in $(seq "$cashu_lnd_next_port" "$cashu_lnd_port_max"); do
+    if port_free "$candidate"; then
+      cashu_lnd_next_port=$((candidate + 1))
+      REPLY="$candidate"
+      return 0
+    fi
+  done
+  fail "no free loopback port remains in Cashu LND range $cashu_lnd_port_min-$cashu_lnd_port_max"
+}
+cashu_lnd_assign_ports() {
+  local index field
+  for index in A B C D; do
+    for field in p2p rpc rest; do
+      cashu_lnd_allocate_port
+      cashu_lnd_set "$index" "$field" "$REPLY"
+    done
+  done
+}
+cashu_lnd_write_runtime_state() {
+  python3 - "$state/cashu-lightning-backends.json" \
+    "$(cashu_lnd_value A p2p)" "$(cashu_lnd_value A rpc)" "$(cashu_lnd_value A rest)" \
+    "$(cashu_lnd_value B p2p)" "$(cashu_lnd_value B rpc)" "$(cashu_lnd_value B rest)" \
+    "$(cashu_lnd_value C p2p)" "$(cashu_lnd_value C rpc)" "$(cashu_lnd_value C rest)" \
+    "$(cashu_lnd_value D p2p)" "$(cashu_lnd_value D rpc)" "$(cashu_lnd_value D rest)" <<'PY'
+import json, os, pathlib, sys, time
+
+path = pathlib.Path(sys.argv[1])
+values = iter(map(int, sys.argv[2:]))
+backends = {}
+for index in "ABCD":
+    backends[index] = {"p2p_port": next(values), "rpc_port": next(values), "rest_port": next(values)}
+temporary = path.with_suffix(".tmp")
+temporary.write_text(json.dumps({"format_version": 1, "timestamp": int(time.time()), "backends": backends}, sort_keys=True, indent=2) + "\n")
+os.replace(temporary, path)
+PY
+}
+cashu_lnd_assign_ports
+cashu_lnd_write_runtime_state
+
+start_cashu_lnd() {
+  local index="$1"
+  local lnd_dir p2p rpc rest
+  lnd_dir="$(cashu_lnd_value "$index" dir)"; p2p="$(cashu_lnd_value "$index" p2p)"; rpc="$(cashu_lnd_value "$index" rpc)"; rest="$(cashu_lnd_value "$index" rest)"
+  local pid_file="$state/cashu-lnd-$index.pid"
+  local start_file="$state/cashu-lnd-$index.start"
+  local log_file="$state/cashu-lnd-$index.log"
+  local port
+  for port in "$p2p" "$rpc" "$rest"; do
+    port_free "$port" || fail "Cashu LND $index port $port is occupied after startup port gate"
+  done
+  mkdir -p "$lnd_dir"
+  cat >"$lnd_dir/lnd.conf" <<EOF
+[Application Options]
+listen=127.0.0.1:$p2p
+rpclisten=127.0.0.1:$rpc
+restlisten=127.0.0.1:$rest
+noseedbackup=1
+nobootstrap=1
+wtclient.active=false
+sync-freelist=true
+max-commit-fee-rate-anchors=5
+debuglevel=info
+[Bitcoin]
+bitcoin.active=1
+bitcoin.regtest=1
+bitcoin.node=bitcoind
+bitcoin.minhtlcout=1
+[Bitcoind]
+bitcoind.rpchost=127.0.0.1:$ECASHMESH_LAB_BITCOIN_RPC_PORT
+bitcoind.rpcuser=bitcoin
+bitcoind.rpcpass=bitcoin
+bitcoind.zmqpubrawblock=tcp://127.0.0.1:$ECASHMESH_LAB_BTC_ZMQ_RAW_BLOCK_PORT
+bitcoind.zmqpubrawtx=tcp://127.0.0.1:$ECASHMESH_LAB_BTC_ZMQ_RAW_TX_PORT
+EOF
+  nohup nix develop --accept-flake-config "$fedimint_dir" -c lnd --lnddir="$lnd_dir" >"$log_file" 2>&1 &
+  echo $! >"$pid_file"
+  /bin/ps -p "$(<"$pid_file")" -o lstart= >"$start_file"
+  for _ in $(seq 1 60); do
+    [[ -f "$lnd_dir/tls.cert" && -f "$lnd_dir/data/chain/bitcoin/regtest/admin.macaroon" ]] && break
+    sleep 1
+  done
+  if [[ ! -f "$lnd_dir/tls.cert" || ! -f "$lnd_dir/data/chain/bitcoin/regtest/admin.macaroon" ]]; then
+    tail -80 "$log_file" >&2 || true
+    cashu_stage "$index" lightning_backend FAILED "{\"p2p_port\":$p2p,\"rpc_port\":$rpc,\"log\":\"$log_file\"}" "LND did not create isolated regtest credentials"
+    fail "Cashu LND $index did not create isolated TLS and macaroon credentials"
+  fi
+  cashu_lnd_set "$index" tls "$lnd_dir/tls.cert"
+  cashu_lnd_set "$index" macaroon "$lnd_dir/data/chain/bitcoin/regtest/admin.macaroon"
+  cashu_lnd_set "$index" pid "$(<"$pid_file")"
+}
+
+cashu_lnd_cli() {
+  local index="$1"
+  shift
+  lncli_node "cashu_lnd_$index" "$(cashu_lnd_value "$index" dir)" "127.0.0.1:$(cashu_lnd_value "$index" rpc)" "$(cashu_lnd_value "$index" tls)" "$(cashu_lnd_value "$index" macaroon)" "$@"
+}
+lncli_cashu_A() { cashu_lnd_cli A "$@"; }
+lncli_cashu_B() { cashu_lnd_cli B "$@"; }
+lncli_cashu_C() { cashu_lnd_cli C "$@"; }
+lncli_cashu_D() { cashu_lnd_cli D "$@"; }
+
+for index in A B C D; do start_cashu_lnd "$index"; done
+for index in A B C D; do
+  cli="lncli_cashu_$index"
+  info="$(verify_lnd_cli "cashu_lnd_$index" "$cli" "$(cashu_lnd_value "$index" tls)" "$(cashu_lnd_value "$index" macaroon)" "$(cashu_lnd_value "$index" pid)")" || fail "Cashu LND $index CLI is not ready for regtest; see $state/lightning-diagnostics.json"
+  cashu_lnd_set "$index" info "$info"
+  cashu_lnd_set "$index" identity "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["identity_pubkey"])' <<<"$info")"
+done
+python3 - "$(cashu_lnd_value A identity)" "$(cashu_lnd_value B identity)" "$(cashu_lnd_value C identity)" "$(cashu_lnd_value D identity)" <<'PY' || fail "Cashu Lightning backends do not have four distinct identities"
+import sys
+
+identities = sys.argv[1:]
+assert len(identities) == 4 and all(identities) and len(set(identities)) == 4, identities
+PY
+python3 - "$state/cashu-lightning-backends.json" \
+  "$(cashu_lnd_value A identity)" "$(cashu_lnd_value B identity)" "$(cashu_lnd_value C identity)" "$(cashu_lnd_value D identity)" <<'PY'
+import json, os, pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+document = json.loads(path.read_text())
+for index, identity in zip("ABCD", sys.argv[2:]):
+    document["backends"][index]["identity_pubkey"] = identity
+temporary = path.with_suffix(".tmp")
+temporary.write_text(json.dumps(document, sort_keys=True, indent=2) + "\n")
+os.replace(temporary, path)
+PY
+for index in A B C D; do
+  funding="$(fund_node "cashu_lnd_$index" "lncli_cashu_$index")" || fail "Cashu LND $index funding failed; see $state/lightning-diagnostics.json"
+  cashu_lnd_set "$index" funding "$funding"
+done
+for index in A B C D; do
+  funding="$(cashu_lnd_value "$index" funding)"
+  cashu_stage "$index" lightning_backend READY "$(python3 - "$index" "$(cashu_lnd_value "$index" pid)" "$(cashu_lnd_value "$index" identity)" "$(cashu_lnd_value "$index" p2p)" "$(cashu_lnd_value "$index" rpc)" "$(cashu_lnd_value "$index" rest)" "$funding" <<'PY'
+import json, sys
+funding = json.loads(sys.argv[7])
+print(json.dumps({
+    "node": sys.argv[1], "pid": int(sys.argv[2]), "identity_pubkey": sys.argv[3],
+    "p2p_port": int(sys.argv[4]), "rpc_port": int(sys.argv[5]), "rest_port": int(sys.argv[6]),
+    "funding": {key: funding[key] for key in ("address", "txid", "amount_sat", "confirmations", "confirmed_balance_sat", "spendable_balance_sat")},
+}))
+PY
+)"
+done
+
+cashu_connect_peer() {
+  local from="$1"
+  local to="$2"
+  local peer="$(cashu_peer_identity "$to")@127.0.0.1:$(cashu_peer_p2p "$to")"
+  cashu_lnd_cli "$from" connect "$peer" >/dev/null 2>&1 || true
+  cashu_lnd_cli "$from" listpeers | python3 -c 'import json,sys; assert any(p.get("pub_key")==sys.argv[1] for p in json.load(sys.stdin).get("peers",[]))' "$(cashu_peer_identity "$to")" || return 1
+}
+cashu_peer_identity() {
+  case "$1" in lnd2) printf '%s' "$lnd2_id" ;; *) cashu_lnd_value "$1" identity ;; esac
+}
+cashu_peer_p2p() {
+  case "$1" in lnd2) printf '%s' "$lnd2_p2p_port" ;; *) cashu_lnd_value "$1" p2p ;; esac
+}
+
+for index in B C D; do
+  cashu_connect_peer A "$index" || { cashu_stage "$index" lightning_mesh FAILED '{}' "Cashu LND A to $index peer connection is not established"; fail "Cashu LND A to $index peer connection is not established"; }
+done
+cashu_connect_peer A lnd2 || { cashu_stage A lightning_mesh FAILED '{}' "Cashu LND A to Phase 1 LND #2 peer connection is not established"; fail "Cashu LND A to Phase 1 LND #2 peer connection is not established"; }
+
+cashu_wallet_sync_readiness() {
+  local attempt index cli info walletbalance listunspent evidence all_ready
+  for attempt in $(seq 1 120); do
+    evidence='[]'
+    all_ready=1
+    for index in A B C D; do
+      cli="lncli_cashu_$index"
+      info=''
+      walletbalance=''
+      listunspent=''
+      synced_to_chain=false
+      synced_to_graph=false
+      wallet_balance_query_status=FAILED
+      list_unspent_query_status=FAILED
+      if info="$("$cli" getinfo 2>&1)"; then
+        if sync="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({"synced_to_chain": d.get("synced_to_chain") is True, "synced_to_graph": d.get("synced_to_graph") is True}))' <<<"$info" 2>/dev/null)"; then
+          synced_to_chain="$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["synced_to_chain"]).lower())' <<<"$sync")"
+          synced_to_graph="$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["synced_to_graph"]).lower())' <<<"$sync")"
+        fi
+      fi
+      if walletbalance="$("$cli" walletbalance 2>&1)" && python3 -c 'import json,sys; json.load(sys.stdin)' <<<"$walletbalance" >/dev/null 2>&1; then
+        wallet_balance_query_status=READY
+      fi
+      if listunspent="$("$cli" listunspent --min_confs=1 2>&1)" && python3 -c 'import json,sys; json.load(sys.stdin)' <<<"$listunspent" >/dev/null 2>&1; then
+        list_unspent_query_status=READY
+      fi
+      [[ "$synced_to_chain" == true && "$synced_to_graph" == true && "$wallet_balance_query_status" == READY && "$list_unspent_query_status" == READY ]] || all_ready=0
+      evidence="$(python3 - "$evidence" "$index" "$synced_to_chain" "$synced_to_graph" "$wallet_balance_query_status" "$list_unspent_query_status" <<'PY'
+import json, sys
+items = json.loads(sys.argv[1])
+items.append({
+    "backend": sys.argv[2],
+    "synced_to_chain": sys.argv[3] == "true",
+    "synced_to_graph": sys.argv[4] == "true",
+    "wallet_balance_query_status": sys.argv[5],
+    "list_unspent_query_status": sys.argv[6],
+})
+print(json.dumps(items))
+PY
+)"
+    done
+    cashu_wallet_sync_readiness="$evidence"
+    [[ "$all_ready" -eq 1 ]] && { echo "Cashu LND A-D wallet sync READY"; return 0; }
+    sleep 1
+  done
+  for index in A B C D; do
+    backend_evidence="$(python3 - "$cashu_wallet_sync_readiness" "$index" <<'PY'
+import json, sys
+matches = [item for item in json.loads(sys.argv[1]) if item["backend"] == sys.argv[2]]
+print(json.dumps(matches[0] if matches else {"backend": sys.argv[2]}))
+PY
+)"
+    cashu_stage "$index" lightning_backend FAILED "$backend_evidence" "wallet/chain/graph sync readiness timed out"
+    cashu_stage "$index" lightning_mesh FAILED "$backend_evidence" "wallet/chain/graph sync readiness timed out"
+  done
+  "$root/scripts/ecashmesh-lab-down.sh" >/dev/null 2>&1 || true
+  fail "Cashu LND wallet sync readiness timed out; channel creation was not attempted"
+}
+
+cashu_wallet_sync_readiness
+
+cashu_channel_capacity_sat=200000
+cashu_channel_push_sat=100000
+cashu_channel_records='[]'
+cashu_open_channel() {
+  local from="$1" to="$2" output pending point
+  if ! output="$(cashu_lnd_cli "$from" openchannel --node_key="$(cashu_peer_identity "$to")" --local_amt="$cashu_channel_capacity_sat" --push_amt="$cashu_channel_push_sat" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  point=""
+  for _ in $(seq 1 30); do
+    if pending="$(cashu_lnd_cli "$from" pendingchannels)" && point="$(python3 -c 'import json,sys; remote=sys.argv[1]; channels=json.loads(sys.argv[2]).get("pending_open_channels", []); print(next((item.get("channel", {}).get("channel_point", "") for item in channels if item.get("channel", {}).get("remote_node_pub") == remote), ""))' "$(cashu_peer_identity "$to")" "$pending")" && [[ -n "$point" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  [[ -n "$point" ]] || return 1
+  cashu_channel_records="$(python3 - "$cashu_channel_records" "$from" "$to" "$point" "$cashu_channel_capacity_sat" "$cashu_channel_push_sat" <<'PY'
+import json, sys
+items = json.loads(sys.argv[1])
+txid, output_index = sys.argv[4].rsplit(":", 1)
+items.append({"from": sys.argv[2], "to": sys.argv[3], "funding_txid": txid, "channel_point": sys.argv[4], "output_index": int(output_index), "capacity_sat": int(sys.argv[5]), "push_sat": int(sys.argv[6])})
+print(json.dumps(items))
+PY
+)"
+}
+# Each 200k channel pushes 100k to its peer, leaving 100k outbound liquidity
+# at both endpoints. Confirm between opens so the initiating wallet's change
+# output is real, confirmed funding for the next channel.
+for pair in 'A B' 'A C' 'A D' 'A lnd2'; do
+  set -- $pair
+  cashu_open_channel "$1" "$2" || { cashu_stage "$1" lightning_mesh FAILED "{\"capacity_sat\":$cashu_channel_capacity_sat,\"push_sat\":$cashu_channel_push_sat}" "channel open from $1 to $2 failed"; fail "Cashu LND channel open from $1 to $2 failed"; }
+  btccli generatetoaddress 6 "$(btccli getnewaddress)" >/dev/null || fail "Bitcoin Core could not confirm Cashu LND channel from $1 to $2"
+done
+
+cashu_verify_channel() {
+  local from="$1" to="$2" channel txid confirmations
+  txid="$(python3 - "$cashu_channel_records" "$from" "$to" <<'PY'
+import json, sys
+channel = next(item for item in json.loads(sys.argv[1]) if item["from"] == sys.argv[2] and item["to"] == sys.argv[3])
+print(channel["funding_txid"])
+PY
+)"
+  channel=""
+  for _ in $(seq 1 90); do
+    channel="$(cashu_lnd_cli "$from" listchannels | python3 -c 'import json,sys; cs=[c for c in json.load(sys.stdin).get("channels",[]) if c.get("remote_pubkey")==sys.argv[1] and c.get("active")]; print(json.dumps(cs[0]) if cs else "")' "$(cashu_peer_identity "$to")")"
+    [[ -n "$channel" ]] && break
+    sleep 1
+  done
+  [[ -n "$channel" ]] || return 1
+  confirmations="$(cashu_lnd_cli "$from" listchaintxns | python3 -c 'import json,sys; tx=next(item for item in json.load(sys.stdin).get("transactions",[]) if item.get("tx_hash")==sys.argv[1]); assert int(tx.get("num_confirmations",0)) >= 6; print(tx["num_confirmations"])' "$txid")" || return 1
+  cashu_channel_records="$(python3 - "$cashu_channel_records" "$from" "$to" "$channel" "$confirmations" <<'PY'
+import json, sys
+items = json.loads(sys.argv[1])
+for item in items:
+    if item["from"] == sys.argv[2] and item["to"] == sys.argv[3]:
+        channel = json.loads(sys.argv[4])
+        item.update({"channel_id": channel.get("chan_id"), "active": bool(channel.get("active")), "confirmations": int(sys.argv[5]), "local_balance_sat": int(channel.get("local_balance", 0)), "remote_balance_sat": int(channel.get("remote_balance", 0))})
+print(json.dumps(items))
+PY
+)"
+}
+for pair in 'A B' 'A C' 'A D' 'A lnd2'; do
+  set -- $pair
+  cashu_verify_channel "$1" "$2" || { cashu_stage "$1" lightning_mesh FAILED "{\"channels\":$cashu_channel_records}" "channel from $1 to $2 did not become active with six confirmations"; fail "Cashu LND channel from $1 to $2 did not become active"; }
+done
+
+# A confirmed active channel is not yet sufficient to route through a star:
+# each leaf needs the other public spokes in its graph.  Poll the actual route
+# finder instead of guessing a gossip delay.  This is deliberately before any
+# invoice is created, so a graph-convergence failure cannot be misreported as
+# a payment failure.
+cashu_route_readiness='[]'
+cashu_query_route() {
+  local sender="$1" receiver="$2" label="$3" response
+  if ! response="$(cashu_lnd_cli "$sender" queryroutes --dest="$(cashu_peer_identity "$receiver")" --amt=1000 2>&1)"; then
+    python3 - "$label" "$sender" "$receiver" "$response" <<'PY'
+import json, sys
+print(json.dumps({"label": sys.argv[1], "from": sys.argv[2], "to": sys.argv[3],
+                  "amount_sat": 1000, "status": "WAITING", "failure_reason": sys.argv[4]}))
+PY
+    return 1
+  fi
+  if ! python3 - "$label" "$sender" "$receiver" "$(cashu_peer_identity "$receiver")" "$response" <<'PY'
+import json, sys
+
+label, sender, receiver, destination, raw = sys.argv[1:]
+try:
+    document = json.loads(raw)
+    routes = document.get("routes", [])
+    assert routes and routes[0].get("hops"), document
+    hops = routes[0]["hops"]
+    assert hops[-1].get("pub_key") == destination, hops
+    evidence = [{key: hop.get(key) for key in ("chan_id", "pub_key", "amt_to_forward", "fee", "fee_msat")}
+                for hop in hops]
+    print(json.dumps({"label": label, "from": sender, "to": receiver, "amount_sat": 1000,
+                      "status": "READY", "hop_count": len(hops), "hops": evidence,
+                      "success_prob": document.get("success_prob")}))
+except Exception as error:
+    print(json.dumps({"label": label, "from": sender, "to": receiver, "amount_sat": 1000,
+                      "status": "WAITING", "failure_reason": "invalid queryroutes response: " + str(error)}))
+    raise SystemExit(1)
+PY
+  then
+    return 1
+  fi
+}
+cashu_wait_for_graph_routes() {
+  local attempt spec sender receiver label route routes all_ready
+  for attempt in $(seq 1 90); do
+    routes='[]'
+    all_ready=1
+    for spec in \
+      'A B cashu_a_to_b' 'A C cashu_a_to_c' 'A D cashu_a_to_d' \
+      'B A cashu_b_to_a' 'B C cashu_b_to_c' 'B D cashu_b_to_d' \
+      'C A cashu_c_to_a' 'C B cashu_c_to_b' 'C D cashu_c_to_d' \
+      'D A cashu_d_to_a' 'D B cashu_d_to_b' 'D C cashu_d_to_c'; do
+      set -- $spec
+      sender="$1"; receiver="$2"; label="$3"
+      if route="$(cashu_query_route "$sender" "$receiver" "$label")"; then :; else all_ready=0; fi
+      routes="$(python3 - "$routes" "$route" <<'PY'
+import json, sys
+items = json.loads(sys.argv[1])
+items.append(json.loads(sys.argv[2]))
+print(json.dumps(items))
+PY
+)"
+    done
+    cashu_route_readiness="$routes"
+    [[ "$all_ready" -eq 1 ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+if ! cashu_wait_for_graph_routes; then
+  for index in A B C D; do
+    cashu_stage "$index" lightning_graph FAILED "$(python3 - "$cashu_route_readiness" "$index" <<'PY'
+import json, sys
+routes, node = json.loads(sys.argv[1]), sys.argv[2]
+print(json.dumps({"route_readiness": [route for route in routes if route["from"] == node]}))
+PY
+)" "public channel graph did not converge to all required Cashu routes within 90 seconds"
+  done
+  fail "Cashu LND public graph did not converge; see $cashu_diagnostics"
+fi
+for index in A B C D; do
+  cashu_stage "$index" lightning_graph READY "$(python3 - "$cashu_route_readiness" "$index" <<'PY'
+import json, sys
+routes, node = json.loads(sys.argv[1]), sys.argv[2]
+print(json.dumps({"route_readiness": [route for route in routes if route["from"] == node]}))
+PY
+)"
+done
+
+cashu_lnd_send_payment_v2() {
+  local sender="$1" invoice="$2" payload
+  payload="$(python3 -c 'import json,sys; print(json.dumps({"payment_request":sys.argv[1],"timeout_seconds":60,"fee_limit_msat":1000000,"no_inflight_updates":False}))' "$invoice")"
+  curl --fail --silent --show-error --cacert "$(cashu_lnd_value "$sender" tls)" \
+    -H "Grpc-Metadata-macaroon: $(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_bytes().hex())' "$(cashu_lnd_value "$sender" macaroon)")" \
+    -H 'Content-Type: application/json' --data "$payload" "https://localhost:$(cashu_lnd_value "$sender" rest)/v2/router/send"
+}
+cashu_mesh_payment() {
+  local sender="$1" receiver="$2" label="$3" created invoice hash response terminal settled preimage started latency error_file
+  error_file="$state/cashu-mesh-$label.error"
+  if ! created="$(cashu_lnd_cli "$receiver" addinvoice --amt=1000 2>&1)"; then printf 'invoice creation failed: %s\n' "$created" >"$error_file"; return 1; fi
+  if ! invoice="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["payment_request"])' <<<"$created")" || ! hash="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["r_hash"])' <<<"$created")"; then printf 'invalid invoice response: %s\n' "$created" >"$error_file"; return 1; fi
+  started="$(python3 -c 'import time; print(time.time_ns()//1000000)')"
+  if ! response="$(cashu_lnd_send_payment_v2 "$sender" "$invoice" 2>&1)"; then printf 'send_payment_v2 failed: %s\n' "$response" >"$error_file"; return 1; fi
+  if ! terminal="$(python3 "$root/scripts/ecashmesh-lab-lightning-payment-status.py" <<<"$response" 2>>"$error_file")"; then printf 'terminal payment validation failed; raw response: %s\n' "$response" >>"$error_file"; return 1; fi
+  preimage="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["payment_preimage"])' <<<"$terminal")"
+  if ! settled="$(cashu_lnd_cli "$receiver" lookupinvoice --rhash="$hash" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("state")=="SETTLED", d; print(d["state"])')"; then printf 'destination invoice did not settle\n' >>"$error_file"; return 1; fi
+  latency="$(( $(python3 -c 'import time; print(time.time_ns()//1000000)') - started ))"
+  python3 - "$label" "$sender" "$receiver" "$settled" "$preimage" "$latency" <<'PY'
+import json, sys
+print(json.dumps({"label": sys.argv[1], "from": sys.argv[2], "to": sys.argv[3], "amount_sat": 1000, "payment_status": "SUCCEEDED", "invoice_settled": sys.argv[4], "preimage_present": bool(sys.argv[5]), "latency_ms": int(sys.argv[6])}))
+PY
+}
+cashu_mesh_payments='[]'
+# A star with active channels in both directions is sufficient for every
+# ordered Cashu pair. Exercise all twelve paths before a mint daemon is
+# allowed to start; this proves routing rather than merely peer connectivity.
+for spec in \
+  'A B cashu_a_to_b' 'A C cashu_a_to_c' 'A D cashu_a_to_d' \
+  'B A cashu_b_to_a' 'B C cashu_b_to_c' 'B D cashu_b_to_d' \
+  'C A cashu_c_to_a' 'C B cashu_c_to_b' 'C D cashu_c_to_d' \
+  'D A cashu_d_to_a' 'D B cashu_d_to_b' 'D C cashu_d_to_c'; do
+  set -- $spec
+  if ! payment="$(cashu_mesh_payment "$1" "$2" "$3")"; then
+    error="$(<"$state/cashu-mesh-$3.error")"
+    cashu_stage "$1" lightning_mesh FAILED "{\"channels\":$cashu_channel_records}" "mesh payment $3 failed: $error"
+    fail "Cashu LND mesh payment $3 failed; see $state/cashu-mesh-$3.error"
+  fi
+  cashu_mesh_payments="$(python3 - "$cashu_mesh_payments" "$payment" <<'PY'
+import json, sys
+payments = json.loads(sys.argv[1]); payments.append(json.loads(sys.argv[2])); print(json.dumps(payments))
+PY
+)"
+done
+for index in A B C D; do
+  cashu_stage "$index" lightning_mesh READY "$(python3 - "$index" "$(cashu_lnd_value "$index" identity)" "$(cashu_lnd_value "$index" p2p)" "$(cashu_lnd_value "$index" rpc)" "$cashu_channel_records" "$cashu_mesh_payments" <<'PY'
+import json, sys
+print(json.dumps({"identity_pubkey": sys.argv[2], "p2p_port": int(sys.argv[3]), "rpc_port": int(sys.argv[4]), "channels": json.loads(sys.argv[5]), "routing_payments": json.loads(sys.argv[6])}))
+PY
+)"
+done
+
 # Four independent CDK mintd processes use their own configs, SQLite state,
-# mnemonic/keyset and listener ports. They attach to LND #2 while the pinned
-# CDK wallet executor pays from LND #1 and verifies real issuance and melts.
+# mnemonic/keyset and listener ports. Each attaches to its matching Cashu LND
+# backend while the pinned CDK wallet executor pays from LND #1 and verifies
+# real issuance and melts.
 cdk_target="$state/cdk-target/debug/cdk-mintd"
 cashu_smoke_dir="$cdk_dir/crates/ecashmesh-cashu-smoke-runner"
 rm -rf "$cashu_smoke_dir"
@@ -633,9 +1105,9 @@ backend = "lnd"
 unit = "sat"
 
 [lnd]
-address = "https://localhost:$lnd2_rpc_port"
-cert_file = "$lnd2_dir/tls.cert"
-macaroon_file = "$lnd2_dir/data/chain/bitcoin/regtest/admin.macaroon"
+address = "https://localhost:$(cashu_lnd_value "$index" rpc)"
+cert_file = "$(cashu_lnd_value "$index" tls)"
+macaroon_file = "$(cashu_lnd_value "$index" macaroon)"
 
 [bdk]
 mnemonic = "env:CDK_MINTD_MNEMONIC"
@@ -695,7 +1167,7 @@ if 'network = "regtest"' not in config or f'listen_port = {port}' not in config:
     raise SystemExit(f"Cashu {name} config is not isolated regtest port {port}")
 PY
   cashu_stage "$index" protocol READY "{\"endpoints\":[\"/v1/info\",\"/v1/keysets\",\"/v1/keys\"],\"network\":\"regtest\",\"state_dir\":\"$state/cashu/$index\"}"
-  cashu_stage "$index" lnd STARTING "{\"port\":$port,\"backend\":\"LND #2\"}"
+  cashu_stage "$index" lnd STARTING "{\"port\":$port,\"backend\":\"Cashu LND $index\",\"backend_rpc_port\":$(cashu_lnd_value "$index" rpc)}"
   smoke_log="$state/cashu-$index-smoke.log"
   set +e
   smoke_result="$(env \
@@ -708,31 +1180,62 @@ PY
   set -e
   if [[ $smoke_rc -ne 0 ]]; then
     smoke_error="$(tail -80 "$smoke_log" | tr '\n' ' ' | cut -c1-4000)"
-    cashu_stage "$index" lnd FAILED "{\"port\":$port,\"backend\":\"LND #2\",\"log\":\"$smoke_log\"}" "$smoke_error"
+    cashu_stage "$index" lnd FAILED "{\"port\":$port,\"backend\":\"Cashu LND $index\",\"backend_rpc_port\":$(cashu_lnd_value "$index" rpc),\"log\":\"$smoke_log\"}" "$smoke_error"
     cashu_smoke_stage "$index" FAILED "{\"overall\":{\"status\":\"FAILED\",\"failure_stage\":\"executor\"}}" "$smoke_error"
     fail "Cashu $index real CDK smoke test failed; see $smoke_log"
   fi
   python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); assert d.get("status")=="READY"; print(json.dumps(d))' <<<"$smoke_result" >/dev/null || fail "Cashu $index smoke executor returned invalid evidence"
-  cashu_stage "$index" lnd READY "{\"port\":$port,\"backend\":\"LND #2\",\"smoke_executor\":\"$cashu_smoke_target\"}"
+  cashu_stage "$index" lnd READY "{\"port\":$port,\"backend\":\"Cashu LND $index\",\"backend_identity\":\"$(cashu_lnd_value "$index" identity)\",\"backend_rpc_port\":$(cashu_lnd_value "$index" rpc),\"smoke_executor\":\"$cashu_smoke_target\"}"
   cashu_smoke_stage "$index" READY "$(python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); print(json.dumps({"mint_quote":{"status":"READY",**d["mint_quote"]},"quote_payment":{"status":"READY","payment_status":d["mint_quote"]["payment_status"],"preimage_present":d["mint_quote"]["preimage_present"]},"issuance":{"status":"READY",**d["issuance"]},"melt_quote":{"status":"READY",**d["melt_quote"]},"melt_payment":{"status":"READY",**d["melt_payment"]},"settlement":{"status":"READY",**d["settlement"]},"overall":{"status":"READY","latency_ms":d["latency_ms"]}}))' <<<"$smoke_result")"
 done
 
-cross_log="$state/cashu-A-to-B-smoke.log"
-set +e
-cross_result="$(env \
-  ECASHMESH_LAB_MODE=true PAYMENT_ENVIRONMENT=regtest \
-  ECASHMESH_LAB_LND_RPC_ADDR="$ECASHMESH_LAB_LND_RPC_ADDR" \
-  ECASHMESH_LAB_LND_TLS_CERT="$ECASHMESH_LAB_LND_TLS_CERT" \
-  ECASHMESH_LAB_LND_MACAROON="$ECASHMESH_LAB_LND_MACAROON" \
-  "$cashu_smoke_target" cross A http://127.0.0.1:5100 B http://127.0.0.1:5101 "$state/cashu" 2>"$cross_log")"
-cross_rc=$?
-set -e
-if [[ $cross_rc -ne 0 ]]; then
-  cross_error="$(tail -80 "$cross_log" | tr '\n' ' ' | cut -c1-4000)"
-  cashu_smoke_stage A FAILED "{\"cross_mint\":{\"status\":\"FAILED\",\"destination\":\"B\",\"failure_stage\":\"executor\"}}" "$cross_error"
-  fail "Cashu A to Cashu B real settlement failed; see $cross_log"
-fi
-cashu_smoke_stage A READY "$(python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); assert d.get("status")=="READY"; print(json.dumps({"cross_mint":d}))' <<<"$cross_result")"
+cashu_mint_url() {
+  case "$1" in A) printf '%s' http://127.0.0.1:5100 ;; B) printf '%s' http://127.0.0.1:5101 ;; C) printf '%s' http://127.0.0.1:5102 ;; D) printf '%s' http://127.0.0.1:5103 ;; *) fail "unknown Cashu mint $1" ;; esac
+}
+cashu_cross_routes='[]'
+# Prove the real Cashu mint/melt transport through all representative source
+# pairs after each mint has independent backend liquidity. The A -> B record
+# remains the explicit acceptance path; the other five show that the mesh is
+# usable beyond a single spoke.
+for spec in 'A B' 'A C' 'A D' 'B C' 'C D' 'D A'; do
+  set -- $spec
+  source="$1" destination="$2" route="${source}_to_${destination}"
+  cross_log="$state/cashu-$route-smoke.log"
+  set +e
+  cross_result="$(env \
+    ECASHMESH_LAB_MODE=true PAYMENT_ENVIRONMENT=regtest \
+    ECASHMESH_LAB_LND_RPC_ADDR="$ECASHMESH_LAB_LND_RPC_ADDR" \
+    ECASHMESH_LAB_LND_TLS_CERT="$ECASHMESH_LAB_LND_TLS_CERT" \
+    ECASHMESH_LAB_LND_MACAROON="$ECASHMESH_LAB_LND_MACAROON" \
+    "$cashu_smoke_target" cross "$source" "$(cashu_mint_url "$source")" "$destination" "$(cashu_mint_url "$destination")" "$state/cashu" 2>"$cross_log")"
+  cross_rc=$?
+  set -e
+  if [[ $cross_rc -ne 0 ]]; then
+    cross_error="$(tail -80 "$cross_log" | tr '\n' ' ' | cut -c1-4000)"
+    cashu_stage "$source" "cross_mint_$route" FAILED "{\"source\":\"$source\",\"destination\":\"$destination\",\"failure_stage\":\"executor\",\"log\":\"$cross_log\"}" "$cross_error"
+    [[ "$route" != A_to_B ]] || cashu_smoke_stage A FAILED "{\"cross_mint\":{\"status\":\"FAILED\",\"destination\":\"B\",\"failure_stage\":\"executor\"}}" "$cross_error"
+    fail "Cashu $source to Cashu $destination real settlement failed; see $cross_log"
+  fi
+  [[ "$(cashu_lnd_value "$source" identity)" != "$(cashu_lnd_value "$destination" identity)" ]] || fail "Cashu $source and $destination unexpectedly share a Lightning identity"
+  cross_actual="$(python3 - "$source" "$destination" "$(cashu_lnd_value "$source" identity)" "$(cashu_lnd_value "$destination" identity)" "$cross_result" <<'PY'
+import json, sys
+result = json.loads(sys.argv[5])
+assert result.get("status") == "READY", result
+print(json.dumps({"source": sys.argv[1], "destination": sys.argv[2], "source_backend_identity": sys.argv[3], "destination_backend_identity": sys.argv[4], "distinct_backends": sys.argv[3] != sys.argv[4], "settlement": result}))
+PY
+)"
+  cashu_stage "$source" "cross_mint_$route" READY "$cross_actual"
+  cashu_cross_routes="$(python3 - "$cashu_cross_routes" "$cross_actual" <<'PY'
+import json, sys
+items = json.loads(sys.argv[1]); items.append(json.loads(sys.argv[2])); print(json.dumps(items))
+PY
+)"
+  [[ "$route" != A_to_B ]] || cashu_smoke_stage A READY "$(python3 - "$cross_actual" <<'PY'
+import json, sys
+print(json.dumps({"cross_mint": json.loads(sys.argv[1])["settlement"]}))
+PY
+)"
+done
 
 for _ in $(seq 1 300); do
   [[ -f "$state/fedimint-attestation.json" ]] && break
@@ -780,6 +1283,10 @@ if len(set(ids)) != 4 or any(not value for value in ids):
 cashu_diagnostics = json.loads((state / "cashu-diagnostics.json").read_text())
 for index in "ABCD":
     stages = cashu_diagnostics.get("cashu", {}).get(index, {})
+    if stages.get("lightning_backend", {}).get("status") != "READY":
+        raise SystemExit(f"Cashu {index} independent Lightning backend is not verified")
+    if stages.get("lightning_mesh", {}).get("status") != "READY":
+        raise SystemExit(f"Cashu {index} routed Lightning mesh is not verified")
     if stages.get("lnd", {}).get("status") != "READY":
         raise SystemExit(f"Cashu {index} LND backend is not verified")
     if stages.get("smoke_test", {}).get("status") != "READY":
@@ -787,6 +1294,11 @@ for index in "ABCD":
 cross_mint = cashu_diagnostics.get("cashu", {}).get("A", {}).get("smoke_test", {}).get("cross_mint", {})
 if cross_mint.get("status") != "READY" or cross_mint.get("destination") != "B":
     raise SystemExit("Cashu A to Cashu B real settlement is not verified")
+cross_backends = cashu_diagnostics.get("cashu", {}).get("A", {}).get("cross_mint", {})
+for source, destination in (("A", "B"), ("A", "C"), ("A", "D"), ("B", "C"), ("C", "D"), ("D", "A")):
+    route = cashu_diagnostics.get("cashu", {}).get(source, {}).get(f"cross_mint_{source}_to_{destination}", {})
+    if route.get("status") != "READY" or not route.get("actual", {}).get("distinct_backends"):
+        raise SystemExit(f"Cashu {source} to {destination} did not settle through distinct Lightning backends")
 lightning = json.loads((state / "lightning-diagnostics.json").read_text()).get("lightning", {})
 if lightning.get("lightning_ready") != "READY":
     raise SystemExit("bidirectional real Lightning payment readiness is not verified")
@@ -803,8 +1315,10 @@ for index, port in zip("ABCD", range(5100, 5104)):
     start = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "lstart="], text=True, capture_output=True).stdout.strip()
     if not start or start != start_file.read_text().strip():
         raise SystemExit(f"Cashu {index} process is not running")
+    backend = cashu_diagnostics["cashu"][index]["lightning_backend"]["actual"]
     cashu.append({"name": index, "url": f"http://127.0.0.1:{port}", "port": port, "pid": pid,
-                  "process_start": start, "state_dir": str(mint_dir), "config": str(mint_dir / "config.toml")})
+                  "process_start": start, "state_dir": str(mint_dir), "config": str(mint_dir / "config.toml"),
+                  "lightning_backend": {key: backend[key] for key in ("identity_pubkey", "p2p_port", "rpc_port")}})
 runner_pid = int((state / "runner.pid").read_text().strip())
 runner_start = subprocess.run(["/bin/ps", "-p", str(runner_pid), "-o", "lstart="], text=True, capture_output=True).stdout.strip()
 if not runner_start or runner_start != (state / "runner.start").read_text().strip():
