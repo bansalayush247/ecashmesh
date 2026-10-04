@@ -97,7 +97,98 @@ pub struct FederationObservation {
     pub gateways: Evidence<Vec<GatewayObservation>>,
     pub balance_sats: Evidence<Amount>,
     pub network: Evidence<String>,
+    pub metrics: FedimintMetrics,
     pub issues: Vec<String>,
+}
+
+/// Gateway evidence. `outbound_liquidity_sats` stays `None`: Fedimint v0.12.1
+/// exposes no authoritative gateway liquidity, and none is inferred.
+#[derive(Clone, Debug, Serialize)]
+pub struct FedimintGatewayMetrics {
+    pub gateway_id: Option<String>,
+    pub gateway_url: Option<String>,
+    pub gateway_protocol: Option<String>,
+    /// `registered`: listed by the federation; `verified`: identity checked and
+    /// a fee bound to this invoice was obtained. Neither is a payment probe.
+    pub gateway_status: String,
+    pub fee_base_msat: Option<u64>,
+    pub fee_ppm: Option<u64>,
+    /// Gateway fee for the evaluated amount, when quoted.
+    pub gateway_fee_sats: Option<u64>,
+    /// The gateway returned routing info for this federation, if reported.
+    pub routing_available: Option<bool>,
+    pub outbound_liquidity_sats: Option<u64>,
+    pub liquidity_status: String,
+}
+
+/// Federation reserve evidence. Liabilities (outstanding ecash) have no public
+/// Fedimint endpoint, so coverage and solvency remain unknown.
+#[derive(Clone, Debug, Serialize)]
+pub struct FedimintReserveMetrics {
+    pub reserve_sats: Option<u64>,
+    pub pending_pegout_sats: Option<u64>,
+    pub pending_change_sats: Option<u64>,
+    pub pending_transaction_count: Option<u64>,
+    pub liabilities_sats: Option<u64>,
+    pub coverage_ratio: Option<f64>,
+    pub solvency_status: String,
+    pub confidence: String,
+    pub source: Option<String>,
+}
+
+impl Default for FedimintReserveMetrics {
+    fn default() -> Self {
+        Self {
+            reserve_sats: None,
+            pending_pegout_sats: None,
+            pending_change_sats: None,
+            pending_transaction_count: None,
+            liabilities_sats: None,
+            coverage_ratio: None,
+            solvency_status: "unknown".into(),
+            confidence: "unknown".into(),
+            source: None,
+        }
+    }
+}
+
+/// Payment reliability evidence. Gateway discovery, registry reads and fee
+/// quotes are not payment outcomes and are never counted here.
+#[derive(Clone, Debug, Serialize)]
+pub struct ReliabilityEvidence {
+    pub successful_payments: Option<u64>,
+    pub failed_payments: Option<u64>,
+    pub success_rate_basis_points: Option<u16>,
+    pub confidence: String,
+}
+
+impl Default for ReliabilityEvidence {
+    fn default() -> Self {
+        Self {
+            successful_payments: None,
+            failed_payments: None,
+            success_rate_basis_points: None,
+            confidence: "unknown".into(),
+        }
+    }
+}
+
+/// Structured Fedimint evidence for display. `None` always means unknown.
+#[derive(Clone, Debug, Serialize)]
+pub struct FedimintMetrics {
+    pub wallet_balance_sats: Option<u64>,
+    pub balance_source: Option<String>,
+    pub required_balance_sats: Option<u64>,
+    pub funding_headroom_sats: Option<i64>,
+    pub funding_feasible: Option<bool>,
+    /// The gateway a quote was bound to.
+    pub selected_gateway: Option<FedimintGatewayMetrics>,
+    pub gateway_candidate_count: Option<u64>,
+    /// Gateways listed in the federation registry.
+    pub gateways: Vec<FedimintGatewayMetrics>,
+    pub reserve: FedimintReserveMetrics,
+    pub reliability: ReliabilityEvidence,
+    pub observed_at_unix_seconds: u64,
 }
 
 /// Gateway data emitted by Fedimint’s cached gateway announcements.
@@ -111,6 +202,8 @@ pub struct GatewayObservation {
     pub expires_at_unix_seconds: Option<u64>,
     /// Explicit gateway availability, if reported; cache presence is unknown.
     pub available: Option<bool>,
+    pub protocol: Option<String>,
+    pub routing_available: Option<bool>,
 }
 
 /// A non-mutating payment quote supplied by the configured bridge.
@@ -127,6 +220,8 @@ pub struct FedimintQuote {
     pub selected_gateway_id: Option<String>,
     pub observed_at: EvidenceTimestamp,
     pub expires_at_unix_seconds: Option<u64>,
+    /// Funding and selected-gateway evidence bound to this quote.
+    pub metrics: FedimintMetrics,
 }
 
 /// Gateway-announced fee evidence for a federation whose module cannot provide
@@ -171,6 +266,8 @@ pub struct FedimintService {
     catalog_host: Option<FederationConfig>,
     joined_ids: Arc<RwLock<Vec<String>>>,
     max_age_seconds: u64,
+    /// Accept loopback HTTP gateways in regtest estimates (gated lab only).
+    lab_loopback_gateways: bool,
 }
 
 impl FedimintService {
@@ -198,6 +295,7 @@ impl FedimintService {
             configs: Arc::new(RwLock::new(configs)),
             catalog_host: None,
             joined_ids: Arc::new(RwLock::new(Vec::new())),
+            lab_loopback_gateways: false,
             max_age_seconds,
         })
     }
@@ -210,6 +308,14 @@ impl FedimintService {
             .read()
             .expect("federation catalog lock")
             .clone()
+    }
+
+    /// Lets gateway estimates name loopback HTTP gateways, for regtest
+    /// evidence only. Callers enable this solely in the gated regtest lab.
+    #[must_use]
+    pub const fn with_regtest_lab_loopback_gateways(mut self, enabled: bool) -> Self {
+        self.lab_loopback_gateways = enabled;
+        self
     }
 
     /// Enables recovery of joined sources from an operator-selected local bridge.
@@ -309,9 +415,16 @@ impl FedimintService {
             let mut config = host.clone();
             config.id = format!("fedimint:{}", id.to_lowercase());
             config.federation_id = id.to_lowercase();
+            // The operator's catalog label distinguishes federations that
+            // publish the same meta name (e.g. every devimint federation).
             config.label = info
-                .pointer("/meta/federation_name")
+                .get("label")
                 .and_then(Value::as_str)
+                .filter(|label| !label.trim().is_empty())
+                .or_else(|| {
+                    info.pointer("/meta/federation_name")
+                        .and_then(Value::as_str)
+                })
                 .unwrap_or(id)
                 .chars()
                 .take(128)
@@ -328,6 +441,7 @@ impl FedimintService {
         join_all(configs.into_iter().map(|config| self.observe(config, now))).await
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn observe(&self, config: FederationConfig, now: u64) -> FederationObservation {
         let timestamp = EvidenceTimestamp::from_unix_seconds(now);
         let mut issues = Vec::new();
@@ -379,13 +493,52 @@ impl FedimintService {
                 Evidence::Unknown
             }
         };
-        let (balance_sats, network) = match info {
-            Ok(value) => parse_wallet_info(&value, &config.federation_id, timestamp),
+        let (balance_sats, network, balance_source, reserve) = match info {
+            Ok(value) => {
+                let entry = value.get(&config.federation_id).unwrap_or(&value);
+                let (balance, network) =
+                    parse_wallet_info(&value, &config.federation_id, timestamp);
+                (
+                    balance,
+                    network,
+                    entry
+                        .get("balance_source")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    entry.get("reserve").map(parse_reserve).unwrap_or_default(),
+                )
+            }
             Err(error) => {
                 issues.push(format!("wallet info unavailable: {error}"));
-                (Evidence::Unknown, Evidence::Unknown)
+                (
+                    Evidence::Unknown,
+                    Evidence::Unknown,
+                    None,
+                    FedimintReserveMetrics::default(),
+                )
             }
         };
+        let gateway_metrics = gateways
+            .value()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|gateway| FedimintGatewayMetrics {
+                        gateway_id: gateway.id.clone(),
+                        gateway_url: gateway.api.clone(),
+                        gateway_protocol: gateway.protocol.clone(),
+                        gateway_status: "registered".into(),
+                        fee_base_msat: gateway.routing_fee_base_msat,
+                        fee_ppm: gateway.routing_fee_ppm,
+                        gateway_fee_sats: None,
+                        routing_available: gateway.routing_available,
+                        outbound_liquidity_sats: None,
+                        liquidity_status: "unknown".into(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let wallet_balance_sats = balance_sats.value().map(|amount| amount.sats());
         let id = ConnectorId::new(config.id.clone()).expect("validated federation ID");
         let snapshot = ConnectorSnapshot {
             id: id.clone(),
@@ -395,6 +548,7 @@ impl FedimintService {
                 .clone()
                 .map(|available| LiquidityInfo::new(available, None)),
             fee: Evidence::Unknown,
+            // Routing discovery is not a payment-success observation.
             reliability: Evidence::Unknown,
             evidence: ConnectorEvidence::new(
                 id,
@@ -413,6 +567,19 @@ impl FedimintService {
             gateways,
             balance_sats,
             network,
+            metrics: FedimintMetrics {
+                wallet_balance_sats,
+                balance_source,
+                required_balance_sats: None,
+                funding_headroom_sats: None,
+                funding_feasible: None,
+                selected_gateway: None,
+                gateway_candidate_count: None,
+                gateways: gateway_metrics,
+                reserve,
+                reliability: ReliabilityEvidence::default(),
+                observed_at_unix_seconds: now,
+            },
             issues,
         }
     }
@@ -480,6 +647,7 @@ impl FedimintService {
             invoice,
             amount,
             now,
+            self.lab_loopback_gateways,
         )
     }
 
@@ -590,6 +758,17 @@ fn parse_gateways(value: &Value) -> Vec<GatewayObservation> {
                 // and must not be presented as an absolute expiry.
                 expires_at_unix_seconds: number_at(Some(info), &["expires_at", "expiresAt"]),
                 available: info.get("available").and_then(Value::as_bool),
+                protocol: string_at(
+                    gateway,
+                    &["gateway_protocol", "gatewayProtocol", "protocol"],
+                )
+                .or_else(|| string_at(info, &["gateway_protocol", "gatewayProtocol", "protocol"])),
+                routing_available: [gateway, info].into_iter().find_map(|value| {
+                    value
+                        .get("routing_available")
+                        .or_else(|| value.get("routingAvailable"))
+                        .and_then(Value::as_bool)
+                }),
             }
         })
         .collect()
@@ -609,6 +788,25 @@ fn number_at(value: Option<&Value>, names: &[&str]) -> Option<u64> {
             .find_map(|name| value.get(*name).and_then(Value::as_u64))
     })
 }
+/// Reads bridge reserve evidence. Solvency is never derived here: without an
+/// authoritative liability figure, coverage and solvency stay unknown.
+fn parse_reserve(value: &Value) -> FedimintReserveMetrics {
+    let source = value.get("source").and_then(Value::as_str);
+    if source != Some("walletv2_consensus") {
+        return FedimintReserveMetrics::default();
+    }
+    FedimintReserveMetrics {
+        reserve_sats: value.get("reserve_sats").and_then(Value::as_u64),
+        pending_pegout_sats: value.get("pending_pegout_sats").and_then(Value::as_u64),
+        pending_change_sats: value.get("pending_change_sats").and_then(Value::as_u64),
+        pending_transaction_count: value
+            .get("pending_transaction_count")
+            .and_then(Value::as_u64),
+        source: source.map(ToOwned::to_owned),
+        ..FedimintReserveMetrics::default()
+    }
+}
+
 fn parse_wallet_info(
     value: &Value,
     federation_id: &str,

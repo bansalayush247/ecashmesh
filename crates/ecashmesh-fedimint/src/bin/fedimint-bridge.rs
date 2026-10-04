@@ -62,11 +62,28 @@ struct BridgeState {
     catalog: RwLock<HashMap<FederationId, FederationEntry>>,
     catalog_path: PathBuf,
     join_lock: Mutex<()>,
+    regtest_clients: HashMap<FederationId, RegtestClient>,
+}
+
+/// A regtest-lab source wallet explicitly mapped to one federation. The bridge
+/// never opens its database or reads its secret; it runs the pinned
+/// `fedimint-cli` for read-only/non-committing commands only.
+struct RegtestClient {
+    data_dir: PathBuf,
+    cli: PathBuf,
+    // `fedimint-cli` holds the client's exclusive RocksDB lock while running.
+    lock: Mutex<()>,
 }
 
 const LNV2_GATEWAY_LIST_TIMEOUT: Duration = Duration::from_millis(750);
 const LNV2_GATEWAY_PROBE_BUDGET: Duration = Duration::from_millis(1_500);
 const GATEWAY_REGISTRY_TIMEOUT: Duration = Duration::from_millis(1_250);
+// The lab's pinned fedimint-cli is a debug build; startup alone can take ~2s.
+const REGTEST_CLI_TIMEOUT: Duration = Duration::from_millis(2_500);
+const RESERVE_CONSENSUS_TIMEOUT: Duration = Duration::from_millis(1_250);
+// fedimint-walletv2-common endpoint constant; public consensus data.
+const FEDERATION_WALLET_ENDPOINT: &str = "federation_wallet";
+const PENDING_TRANSACTION_CHAIN_ENDPOINT: &str = "pending_transaction_chain";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct FederationEntry {
@@ -171,6 +188,143 @@ fn federation_database_prefix(federation_id: FederationId) -> Vec<u8> {
 
 fn sats_to_msats(sats: u64) -> anyhow::Result<u64> {
     sats.checked_mul(1_000).context("amount overflow")
+}
+
+fn load_regtest_clients() -> anyhow::Result<HashMap<FederationId, RegtestClient>> {
+    if env::var("PAYMENT_ENVIRONMENT").ok().as_deref() != Some("regtest")
+        || env::var("ECASHMESH_ENABLE_INTEROPERABILITY_LAB")
+            .ok()
+            .as_deref()
+            != Some("true")
+    {
+        return Ok(HashMap::new());
+    }
+    let root = env::var_os("ECASHMESH_FEDIMINT_REGTEST_CLIENT_ROOT")
+        .context("ECASHMESH_FEDIMINT_REGTEST_CLIENT_ROOT is required in regtest lab mode")?;
+    let mapping = env::var("ECASHMESH_FEDIMINT_REGTEST_CLIENT_MAP")
+        .context("ECASHMESH_FEDIMINT_REGTEST_CLIENT_MAP is required in regtest lab mode")?;
+    let cli = PathBuf::from(
+        env::var_os("ECASHMESH_LAB_FEDIMINT_CLI")
+            .context("ECASHMESH_LAB_FEDIMINT_CLI is required in regtest lab mode")?,
+    );
+    ensure!(cli.is_file(), "ECASHMESH_LAB_FEDIMINT_CLI does not exist");
+    let names: HashMap<String, String> =
+        serde_json::from_str(&mapping).context("invalid regtest client mapping")?;
+    let mut clients = HashMap::new();
+    for (federation, name) in names {
+        let id = federation
+            .parse()
+            .context("invalid federation ID in regtest mapping")?;
+        ensure!(
+            valid_regtest_client_name(&name),
+            "regtest client mapping must use fed-A-0 through fed-D-0 names"
+        );
+        let data_dir = PathBuf::from(&root).join(name);
+        ensure!(
+            data_dir.is_dir(),
+            "regtest client directory does not exist: {}",
+            data_dir.display()
+        );
+        clients.insert(
+            id,
+            RegtestClient {
+                data_dir,
+                cli: cli.clone(),
+                lock: Mutex::new(()),
+            },
+        );
+    }
+    Ok(clients)
+}
+
+fn valid_regtest_client_name(name: &str) -> bool {
+    matches!(name, "fed-A-0" | "fed-B-0" | "fed-C-0" | "fed-D-0")
+}
+
+/// Runs one read-only or non-committing `fedimint-cli` command.
+async fn regtest_cli(client: &RegtestClient, args: &[&str]) -> anyhow::Result<Value> {
+    let _guard = client.lock.lock().await;
+    let output = tokio::time::timeout(
+        REGTEST_CLI_TIMEOUT,
+        tokio::process::Command::new(&client.cli)
+            .arg(format!("--data-dir={}", client.data_dir.display()))
+            .args(args)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("fedimint-cli timed out")?
+    .context("running fedimint-cli")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Map note-selection failures to the stable bridge error.
+        ensure!(
+            !stderr.to_ascii_lowercase().contains("insufficient"),
+            "insufficient balance"
+        );
+        anyhow::bail!("fedimint-cli {} failed: {stderr}", args.join(" "));
+    }
+    serde_json::from_slice(&output.stdout).context("invalid fedimint-cli output")
+}
+
+/// The mapped lab wallet's own ecash balance, bound to the expected federation.
+async fn regtest_balance_msats(
+    client: &RegtestClient,
+    federation_id: FederationId,
+) -> anyhow::Result<u64> {
+    let info = regtest_cli(client, &["info"]).await?;
+    ensure!(
+        info.get("federation_id").and_then(Value::as_str) == Some(&federation_id.to_string()),
+        "regtest client belongs to a different federation"
+    );
+    ensure!(
+        info.get("network").and_then(Value::as_str) == Some("regtest"),
+        "lab client is not on regtest"
+    );
+    info.get("total_amount_msat")
+        .and_then(Value::as_u64)
+        .context("fedimint-cli info did not report total_amount_msat")
+}
+
+/// The lab wallet's native `LNv2` `send_fee_quote` for an outgoing contract: a
+/// non-committing dry run over its real notes (mint input/change fees, the
+/// Lightning output fee and sub-denomination dust).
+async fn regtest_send_fee_quote_msats(
+    client: &RegtestClient,
+    contract_msat: u64,
+) -> anyhow::Result<u64> {
+    let amount = format!("{contract_msat}msat");
+    let quote = regtest_cli(client, &["module", "lnv2", "fee-quote", &amount]).await?;
+    parse_fee_quote_total_msat(quote.as_str().context("fee quote")?)
+}
+
+/// Parses v0.12.1 `fedimint-cli module lnv2 fee-quote`, which prints the
+/// `FeeQuote` debug form, e.g.
+/// `FeeQuote { input: Amounts({AmountUnit(0): 100msat}), output: ..., dust: ... }`.
+/// Returns `input + output + dust` (`FeeQuote::total`) for Bitcoin only.
+fn parse_fee_quote_total_msat(text: &str) -> anyhow::Result<u64> {
+    let body = text
+        .strip_prefix("FeeQuote { ")
+        .and_then(|rest| rest.strip_suffix(" }"))
+        .context("unexpected fee quote format")?;
+    let parts = body.split("), ").collect::<Vec<_>>();
+    ensure!(parts.len() == 3, "unexpected fee quote format");
+    let mut total = 0_u64;
+    for (name, part) in ["input", "output", "dust"].into_iter().zip(parts) {
+        let entries = part
+            .strip_prefix(&format!("{name}: Amounts({{"))
+            .and_then(|rest| rest.trim_end_matches(')').strip_suffix('}'))
+            .context("unexpected fee quote component")?;
+        for entry in entries.split(", ").filter(|entry| !entry.is_empty()) {
+            let msat = entry
+                .strip_prefix("AmountUnit(0): ")
+                .and_then(|value| value.strip_suffix("msat"))
+                .context("fee quote contains a non-Bitcoin unit")?
+                .parse::<u64>()?;
+            total = total.checked_add(msat).context("fee overflow")?;
+        }
+    }
+    Ok(total)
 }
 
 fn required_balance_msats(
@@ -280,6 +434,87 @@ async fn health() -> Json<Value> {
     Json(json!({"status":"ok","fedimint_version":"0.12.1"}))
 }
 impl BridgeState {
+    /// Source-wallet balance. An explicitly mapped regtest lab client is the
+    /// source wallet for its federation; the bridge's own client is not.
+    async fn balance_msats(
+        &self,
+        federation_id: FederationId,
+        client: &ClientHandleArc,
+    ) -> anyhow::Result<(u64, &'static str)> {
+        if let Some(regtest) = self.regtest_clients.get(&federation_id) {
+            return Ok((
+                regtest_balance_msats(regtest, federation_id).await?,
+                "regtest_lab_client",
+            ));
+        }
+        Ok((client.get_balance_for_btc().await?.msats, "bridge_client"))
+    }
+
+    /// Federation-level walletv2 reserve from threshold guardian consensus.
+    /// Liabilities (outstanding ecash) have no public endpoint, so solvency
+    /// and coverage are always left unknown here.
+    async fn reserve(&self, client: &ClientHandleArc) -> Value {
+        let unknown = json!({
+            "reserve_sats": null, "pending_pegout_sats": null, "pending_change_sats": null,
+            "pending_transaction_count": null, "liabilities_sats": null, "coverage_ratio": null,
+            "solvency_status": "unknown", "confidence": "unknown", "source": null,
+        });
+        let config = client.config().await;
+        let Some(module_id) = config
+            .modules
+            .iter()
+            .find_map(|(id, module)| (module.kind.as_str() == "walletv2").then_some(*id))
+        else {
+            return unknown;
+        };
+        let api = client.api_clone().with_module(module_id);
+        let (wallet, pending) = tokio::join!(
+            tokio::time::timeout(
+                RESERVE_CONSENSUS_TIMEOUT,
+                api.request_current_consensus::<Option<Value>>(
+                    FEDERATION_WALLET_ENDPOINT.to_string(),
+                    fedimint_core::module::ApiRequestErased::default(),
+                ),
+            ),
+            tokio::time::timeout(
+                RESERVE_CONSENSUS_TIMEOUT,
+                api.request_current_consensus::<Vec<Value>>(
+                    PENDING_TRANSACTION_CHAIN_ENDPOINT.to_string(),
+                    fedimint_core::module::ApiRequestErased::default(),
+                ),
+            ),
+        );
+        let (Ok(Ok(wallet)), Ok(Ok(pending))) = (wallet, pending) else {
+            return unknown;
+        };
+        // An absent federation wallet is a consensus fact: no reserve yet.
+        let Some(reserve_sats) = wallet.map_or(Some(0), |wallet| wallet["value"].as_u64()) else {
+            return unknown;
+        };
+        let mut pending_pegout_sats = 0_u64;
+        let mut pending_change_sats = 0_u64;
+        for tx in &pending {
+            // TxInfo: `input` is the federation UTXO spent, `output` its change.
+            let (Some(input), Some(change), Some(fee)) = (
+                tx["input"].as_u64(),
+                tx["output"].as_u64(),
+                tx["fee"].as_u64(),
+            ) else {
+                return unknown;
+            };
+            pending_change_sats = pending_change_sats.saturating_add(change);
+            pending_pegout_sats = pending_pegout_sats
+                .saturating_add(input.saturating_sub(change).saturating_sub(fee));
+        }
+        json!({
+            "reserve_sats": reserve_sats, "pending_pegout_sats": pending_pegout_sats,
+            "pending_change_sats": pending_change_sats, "pending_transaction_count": pending.len(),
+            "liabilities_sats": null, "coverage_ratio": null,
+            "solvency_status": "unknown", "confidence": "unknown",
+            "source": "walletv2_consensus",
+        })
+    }
+
     fn federation_database(&self, federation_id: FederationId) -> Database {
         self.database
             .with_prefix(federation_database_prefix(federation_id))
@@ -450,6 +685,8 @@ impl BridgeState {
             observed.push(json!({
                 "protocol": "lnv2",
                 "federation_registered": true,
+                // Only gateways that returned routing info are listed.
+                "routing_available": true,
                 "info": {
                     "api": gateway,
                     "gateway_id": routing.lightning_public_key.to_string(),
@@ -652,45 +889,74 @@ async fn info(State(b): State<Arc<BridgeState>>, h: HeaderMap) -> HttpResult<Jso
         return Err(unauthorized());
     }
     let catalog = b.catalog.read().await.clone();
-    let mut response = serde_json::Map::new();
+    let mut clients = Vec::new();
     for federation_id in b.list_clients().await {
         if let (Some(entry), Some(client)) = (
-            catalog.get(&federation_id),
+            catalog.get(&federation_id).cloned(),
             b.get_client(federation_id).await,
         ) {
-let balance = match client.get_balance_for_btc().await {
-    Ok(balance) => Some(balance.msats),
-    Err(error) => {
-        eprintln!(
-            "Fedimint bridge: balance unavailable for {federation_id}: {error:#}"
-        );
-        None
-    }
-};
-            let native_config = client.config().await;
-            let network = if let Ok(ln) = client.get_first_module::<LightningClientModule>() {
-                native_config
-                    .get_module::<LightningClientConfig>(ln.id)
-                    .map_err(internal)?
-                    .network
-                    .to_string()
-            } else if let Ok(lnv2) = client.get_first_module::<LightningV2ClientModule>() {
-                native_config
-                    .get_module::<LightningV2ClientConfig>(lnv2.id)
-                    .map_err(internal)?
-                    .network
-                    .to_string()
-            } else {
-                return Err(internal("Federation has no supported Lightning module"));
-            };
-            let config = client.get_config_json().await;
-            let config_json = serde_json::to_value(&config).map_err(internal)?;
-            let meta = config_json
-                .pointer("/global/meta")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            response.insert(entry.federation_id.to_string(), json!({"label":entry.label,"meta":meta,"totalAmountMsat":balance,"network":network,"config":config_json}));
+            clients.push((federation_id, entry, client));
         }
+    }
+    // Federations are independent; read them concurrently within the
+    // caller's request deadline.
+    let entries =
+        futures::future::join_all(clients.into_iter().map(|(federation_id, entry, client)| {
+            let b = &b;
+            async move {
+                let (balance, reserve) =
+                    tokio::join!(b.balance_msats(federation_id, &client), b.reserve(&client));
+                let (balance, balance_source) = match balance {
+                    Ok((balance, source)) => (Some(balance), Some(source)),
+                    Err(error) => {
+                        eprintln!(
+                            "Fedimint bridge: balance unavailable for {federation_id}: {error:#}"
+                        );
+                        (None, None)
+                    }
+                };
+                let native_config = client.config().await;
+                let network = if let Ok(ln) = client.get_first_module::<LightningClientModule>() {
+                    native_config
+                        .get_module::<LightningClientConfig>(ln.id)
+                        .map_err(internal)?
+                        .network
+                        .to_string()
+                } else if let Ok(lnv2) = client.get_first_module::<LightningV2ClientModule>() {
+                    native_config
+                        .get_module::<LightningV2ClientConfig>(lnv2.id)
+                        .map_err(internal)?
+                        .network
+                        .to_string()
+                } else {
+                    return Err(internal("Federation has no supported Lightning module"));
+                };
+                let config = client.get_config_json().await;
+                let config_json = serde_json::to_value(&config).map_err(internal)?;
+                let meta = config_json
+                    .pointer("/global/meta")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                Ok((
+                    entry.federation_id.to_string(),
+                    json!({
+                        "label": entry.label,
+                        "meta": meta,
+                        "totalAmountMsat": balance,
+                        "balance_source": balance_source,
+                        "network": network,
+                        "reserve": reserve,
+                        "observed_at_unix_seconds": now_unix(),
+                        "config": config_json
+                    }),
+                ))
+            }
+        }))
+        .await;
+    let mut response = serde_json::Map::new();
+    for entry in entries {
+        let (federation_id, value) = entry?;
+        response.insert(federation_id, value);
     }
     Ok(Json(Value::Object(response)))
 }
@@ -738,10 +1004,14 @@ async fn quote(
         .get_client(req.federation_id)
         .await
         .ok_or_else(not_joined)?;
+    let federation_id = req.federation_id;
     quote_client(&b, client, req)
         .await
         .map(Json)
-        .map_err(|error| quote_error(&error))
+        .map_err(|error| {
+            eprintln!("Fedimint bridge: quote unavailable for {federation_id}: {error:#}");
+            quote_error(&error)
+        })
 }
 
 /// Returns only gateway-announced fee evidence when a federation cannot
@@ -778,7 +1048,7 @@ async fn gateway_estimate_client(
     );
     ensure!(!invoice.is_expired(), "invoice expired");
     let (lnv2, legacy) = tokio::join!(
-        lnv2_gateway_estimate(&client, &req, &invoice, amount_msat),
+        lnv2_gateway_estimate(bridge, &client, &req, &invoice, amount_msat),
         legacy_gateway_estimate(bridge, &client, &req, &invoice, amount_msat),
     );
     if let Some(value) = lnv2? {
@@ -846,7 +1116,7 @@ async fn legacy_gateway_estimate(
         "payment_hash":invoice.payment_hash().to_string(), "amount_msat":amount_msat,
         "network":ln_config.network.to_string(),
         "gateway_fee_msat":gateway.info.fees.to_amount(&amount).msats,
-        "federation_fee_msat":null, "wallet_balance_msat":client.get_balance_for_btc().await?.msats,
+        "federation_fee_msat":null, "wallet_balance_msat":bridge.balance_msats(req.federation_id, client).await?.0,
         "funding_feasible":null, "payable":null,
         "selected_gateway_id":gateway.info.gateway_id.to_string(), "gateway_identity_verified":true,
         "gateway_protocol":"lnv1",
@@ -861,6 +1131,7 @@ async fn legacy_gateway_estimate(
 }
 
 async fn lnv2_gateway_estimate(
+    bridge: &BridgeState,
     client: &ClientHandleArc,
     req: &QuoteRequest,
     invoice: &Bolt11Invoice,
@@ -875,19 +1146,48 @@ async fn lnv2_gateway_estimate(
         invoice.network() == ln_config.network,
         "invoice network mismatch"
     );
+    let Some(candidates) = lnv2_gateway_candidates(&lnv2, invoice, amount_msat).await else {
+        return Ok(None);
+    };
+    let Some(selected) = candidates.first() else {
+        return Ok(None);
+    };
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let invoice_expiry = invoice.expires_at().context("invoice expiry")?.as_secs();
+    let expires = now.saturating_add(30).min(invoice_expiry);
+    Ok(Some(json!({
+        "schema":"ecashmesh-fedimint-gateway-estimate-v1", "fedimint_version":"0.12.1",
+        "federation_id":req.federation_id.to_string(),
+        "invoice_digest":format!("{:x}", Sha256::digest(req.invoice.as_bytes())),
+        "payment_hash":invoice.payment_hash().to_string(), "amount_msat":amount_msat,
+        "network":ln_config.network.to_string(),
+        "gateway_fee_msat":selected["gateway_fee_msat"], "federation_fee_msat":null,
+        "wallet_balance_msat":bridge.balance_msats(req.federation_id, client).await?.0,
+        "funding_feasible":null, "payable":null,
+        "selected_gateway_id":selected["gateway_id"], "gateway_identity_verified":true,
+        "gateway_protocol":"lnv2", "gateway_candidates":candidates,
+        "observed_at_unix_seconds":now, "expires_at_unix_seconds":expires
+    })))
+}
+
+/// Gateways registered with the federation (native `LNv2` consensus API) that
+/// returned routing info for it within the probe budget, cheapest first.
+/// `None` means the registry itself could not be read.
+async fn lnv2_gateway_candidates(
+    lnv2: &LightningV2ClientModule,
+    invoice: &Bolt11Invoice,
+    amount_msat: u64,
+) -> Option<Vec<Value>> {
     let Ok(Ok(gateways)) =
         tokio::time::timeout(LNV2_GATEWAY_LIST_TIMEOUT, lnv2.list_gateways(None)).await
     else {
-        return Ok(None);
+        return None;
     };
     let mut candidates = Vec::new();
-    let responses = futures::future::join_all(gateways.into_iter().map(|gateway| {
-        let lnv2 = &lnv2;
-        async move {
-            let routing =
-                tokio::time::timeout(LNV2_GATEWAY_PROBE_BUDGET, lnv2.routing_info(&gateway)).await;
-            (gateway, routing)
-        }
+    let responses = futures::future::join_all(gateways.into_iter().map(|gateway| async move {
+        let routing =
+            tokio::time::timeout(LNV2_GATEWAY_PROBE_BUDGET, lnv2.routing_info(&gateway)).await;
+        (gateway, routing)
     }))
     .await;
     for (gateway, routing) in responses {
@@ -919,25 +1219,67 @@ async fn lnv2_gateway_estimate(
                     .cmp(&right["gateway_url"].as_str())
             })
     });
-    let Some(selected) = candidates.first() else {
-        return Ok(None);
-    };
+    Some(candidates)
+}
+
+/// `LNv2` quote for an explicitly mapped regtest lab wallet. The gateway fee is
+/// the gateway's native routing quote; the federation fee is the lab wallet's
+/// own non-committing `send_fee_quote` over its real notes.
+async fn lnv2_regtest_quote(
+    client: &ClientHandleArc,
+    regtest: &RegtestClient,
+    req: &QuoteRequest,
+    invoice: &Bolt11Invoice,
+    amount_msat: u64,
+) -> anyhow::Result<Value> {
+    let lnv2 = client
+        .get_first_module::<LightningV2ClientModule>()
+        .context("native quote unavailable")?;
+    let config = client.config().await;
+    let ln_config = config.get_module::<LightningV2ClientConfig>(lnv2.id)?;
+    ensure!(
+        invoice.network() == ln_config.network,
+        "invoice network mismatch"
+    );
+    let (candidates, balance) = tokio::join!(
+        lnv2_gateway_candidates(&lnv2, invoice, amount_msat),
+        regtest_balance_msats(regtest, req.federation_id),
+    );
+    let balance = balance?;
+    ensure!(balance >= amount_msat, "insufficient balance");
+    let candidates = candidates.context("no gateway")?;
+    let selected = candidates.first().context("no gateway")?;
+    let gateway_fee = selected["gateway_fee_msat"]
+        .as_u64()
+        .context("no gateway")?;
+    let contract = amount_msat
+        .checked_add(gateway_fee)
+        .context("fee overflow")?;
+    let federation_fee = regtest_send_fee_quote_msats(regtest, contract).await?;
+    let required = required_balance_msats(amount_msat, gateway_fee, federation_fee)?;
+    ensure!(balance >= required, "insufficient balance");
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let invoice_expiry = invoice.expires_at().context("invoice expiry")?.as_secs();
     let expires = now.saturating_add(30).min(invoice_expiry);
-    Ok(Some(json!({
-        "schema":"ecashmesh-fedimint-gateway-estimate-v1", "fedimint_version":"0.12.1",
+    Ok(json!({
+        "schema":"ecashmesh-fedimint-quote-v2", "fedimint_version":"0.12.1",
         "federation_id":req.federation_id.to_string(),
         "invoice_digest":format!("{:x}", Sha256::digest(req.invoice.as_bytes())),
-        "payment_hash":invoice.payment_hash().to_string(), "amount_msat":amount_msat,
-        "network":ln_config.network.to_string(),
-        "gateway_fee_msat":selected["gateway_fee_msat"], "federation_fee_msat":null,
-        "wallet_balance_msat":client.get_balance_for_btc().await?.msats,
-        "funding_feasible":null, "payable":null,
+        "payment_hash":invoice.payment_hash().to_string(), "destination_pubkey":invoice.recover_payee_pub_key().to_string(),
+        "amount_msat":amount_msat, "network":ln_config.network.to_string(),
+        "federation_fee_msat":federation_fee, "gateway_fee_msat":gateway_fee, "destination_fee_msat":0,
+        "total_fee_msat":federation_fee.checked_add(gateway_fee).context("fee overflow")?,
+        "wallet_balance_msat":balance, "funding_feasible":true, "payable":null, "gateway_liquidity":"unknown",
+        "required_balance_msat":required, "funding_headroom_msat":balance - required,
+        "balance_source":"regtest_lab_client",
         "selected_gateway_id":selected["gateway_id"], "gateway_identity_verified":true,
-        "gateway_protocol":"lnv2", "gateway_candidates":candidates,
+        "gateway_protocol":"lnv2", "gateway_url":selected["gateway_url"],
+        "gateway_fee_base_msat":selected["fee_base_msat"], "gateway_fee_ppm":selected["fee_ppm"],
+        // The selected gateway returned routing info for this federation; this
+        // is not a payment probe and says nothing about channel liquidity.
+        "gateway_routing_available":true, "gateway_candidate_count":candidates.len(),
         "observed_at_unix_seconds":now, "expires_at_unix_seconds":expires
-    })))
+    }))
 }
 
 async fn quote_client(
@@ -952,6 +1294,11 @@ async fn quote_client(
         "invoice amount mismatch"
     );
     ensure!(!invoice.is_expired(), "invoice expired");
+    if let Some(regtest) = bridge.regtest_clients.get(&req.federation_id)
+        && client.get_first_module::<LightningV2ClientModule>().is_ok()
+    {
+        return lnv2_regtest_quote(&client, regtest, &req, &invoice, amount_msat).await;
+    }
     let ln = client
         .get_first_module::<LightningClientModule>()
         .context("native quote unavailable")?;
@@ -961,8 +1308,9 @@ async fn quote_client(
         invoice.network() == ln_config.network.0,
         "invoice network mismatch"
     );
-    // Native fee quoting selects real funding notes. Report an empty wallet
-    // before network probes, while leaving the estimate endpoint usable.
+    // Native fee quoting selects this client's real funding notes, so its own
+    // balance is the funding evidence. Report an empty wallet before network
+    // probes, while leaving the estimate endpoint usable.
     let balance = client.get_balance_for_btc().await?.msats;
     ensure!(balance >= amount_msat, "insufficient balance");
     let amount = Amount::from_msats(amount_msat);
@@ -1022,10 +1370,8 @@ async fn quote_client(
         .min(now.saturating_add(gateway.ttl.as_secs()))
         .min(invoice_expiry);
     let balance = client.get_balance_for_btc().await?.msats;
-    ensure!(
-        balance >= required_balance_msats(amount_msat, gateway_fee, federation_fee)?,
-        "insufficient balance"
-    );
+    let required = required_balance_msats(amount_msat, gateway_fee, federation_fee)?;
+    ensure!(balance >= required, "insufficient balance");
     Ok(json!({
         "schema":"ecashmesh-fedimint-quote-v2", "fedimint_version":"0.12.1",
         "federation_id":req.federation_id.to_string(),
@@ -1035,7 +1381,12 @@ async fn quote_client(
         "federation_fee_msat":federation_fee, "gateway_fee_msat":gateway_fee, "destination_fee_msat":0,
         "total_fee_msat":federation_fee.checked_add(gateway_fee).context("fee overflow")?,
         "wallet_balance_msat":balance, "funding_feasible":true, "payable":null, "gateway_liquidity":"unknown",
+        "required_balance_msat":required, "funding_headroom_msat":balance - required,
+        "balance_source":"bridge_client",
         "selected_gateway_id":gateway.info.gateway_id.to_string(), "gateway_identity_verified":true,
+        "gateway_protocol":"lnv1", "gateway_url":gateway.info.api.to_string(),
+        "gateway_fee_base_msat":gateway.info.fees.base_msat,
+        "gateway_fee_ppm":gateway.info.fees.proportional_millionths,
         "observed_at_unix_seconds":now, "expires_at_unix_seconds":expires
     }))
 }
@@ -1045,6 +1396,12 @@ fn internal(_: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({"error_code":"CLIENT_UNAVAILABLE"})),
     )
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 fn invalid_invite(_: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
     (
@@ -1140,6 +1497,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let token = load_or_create_token(&root.join("bridge-token"))?;
+    let regtest_clients = load_regtest_clients()?;
     let catalog_path = root.join("catalog.json");
     let catalog = load_catalog(&catalog_path)?;
     if !catalog_path.exists() {
@@ -1163,6 +1521,7 @@ async fn main() -> anyhow::Result<()> {
         catalog: RwLock::new(catalog),
         catalog_path,
         join_lock: Mutex::new(()),
+        regtest_clients,
     });
     let federation_ids = bridge
         .catalog
@@ -1211,6 +1570,30 @@ mod tests {
         assert_eq!(sats_to_msats(1_000).unwrap(), 1_000_000);
         assert_eq!(sats_to_msats(100_000).unwrap(), 100_000_000);
         assert!(sats_to_msats(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn regtest_client_mapping_is_explicit_and_bounded() {
+        assert!(valid_regtest_client_name("fed-A-0"));
+        assert!(valid_regtest_client_name("fed-D-0"));
+        assert!(!valid_regtest_client_name("fed-A"));
+        assert!(!valid_regtest_client_name("../../wallet"));
+    }
+
+    #[test]
+    fn parses_native_lnv2_fee_quote_total() {
+        let quote = "FeeQuote { input: Amounts({AmountUnit(0): 100msat}), output: Amounts({AmountUnit(0): 1500msat}), dust: Amounts({AmountUnit(0): 408msat}) }";
+        assert_eq!(parse_fee_quote_total_msat(quote).unwrap(), 2_008);
+        let empty = "FeeQuote { input: Amounts({}), output: Amounts({AmountUnit(0): 1500msat}), dust: Amounts({}) }";
+        assert_eq!(parse_fee_quote_total_msat(empty).unwrap(), 1_500);
+        for invalid in [
+            "FeeQuote { input: Amounts({AmountUnit(1): 100msat}), output: Amounts({}), dust: Amounts({}) }",
+            "FeeQuote { input: Amounts({}), output: Amounts({}) }",
+            "FeeQuote { input: Amounts({AmountUnit(0): 1sat}), output: Amounts({}), dust: Amounts({}) }",
+            "1500",
+        ] {
+            assert!(parse_fee_quote_total_msat(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]

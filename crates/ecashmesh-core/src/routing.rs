@@ -117,7 +117,9 @@ impl RiskPenaltyPolicy {
         }
     }
 
-    const fn for_risk(self, risk: &RiskFactor) -> u16 {
+    /// The deduction, in score basis points, applied for one risk factor.
+    #[must_use]
+    pub const fn for_risk(self, risk: &RiskFactor) -> u16 {
         match risk {
             RiskFactor::UnknownLiquidity
             | RiskFactor::UnknownFee

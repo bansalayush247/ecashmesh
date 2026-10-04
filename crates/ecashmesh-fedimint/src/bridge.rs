@@ -28,6 +28,24 @@ struct QuoteEvidence {
     gateway_liquidity: String,
     selected_gateway_id: String,
     gateway_identity_verified: bool,
+    #[serde(default)]
+    required_balance_msat: Option<u64>,
+    #[serde(default)]
+    funding_headroom_msat: Option<u64>,
+    #[serde(default)]
+    balance_source: Option<String>,
+    #[serde(default)]
+    gateway_protocol: Option<String>,
+    #[serde(default)]
+    gateway_url: Option<String>,
+    #[serde(default)]
+    gateway_fee_base_msat: Option<u64>,
+    #[serde(default)]
+    gateway_fee_ppm: Option<u64>,
+    #[serde(default)]
+    gateway_routing_available: Option<bool>,
+    #[serde(default)]
+    gateway_candidate_count: Option<u64>,
     observed_at_unix_seconds: u64,
     expires_at_unix_seconds: u64,
 }
@@ -118,6 +136,13 @@ pub(super) fn parse(
     if !q.funding_feasible || q.wallet_balance_msat < required {
         return Err("Insufficient Fedimint wallet balance".into());
     }
+    if q.required_balance_msat
+        .is_some_and(|reported| reported != required)
+        || q.funding_headroom_msat
+            .is_some_and(|reported| reported != q.wallet_balance_msat - required)
+    {
+        return Err("Inconsistent Fedimint funding evidence".into());
+    }
     if !q.gateway_identity_verified
         || q.selected_gateway_id.len() != 66
         || !q.selected_gateway_id.bytes().all(|c| c.is_ascii_hexdigit())
@@ -152,10 +177,55 @@ pub(super) fn parse(
             timestamp,
             ConfidenceLevel::Medium,
         ),
-        selected_gateway_id: Some(q.selected_gateway_id),
+        selected_gateway_id: Some(q.selected_gateway_id.clone()),
         observed_at: timestamp,
         expires_at_unix_seconds: Some(q.expires_at_unix_seconds),
+        metrics: quote_metrics(&q, required),
     })
+}
+
+/// Funding and selected-gateway evidence bound to a validated quote.
+fn quote_metrics(q: &QuoteEvidence, required: u64) -> super::FedimintMetrics {
+    super::FedimintMetrics {
+        wallet_balance_sats: Some(q.wallet_balance_msat / 1000),
+        balance_source: q.balance_source.clone(),
+        required_balance_sats: Some(ceil_sats(required).sats()),
+        // Floor: never overstate headroom after rounding.
+        funding_headroom_sats: i64::try_from((q.wallet_balance_msat - required) / 1000).ok(),
+        funding_feasible: Some(q.funding_feasible),
+        selected_gateway: Some(super::FedimintGatewayMetrics {
+            gateway_id: Some(q.selected_gateway_id.clone()),
+            gateway_url: q.gateway_url.clone(),
+            gateway_protocol: q.gateway_protocol.clone(),
+            gateway_status: "verified".into(),
+            fee_base_msat: q.gateway_fee_base_msat,
+            fee_ppm: q.gateway_fee_ppm,
+            gateway_fee_sats: Some(ceil_sats(q.gateway_fee_msat).sats()),
+            routing_available: q.gateway_routing_available,
+            outbound_liquidity_sats: None,
+            liquidity_status: q.gateway_liquidity.clone(),
+        }),
+        gateway_candidate_count: q.gateway_candidate_count,
+        gateways: Vec::new(),
+        reserve: super::FedimintReserveMetrics::default(),
+        reliability: super::ReliabilityEvidence::default(),
+        observed_at_unix_seconds: q.observed_at_unix_seconds,
+    }
+}
+
+/// Production gateways must use HTTPS. The explicitly gated regtest lab also
+/// accepts plain HTTP on loopback, and only for regtest evidence.
+fn gateway_url_allowed(url: &str, lab_regtest: bool) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.host_str().is_some()
+        && (parsed.scheme() == "https"
+            || (lab_regtest
+                && parsed.scheme() == "http"
+                && matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))))
 }
 
 pub(super) fn parse_gateway_estimate(
@@ -164,6 +234,7 @@ pub(super) fn parse_gateway_estimate(
     invoice: &str,
     amount: Amount,
     now: u64,
+    allow_lab_loopback_http: bool,
 ) -> Result<FedimintGatewayEstimate, String> {
     let q: GatewayEstimateEvidence = serde_json::from_value(value.clone())
         .map_err(|_| "Incomplete Fedimint gateway estimate evidence")?;
@@ -207,6 +278,7 @@ pub(super) fn parse_gateway_estimate(
     {
         return Err("Invalid Fedimint gateway estimate evidence".into());
     }
+    let lab_regtest = allow_lab_loopback_http && q.network == "regtest";
     let mut candidates = q
         .gateway_candidates
         .into_iter()
@@ -221,7 +293,7 @@ pub(super) fn parse_gateway_estimate(
                 && candidate.gateway_id.bytes().all(|c| c.is_ascii_hexdigit())
                 && matches!(candidate.gateway_protocol.as_str(), "lnv1" | "lnv2")
                 && candidate.gateway_protocol == q.gateway_protocol
-                && candidate.gateway_url.starts_with("https://")
+                && gateway_url_allowed(&candidate.gateway_url, lab_regtest)
                 && expected_fee == Some(candidate.gateway_fee_msat);
             valid.then_some(FedimintGatewayCandidate {
                 gateway_id: candidate.gateway_id,
@@ -318,15 +390,57 @@ mod tests {
             }],
             "observed_at_unix_seconds": 100, "expires_at_unix_seconds": 130
         });
-        let estimate =
-            parse_gateway_estimate(&value, "fed-a", "invoice", Amount::from_sats(1000), 100)
-                .unwrap();
+        let estimate = parse_gateway_estimate(
+            &value,
+            "fed-a",
+            "invoice",
+            Amount::from_sats(1000),
+            100,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(estimate.gateway_fee_sats.sats(), 2);
         assert_eq!(
             estimate.selected_gateway_id,
             format!("02{}", "11".repeat(32))
         );
+    }
+
+    #[test]
+    fn loopback_http_gateways_are_accepted_only_in_the_regtest_lab() {
+        let estimate = |url: &str, network: &str, lab: bool| {
+            let value = json!({
+                "schema": "ecashmesh-fedimint-gateway-estimate-v1", "fedimint_version": "0.12.1",
+                "federation_id": "fed-a", "invoice_digest": format!("{:x}", Sha256::digest(b"invoice")),
+                "payment_hash": "11".repeat(32), "amount_msat": 1_000_000, "network": network,
+                "gateway_fee_msat": 1001, "federation_fee_msat": null,
+                "wallet_balance_msat": 0, "funding_feasible": null, "payable": null,
+                "selected_gateway_id": format!("02{}", "11".repeat(32)), "gateway_identity_verified": true,
+                "gateway_protocol":"lnv2", "gateway_candidates":[{
+                    "gateway_id":format!("02{}", "11".repeat(32)), "gateway_url":url,
+                    "gateway_fee_msat":1001, "fee_base_msat":1001, "fee_ppm":0,
+                    "gateway_identity_verified":true, "gateway_protocol":"lnv2"
+                }],
+                "observed_at_unix_seconds": 100, "expires_at_unix_seconds": 130
+            });
+            parse_gateway_estimate(
+                &value,
+                "fed-a",
+                "invoice",
+                Amount::from_sats(1000),
+                100,
+                lab,
+            )
+        };
+        assert!(estimate("http://127.0.0.1:39101/v1", "regtest", true).is_ok());
+        assert!(estimate("http://localhost:39101/v1", "regtest", true).is_ok());
+        // Production validation is unchanged.
+        assert!(estimate("http://127.0.0.1:39101/v1", "regtest", false).is_err());
+        assert!(estimate("http://127.0.0.1:39101/v1", "bitcoin", true).is_err());
+        assert!(estimate("http://gateway.example/v1", "regtest", true).is_err());
+        assert!(estimate("http://localhost:1@gateway.example/v1", "regtest", true).is_err());
+        assert!(estimate("https://gateway.example/v1", "bitcoin", false).is_ok());
     }
 
     #[test]
@@ -348,8 +462,15 @@ mod tests {
         value["funding_feasible"] = json!(true);
 
         assert_eq!(
-            parse_gateway_estimate(&value, "fed-a", "invoice", Amount::from_sats(1000), 100)
-                .unwrap_err(),
+            parse_gateway_estimate(
+                &value,
+                "fed-a",
+                "invoice",
+                Amount::from_sats(1000),
+                100,
+                false
+            )
+            .unwrap_err(),
             "Invalid Fedimint gateway estimate evidence"
         );
     }

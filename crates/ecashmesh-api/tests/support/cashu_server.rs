@@ -201,6 +201,10 @@ impl MockMint {
                     if mode == "fed_insufficient" {
                         evidence["wallet_balance_msat"] = json!(0);
                     }
+                    if mode == "fed_expensive" {
+                        evidence["gateway_fee_msat"] = json!(500_000);
+                        evidence["total_fee_msat"] = json!(501_001);
+                    }
                     if mode == "fed_stale" {
                         evidence["expires_at_unix_seconds"] = json!(now);
                     }

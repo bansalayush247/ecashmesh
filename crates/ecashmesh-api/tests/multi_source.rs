@@ -663,3 +663,173 @@ fn slow_federations_do_not_delay_healthy_sources_past_the_wallet_deadline() {
         );
     }
 }
+
+/// Starts the API with four Cashu mints and four bridge-backed federations.
+fn eight_source_api(feds: &[MockMint], mints: &[MockMint]) -> (ApiServer, Value) {
+    let federations = feds
+        .iter()
+        .zip(["aa", "bb", "cc", "dd"])
+        .map(|(fed, byte)| {
+            json!({"id": format!("fedimint:{byte}"), "label": format!("Federation {byte}"),
+                "federation_id": byte.repeat(32), "bridge_url": fed.url,
+                "quote_backend": "local_v0121_bridge"})
+        })
+        .collect::<Vec<_>>();
+    let seeds = mints
+        .iter()
+        .zip(["a", "b", "c", "d"])
+        .map(|(mint, name)| json!({"id": format!("cashu:mint-{name}"), "url": mint.url}))
+        .collect::<Vec<_>>();
+    let server = ApiServer::start_with_federations(
+        &json!(seeds),
+        &json!([]),
+        &json!([]),
+        &json!(federations),
+    );
+    let mut body = lightning_payment(100_000);
+    body.as_object_mut().unwrap().remove("candidate_connectors");
+    body["strict_source_registry"] = json!(true);
+    body["wallet_mint_urls"] = json!(mints.iter().map(|mint| &mint.url).collect::<Vec<_>>());
+    body["federation_connector_ids"] =
+        json!(["fedimint:aa", "fedimint:bb", "fedimint:cc", "fedimint:dd"]);
+    (server, body)
+}
+
+fn ranked_sources(result: &Value) -> Vec<&Value> {
+    std::iter::once(&result["recommended_source"])
+        .chain(result["alternative_sources"].as_array().unwrap())
+        .collect()
+}
+
+/// `score = floor(sum(value * weight) / 100) - penalties`, from the payload alone.
+fn assert_score_contributions_are_consistent(source: &Value) {
+    let breakdown = &source["score_contributions"];
+    let signals = breakdown["signals"].as_array().unwrap();
+    let weights = signals
+        .iter()
+        .map(|signal| signal["weight_percent"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(weights, [25, 20, 15, 15, 15, 10]);
+    let base = signals
+        .iter()
+        .map(|signal| {
+            signal["value_basis_points"].as_u64().unwrap()
+                * signal["weight_percent"].as_u64().unwrap()
+        })
+        .sum::<u64>()
+        / 100;
+    assert_eq!(breakdown["base_score_basis_points"], base);
+    let penalty = breakdown["risks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|risk| risk["penalty_basis_points"].as_u64().unwrap())
+        .sum::<u64>()
+        .min(10_000);
+    assert_eq!(breakdown["risk_penalty_basis_points"], penalty);
+    assert_eq!(
+        breakdown["score_basis_points"],
+        base.saturating_sub(penalty)
+    );
+    assert_eq!(
+        source["score_basis_points"],
+        breakdown["score_basis_points"]
+    );
+}
+
+#[test]
+fn eight_sources_rank_with_fedimint_evidence_and_react_to_evidence_changes() {
+    let mints = (0..4)
+        .map(|_| MockMint::start("healthy"))
+        .collect::<Vec<_>>();
+    let feds = (0..4)
+        .map(|_| MockMint::start("healthy"))
+        .collect::<Vec<_>>();
+    let (server, body) = eight_source_api(&feds, &mints);
+    let (status, result) = server.post("/v1/routes/evaluate", &body);
+    assert_eq!(status, 200, "{result}");
+    let sources = ranked_sources(&result);
+    assert_eq!(sources.len(), 8, "{result}");
+    let protocols = sources
+        .iter()
+        .map(|source| source["protocol"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(protocols.iter().filter(|p| **p == "fedimint").count(), 4);
+    assert_eq!(protocols.iter().filter(|p| **p == "cashu").count(), 4);
+    for source in &sources {
+        assert_score_contributions_are_consistent(source);
+        if source["protocol"] == "cashu" {
+            assert!(source.get("fedimint_metrics").is_none());
+            continue;
+        }
+        let metrics = &source["fedimint_metrics"];
+        // Funding is bound to the quote: 100,000 sats plus 2,002 msat of fees.
+        assert_eq!(metrics["wallet_balance_sats"], 1_000_000);
+        assert_eq!(metrics["required_balance_sats"], 100_003);
+        assert_eq!(metrics["funding_headroom_sats"], 899_997);
+        assert_eq!(metrics["funding_feasible"], true);
+        let gateway = &metrics["selected_gateway"];
+        assert_eq!(gateway["gateway_status"], "verified");
+        assert_eq!(gateway["gateway_fee_sats"], 2);
+        // Unreported facts stay unknown rather than defaulting.
+        assert!(gateway["routing_available"].is_null());
+        assert!(gateway["outbound_liquidity_sats"].is_null());
+        assert_eq!(gateway["liquidity_status"], "unknown");
+        assert!(metrics["reserve"]["reserve_sats"].is_null());
+        assert!(metrics["reserve"]["liabilities_sats"].is_null());
+        assert!(metrics["reserve"]["coverage_ratio"].is_null());
+        assert_eq!(metrics["reserve"]["solvency_status"], "unknown");
+        assert!(metrics["reliability"]["successful_payments"].is_null());
+        assert_eq!(metrics["reliability"]["confidence"], "unknown");
+        // Gateway discovery is not payment evidence.
+        assert!(
+            source["score_contributions"]["risks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|risk| risk["code"] == "unknown_reliability")
+        );
+    }
+    drop(server);
+
+    // Change one evidence fact per federation.
+    let feds = [
+        "fed_expensive",
+        "healthy",
+        "fed_gateway_unavailable",
+        "fed_insufficient",
+    ]
+    .map(MockMint::start);
+    let (server, body) = eight_source_api(&feds, &mints);
+    let (status, result) = server.post("/v1/routes/evaluate", &body);
+    assert_eq!(status, 200, "{result}");
+    let order = ranked_sources(&result)
+        .iter()
+        .map(|source| source["source_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    // The costlier federation is still ranked, below its cheaper peer.
+    assert_eq!(order.len(), 6, "{result}");
+    let position = |id: &str| order.iter().position(|source| *source == id).unwrap();
+    assert!(
+        position("fedimint:bb") < position("fedimint:aa"),
+        "{result}"
+    );
+    let reason = |id: &str| {
+        result["excluded_sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["source_id"] == id)
+            .and_then(|source| source["reason"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert!(
+        reason("fedimint:cc").starts_with("No usable verified Fedimint gateway"),
+        "{result}"
+    );
+    assert!(
+        reason("fedimint:dd").starts_with("Insufficient Fedimint wallet balance"),
+        "{result}"
+    );
+}

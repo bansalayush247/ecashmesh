@@ -1916,32 +1916,38 @@ fn cheap_search(
             let cost = label
                 .cost
                 .extended(edge.base.estimated_fee(request.amount), uncertainty);
-            let labels = &mut pareto[edge.base.to.index()];
-            if labels
-                .iter()
-                .copied()
-                // Equal-cost labels can carry distinct connector paths. Keep
-                // them (within the existing Pareto bound) so independent
-                // sources with identical quotes remain selectable routes.
-                .any(|existing| existing.dominates(cost))
-            {
-                metrics.pareto_pruned = metrics.pareto_pruned.saturating_add(1);
-                continue;
-            }
-            labels.retain(|existing| !cost.dominates(*existing));
-            labels.push(cost);
-            if labels.len() > config.maximum_pareto_labels_per_node {
-                labels.sort_unstable_by(|left, right| {
-                    left.priority(config)
-                        .cmp(&right.priority(config))
-                        .then(left.fee.cmp(&right.fee))
-                        .then(left.hops.cmp(&right.hops))
-                        .then(left.uncertainty.cmp(&right.uncertainty))
-                });
-                labels.truncate(config.maximum_pareto_labels_per_node);
-                if !labels.contains(&cost) {
+            // A label reaching a target is a complete candidate, not an
+            // intermediate search state. Pruning it by fee, hops and
+            // uncertainty alone would drop an independent source before the
+            // detailed evidence ranking; `cheap_candidate_limit` bounds these.
+            if !targets.contains(&edge.base.to) {
+                let labels = &mut pareto[edge.base.to.index()];
+                if labels
+                    .iter()
+                    .copied()
+                    // Equal-cost labels can carry distinct connector paths.
+                    // Keep them (within the existing Pareto bound) so
+                    // independent paths with identical costs stay selectable.
+                    .any(|existing| existing.dominates(cost))
+                {
                     metrics.pareto_pruned = metrics.pareto_pruned.saturating_add(1);
                     continue;
+                }
+                labels.retain(|existing| !cost.dominates(*existing));
+                labels.push(cost);
+                if labels.len() > config.maximum_pareto_labels_per_node {
+                    labels.sort_unstable_by(|left, right| {
+                        left.priority(config)
+                            .cmp(&right.priority(config))
+                            .then(left.fee.cmp(&right.fee))
+                            .then(left.hops.cmp(&right.hops))
+                            .then(left.uncertainty.cmp(&right.uncertainty))
+                    });
+                    labels.truncate(config.maximum_pareto_labels_per_node);
+                    if !labels.contains(&cost) {
+                        metrics.pareto_pruned = metrics.pareto_pruned.saturating_add(1);
+                        continue;
+                    }
                 }
             }
             let mut path = label.path.clone();
@@ -2811,6 +2817,43 @@ mod tests {
                 CompactConnectorId::from_index(2)
             ]
         );
+    }
+
+    #[test]
+    fn costlier_independent_sources_reach_detailed_ranking() {
+        let (details, _) = registry_and_snapshot();
+        let nodes = details
+            .connectors
+            .iter()
+            .map(|record| GraphNode::new(record.connector_type, record.capabilities, record.health))
+            .collect();
+        let mut builder = GraphBuilder::new(nodes).registry_generation(details.generation());
+        // Source 1 is strictly dominated on fee, hops and uncertainty.
+        builder.extend_edges([known_edge(0, 2, 7), known_edge(1, 2, 28)]);
+        let snapshot = builder.build(2).expect("graph");
+        let request = RouteSearchRequest {
+            amount: Amount::from_sats(100_000),
+            sources: vec![
+                SearchEndpoint::Connector(CompactConnectorId::from_index(0)),
+                SearchEndpoint::Connector(CompactConnectorId::from_index(1)),
+            ],
+            destinations: vec![SearchEndpoint::Connector(CompactConnectorId::from_index(2))],
+            top_k: 2,
+        };
+
+        let (routes, metrics) =
+            cheap_search(&snapshot, &request, RouteSearchConfig::default()).expect("search");
+        assert_eq!(metrics.pareto_pruned, 0);
+        assert_eq!(
+            routes.iter().map(|route| route.path[0]).collect::<Vec<_>>(),
+            vec![
+                CompactConnectorId::from_index(0),
+                CompactConnectorId::from_index(1)
+            ]
+        );
+        let ranking = detailed_evaluate(&routes, request.amount, &details, NOW);
+        assert_eq!(ranking.ranked.len(), 2);
+        assert!(ranking.rejected.is_empty());
     }
 
     #[test]

@@ -44,6 +44,103 @@ const evidenceStateSchema = z
     value: z.unknown(),
   })
   .passthrough();
+// Fedimint evidence. `null` always means unknown, never zero.
+const fedimintGatewayMetricsSchema = z
+  .object({
+    gateway_id: z.string().nullable(),
+    gateway_url: z.string().nullable(),
+    gateway_protocol: z.string().nullable(),
+    gateway_status: z.string(),
+    fee_base_msat: unsigned.nullable(),
+    fee_ppm: unsigned.nullable(),
+    gateway_fee_sats: unsigned.nullable(),
+    routing_available: z.boolean().nullable(),
+    outbound_liquidity_sats: unsigned.nullable(),
+    liquidity_status: z.string(),
+  })
+  .passthrough();
+const fedimintMetricsSchema = z
+  .object({
+    wallet_balance_sats: unsigned.nullable(),
+    balance_source: z.string().nullable(),
+    required_balance_sats: unsigned.nullable(),
+    funding_headroom_sats: z.number().int().nullable(),
+    funding_feasible: z.boolean().nullable(),
+    selected_gateway: fedimintGatewayMetricsSchema.nullable(),
+    gateway_candidate_count: unsigned.nullable(),
+    gateways: z.array(fedimintGatewayMetricsSchema),
+    reserve: z
+      .object({
+        reserve_sats: unsigned.nullable(),
+        pending_pegout_sats: unsigned.nullable(),
+        pending_change_sats: unsigned.nullable(),
+        pending_transaction_count: unsigned.nullable(),
+        liabilities_sats: unsigned.nullable(),
+        coverage_ratio: z.number().nullable(),
+        solvency_status: z.string(),
+        confidence: z.string(),
+        source: z.string().nullable(),
+      })
+      .passthrough(),
+    reliability: z
+      .object({
+        successful_payments: unsigned.nullable(),
+        failed_payments: unsigned.nullable(),
+        success_rate_basis_points: unsigned.nullable(),
+        confidence: z.string(),
+      })
+      .passthrough(),
+    observed_at_unix_seconds: unsigned,
+  })
+  .passthrough();
+export type FedimintMetrics = z.infer<typeof fedimintMetricsSchema>;
+// Exact ranker inputs: score = base_score - risk_penalty (floored at zero).
+const scoreContributionsSchema = z
+  .object({
+    signals: z.array(
+      z
+        .object({
+          signal: z.string(),
+          weight_percent: unsigned,
+          value_basis_points: z.number().int().min(0).max(10000),
+          contribution_basis_points: z.number().min(0).max(10000),
+        })
+        .passthrough(),
+    ),
+    base_score_basis_points: z.number().int().min(0).max(10000),
+    risks: z.array(
+      z
+        .object({ code: z.string(), penalty_basis_points: unsigned })
+        .passthrough(),
+    ),
+    risk_penalty_basis_points: z.number().int().min(0).max(10000),
+    score_basis_points: z.number().int().min(0).max(10000),
+  })
+  .passthrough();
+export type ScoreContributions = z.infer<typeof scoreContributionsSchema>;
+// Regtest-lab, amount-specific Lightning liquidity evidence (no credentials).
+const liquidityEvidenceSchema = z
+  .object({
+    evidence_source: z.enum(["lightning_probe", "gateway_channel_state"]),
+    node: z.string(),
+    probed_amount_sats: unsigned,
+    outcome: z.enum([
+      "routable",
+      "insufficient_liquidity",
+      "no_route",
+      "unknown",
+    ]),
+    failure_reason: z.string().nullable(),
+    reached_destination: z.boolean().nullable(),
+    total_outbound_sats: unsigned.nullable(),
+    confidence: z.string(),
+    observed_at_unix_seconds: unsigned,
+    expires_at_unix_seconds: unsigned,
+    freshness: z.string(),
+    applied_to_ranking: z.boolean(),
+  })
+  .passthrough();
+export type LiquidityEvidence = z.infer<typeof liquidityEvidenceSchema>;
 /** A custody/payment source evaluated for one normalized payment target. */
 export const paymentSourceSchema = z
   .object({
@@ -84,6 +181,9 @@ export const paymentSourceSchema = z
     risk_flags: z.array(z.string()),
     fee_reasonableness: percentage.nullable(),
     risk_penalty: percentage,
+    score_contributions: scoreContributionsSchema.optional(),
+    fedimint_metrics: fedimintMetricsSchema.optional(),
+    liquidity_evidence: liquidityEvidenceSchema.optional(),
   })
   .passthrough();
 // Compatibility export for integrations that still import the old type name.

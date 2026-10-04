@@ -22,6 +22,7 @@ use ecashmesh_fedimint::{FederationObservation, FedimintQuote, FedimintService};
 use serde_json::{Value, json};
 
 use crate::connectors::{ConnectorBatch, unix_now};
+use crate::probe::{LiquidityEvidence, LiquidityProbes, ProbeEffect};
 
 /// A destination normalized by backend code before discovery or quote requests.
 #[derive(Clone, Debug)]
@@ -102,6 +103,7 @@ pub(super) struct LiveNoRoute {
 pub(super) async fn evaluate(
     service: &Arc<DiscoveryService>,
     fedimint: &Arc<FedimintService>,
+    probes: Option<&LiquidityProbes>,
     batch: &ConnectorBatch,
     sources: Vec<ConnectorSnapshot>,
     destination: LiveDestination,
@@ -319,7 +321,28 @@ pub(super) async fn evaluate(
             (source.id.clone(), result)
         })
     }));
-    let (fedimint_reads, cashu_reads) = tokio::join!(fedimint_reads, cashu_reads);
+    // Regtest-lab only: amount-specific probes from each source's own node.
+    let probe_reads = futures::future::join_all(
+        sources
+            .iter()
+            .filter(|source| probes.is_some_and(|probes| probes.covers(source.id.as_str())))
+            .filter_map(|source| {
+                let probes = probes?;
+                let invoice = &invoice;
+                Some(async move {
+                    let evidence = probes
+                        .probe(source.id.as_str(), invoice.as_str(), amount, unix_now())
+                        .await;
+                    (source.id.clone(), evidence)
+                })
+            }),
+    );
+    let (fedimint_reads, cashu_reads, probe_reads) =
+        tokio::join!(fedimint_reads, cashu_reads, probe_reads);
+    let mut probe_reads = probe_reads
+        .into_iter()
+        .filter_map(|(id, evidence)| evidence.map(|evidence| (id, evidence)))
+        .collect::<BTreeMap<_, _>>();
     let mut fedimint_reads = fedimint_reads.into_iter().collect::<BTreeMap<_, _>>();
     let mut cashu_reads = cashu_reads.into_iter().collect::<BTreeMap<_, _>>();
     for source in sources {
@@ -401,6 +424,19 @@ pub(super) async fn evaluate(
                     ConfidenceLevel::Medium,
                 );
             }
+            // Funding is already gated by the quote; a probe measures the
+            // gateway's Lightning leg, which wallet balance cannot show.
+            let evidence = probe_reads.remove(&source.id);
+            if let Some(reason) = apply_liquidity_probe(
+                &mut source,
+                evidence,
+                quote.selected_gateway_id.as_deref(),
+                amount,
+                &mut quote_observations,
+            ) {
+                no_route_details.push(format!("{}: {reason}", source.id));
+                continue;
+            }
             source_health.insert(source.id.clone(), health_observation(&observation.health));
             if let Some(expiry) = quote.expires_at_unix_seconds {
                 expiries.push(expiry);
@@ -456,6 +492,13 @@ pub(super) async fn evaluate(
             continue;
         };
         let mut source = source;
+        let evidence = probe_reads.remove(&source.id);
+        if let Some(reason) =
+            apply_liquidity_probe(&mut source, evidence, None, amount, &mut quote_observations)
+        {
+            no_route_details.push(format!("{}: {reason}", source.id));
+            continue;
+        }
         source.fee = Evidence::reported(
             ecashmesh_core::FeeQuote::new(quote_evidence.value.fee_reserve_sats),
             quote_evidence.source,
@@ -476,6 +519,12 @@ pub(super) async fn evaluate(
         );
         live_sources.push(source);
     }
+    // Evidence for sources that failed earlier remains inspectable.
+    quote_observations.extend(
+        probe_reads
+            .values()
+            .map(|evidence| probe_json(evidence, "not_applied", None)),
+    );
     if live_sources.is_empty() {
         if no_route_details.is_empty() {
             no_route_details.push("No source connectors can quote an executable route".into());
@@ -695,6 +744,62 @@ pub(super) async fn evaluate(
     })
 }
 
+/// Applies regtest-lab liquidity evidence to one quote-backed source and
+/// records it. Returns an exclusion reason when the source cannot route the
+/// amount. A Fedimint probe must come from the gateway the quote selected.
+fn apply_liquidity_probe(
+    source: &mut ConnectorSnapshot,
+    evidence: Option<LiquidityEvidence>,
+    selected_gateway: Option<&str>,
+    amount: Amount,
+    observations: &mut Vec<Value>,
+) -> Option<String> {
+    let evidence = evidence?;
+    if let (Some(node), Some(gateway)) = (evidence.node_pubkey.as_deref(), selected_gateway)
+        && node != gateway
+    {
+        observations.push(probe_json(
+            &evidence,
+            "not_applied",
+            Some((
+                "PROBE_NODE_NOT_SELECTED_GATEWAY",
+                "probed node is not the quoted gateway".into(),
+            )),
+        ));
+        return None;
+    }
+    match crate::probe::effect(&evidence, amount, unix_now()) {
+        ProbeEffect::Liquidity(liquidity) => {
+            source.liquidity = liquidity;
+            observations.push(probe_json(&evidence, "liquidity", None));
+            None
+        }
+        ProbeEffect::Exclude(reason) => {
+            observations.push(probe_json(
+                &evidence,
+                "excluded",
+                Some(("LIGHTNING_LIQUIDITY_UNAVAILABLE", reason.clone())),
+            ));
+            Some(reason)
+        }
+        ProbeEffect::Keep => {
+            observations.push(probe_json(&evidence, "none", None));
+            None
+        }
+    }
+}
+
+fn probe_json(evidence: &LiquidityEvidence, effect: &str, issue: Option<(&str, String)>) -> Value {
+    json!({
+        "kind": "lightning_liquidity_probe",
+        "connector": evidence.source_id,
+        "state": evidence.freshness(unix_now()),
+        "effect": effect,
+        "value": evidence,
+        "issue": issue.map(|(code, message)| json!({"code": code, "message": message})),
+    })
+}
+
 fn health_observation(evidence: &Evidence<ConnectorHealth>) -> HealthObservation {
     let health = |health| match health {
         ConnectorHealth::Healthy => HealthState::Healthy,
@@ -771,6 +876,7 @@ fn fedimint_quote_json(
             "gateway_id": quote.selected_gateway_id,
             "payable": quote.payable,
             "spendable_balance_sats": quote.spendable_balance_sats.value().map(|amount| amount.sats()),
+            "metrics": quote.metrics,
             "expiry": quote.expires_at_unix_seconds,
         })),
         "issue": issue.map(|message| json!({"code": "READ_ONLY_QUOTE_UNAVAILABLE", "message": message})),

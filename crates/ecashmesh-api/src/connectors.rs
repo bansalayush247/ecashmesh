@@ -22,6 +22,8 @@ pub(super) struct Provider {
     cashu: Arc<DiscoveryService>,
     fedimint: Arc<FedimintService>,
     allow_discovered_sources: bool,
+    /// Regtest-lab Lightning liquidity probes; `None` outside the lab.
+    liquidity_probes: Option<Arc<crate::probe::LiquidityProbes>>,
 }
 
 pub(super) struct ConnectorBatch {
@@ -244,6 +246,7 @@ impl Provider {
             cashu: Arc::new(DiscoveryService::new(vec![], vec![], vec![], 300).unwrap()),
             fedimint: Arc::new(fedimint),
             allow_discovered_sources: false,
+            liquidity_probes: None,
         }
     }
     pub fn from_env() -> Result<Self, String> {
@@ -313,18 +316,24 @@ impl Provider {
                 Ok(Self {
                     cashu: Arc::new(DiscoveryService::new(seeds, directories, allowed, ttl)?),
                     fedimint: Arc::new(
-                        FedimintService::new(federations, fedimint_ttl)?.with_catalog_host(
-                            std::env::var("ECASHMESH_FEDIMINT_SETUP_CONNECTOR")
-                                .ok()
-                                .or_else(|| {
-                                    std::env::var("ECASHMESH_FEDIMINT_BRIDGE_URL")
-                                        .ok()
-                                        .map(|_| "fedimint:local-bridge".into())
-                                })
-                                .as_deref(),
-                        )?,
+                        FedimintService::new(federations, fedimint_ttl)?
+                            .with_regtest_lab_loopback_gateways(
+                                std::env::var("PAYMENT_ENVIRONMENT").as_deref() == Ok("regtest")
+                                    && std::env::var("ECASHMESH_LAB_MODE").as_deref() == Ok("true"),
+                            )
+                            .with_catalog_host(
+                                std::env::var("ECASHMESH_FEDIMINT_SETUP_CONNECTOR")
+                                    .ok()
+                                    .or_else(|| {
+                                        std::env::var("ECASHMESH_FEDIMINT_BRIDGE_URL")
+                                            .ok()
+                                            .map(|_| "fedimint:local-bridge".into())
+                                    })
+                                    .as_deref(),
+                            )?,
                     ),
                     allow_discovered_sources,
+                    liquidity_probes: crate::probe::LiquidityProbes::from_env()?.map(Arc::new),
                 })
             }
             other => Err(format!("Unsupported ROUTING_MODE: {other}")),
@@ -339,6 +348,10 @@ impl Provider {
     #[must_use]
     pub const fn fedimint_service(&self) -> &Arc<FedimintService> {
         &self.fedimint
+    }
+
+    pub fn liquidity_probes(&self) -> Option<&crate::probe::LiquidityProbes> {
+        self.liquidity_probes.as_deref()
     }
 
     pub const fn allows_discovered_sources(&self) -> bool {
@@ -414,6 +427,7 @@ fn fedimint_observation_json(observation: &FederationObservation) -> Value {
         "network": EvidenceStateResponse::from_core(&observation.network, |value| json!(value)),
         "registered_gateways": EvidenceStateResponse::from_core(&observation.gateways, |value| json!(value)),
         "gateway_count": observation.gateways.value().map(Vec::len),
+        "fedimint_metrics": observation.metrics,
         "lightning_support": true,
         "issues": observation.issues,
         "limitations": [

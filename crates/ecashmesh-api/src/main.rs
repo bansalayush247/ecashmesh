@@ -29,6 +29,7 @@ mod lab;
 mod live;
 mod payment;
 mod payment_mode;
+mod probe;
 use connectors::Provider;
 
 #[derive(Clone)]
@@ -404,6 +405,7 @@ async fn evaluate_using(
     let evaluation = match live::evaluate(
         service,
         provider.fedimint_service(),
+        provider.liquidity_probes(),
         &batch,
         sources,
         live_destination,
@@ -482,6 +484,7 @@ async fn evaluate_using(
             .collect::<Vec<_>>(),
     );
     response.apply_fedimint_details(&batch.fedimint_observations, &evaluation.quote_observations);
+    response.apply_liquidity_evidence(&evaluation.quote_observations);
     response.gateway_estimated_sources = evaluation.gateway_estimated_sources;
     let ranked_ids = std::iter::once(&response.recommended_source)
         .chain(&response.alternative_sources)
@@ -529,6 +532,14 @@ fn gateway_comparison_diagnostic(
             .as_str()
             .map(|error| format!("{quote_error}; gateway comparison unavailable: {error}"))
     }
+}
+
+/// The regtest-lab liquidity reason a source was excluded, if any.
+fn liquidity_issue<'a>(quotes: &'a [serde_json::Value], id: &str) -> Option<&'a str> {
+    quotes
+        .iter()
+        .find(|value| value["connector"] == id && value["kind"] == "lightning_liquidity_probe")
+        .and_then(|value| value["issue"]["message"].as_str())
 }
 
 fn source_diagnostics(
@@ -583,6 +594,7 @@ fn source_diagnostics(
             let gateway_estimate = quotes.iter().find(|value| {
                 value["connector"] == id && value["kind"] == "fedimint_gateway_fee_estimate"
             });
+            let liquidity_issue = liquidity_issue(quotes, &id);
             let reason = if destinations.contains(&endpoint) {
                 "Destination is excluded from payment sources".to_owned()
             } else if request
@@ -599,6 +611,8 @@ fn source_diagnostics(
             } else if observation.is_none() {
                 "Source is not configured locally or its URL was rejected by discovery policy"
                     .to_owned()
+            } else if let Some(message) = liquidity_issue {
+                message.to_owned()
             } else if let Some(message) = gateway_comparison_diagnostic(quote, gateway_estimate) {
                 message
             } else if let Some(message) = quote.and_then(|value| value["issue"]["message"].as_str())
@@ -1307,8 +1321,11 @@ impl EvaluateResponse {
             }) {
                 route.fee = FeeResponse::live_terms(terms, payment_amount);
                 // A NUT-05 reserve gives an upper bound, not enough evidence
-                // to present a final-fee quality judgment.
-                route.fee_reasonableness = None;
+                // to present a final-fee quality judgment. A Fedimint quote is
+                // a native estimate and keeps the value the ranker used.
+                if matches!(terms, live::LiveFeeTerms::Cashu { .. }) {
+                    route.fee_reasonableness = None;
+                }
             }
         }
         self.score_breakdown = ScoreBreakdownResponse::from_route(&self.recommended_source);
@@ -1364,6 +1381,40 @@ impl EvaluateResponse {
             // remains unknown even when one identity was verified.
             route.available_gateway_count = None;
             route.gateway_status = Some(if verified { "online" } else { "unknown" });
+            // The quote binds funding and the selected gateway to this invoice;
+            // reserve and the registry list are federation-level observations.
+            route.fedimint_metrics = quotes
+                .iter()
+                .find(|quote| {
+                    quote["connector"] == route.source_id
+                        && quote["kind"] == "fedimint_lightning_fee_quote"
+                })
+                .and_then(|quote| quote["value"].get("metrics").cloned())
+                .map(|mut metrics| {
+                    metrics["reserve"] = json!(observation.metrics.reserve);
+                    metrics["gateways"] = json!(observation.metrics.gateways);
+                    metrics
+                });
+        }
+        self.sync_legacy_route_fields();
+    }
+
+    fn apply_liquidity_evidence(&mut self, quotes: &[serde_json::Value]) {
+        for route in
+            std::iter::once(&mut self.recommended_source).chain(&mut self.alternative_sources)
+        {
+            route.liquidity_evidence = quotes
+                .iter()
+                .find(|quote| {
+                    quote["kind"] == "lightning_liquidity_probe"
+                        && quote["connector"] == route.source_id
+                })
+                .map(|quote| {
+                    let mut evidence = quote["value"].clone();
+                    evidence["freshness"] = quote["state"].clone();
+                    evidence["applied_to_ranking"] = json!(quote["effect"] == "liquidity");
+                    evidence
+                });
         }
         self.sync_legacy_route_fields();
     }
@@ -1405,6 +1456,107 @@ pub(crate) struct EvaluatedRouteResponse {
     risk_flags: Vec<&'static str>,
     fee_reasonableness: Option<u8>,
     risk_penalty: u8,
+    /// Exact ranker inputs: `score = base_score - risk_penalty`.
+    score_contributions: ScoreContributionsResponse,
+    /// Structured Fedimint funding, gateway, reserve and reliability evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fedimint_metrics: Option<serde_json::Value>,
+    /// Regtest-lab, amount-specific Lightning liquidity evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    liquidity_evidence: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Serialize)]
+struct ScoreContributionsResponse {
+    signals: Vec<SignalContributionResponse>,
+    base_score_basis_points: u16,
+    risks: Vec<RiskPenaltyResponse>,
+    risk_penalty_basis_points: u16,
+    score_basis_points: u16,
+}
+
+#[derive(Clone, Serialize)]
+struct SignalContributionResponse {
+    signal: &'static str,
+    weight_percent: u16,
+    value_basis_points: u16,
+    /// `value * weight / total_weight`; their sum, floored, is the base score.
+    contribution_basis_points: f64,
+}
+
+#[derive(Clone, Serialize)]
+struct RiskPenaltyResponse {
+    code: &'static str,
+    penalty_basis_points: u16,
+}
+
+impl ScoreContributionsResponse {
+    /// Live evaluation ranks with `RouteRankingConfig::default()`.
+    fn from_ranked(route: &ecashmesh_core::RankedRoute) -> Self {
+        let config = RouteRankingConfig::default();
+        let weights = config.weights;
+        let signals = [
+            (
+                "liquidity_confidence",
+                weights.liquidity_confidence,
+                route.signals.liquidity_confidence,
+            ),
+            (
+                "reliability",
+                weights.reliability,
+                route.signals.reliability,
+            ),
+            (
+                "fee_reasonableness",
+                weights.fee_reasonableness,
+                route.signals.fee_reasonableness,
+            ),
+            (
+                "evidence_freshness",
+                weights.freshness,
+                route.signals.freshness,
+            ),
+            (
+                "solvency_confidence",
+                weights.solvency_confidence,
+                route.signals.solvency_confidence,
+            ),
+            (
+                "historical_behavior",
+                weights.historical_behavior,
+                route.signals.historical_behavior,
+            ),
+        ];
+        let total = f64::from(
+            signals
+                .iter()
+                .map(|(_, weight, _)| u32::from(*weight))
+                .sum::<u32>(),
+        );
+        Self {
+            signals: signals
+                .into_iter()
+                .map(|(signal, weight, value)| SignalContributionResponse {
+                    signal,
+                    weight_percent: weight,
+                    value_basis_points: value,
+                    contribution_basis_points: f64::from(value) * f64::from(weight) / total,
+                })
+                .collect(),
+            base_score_basis_points: route.base_score,
+            risks: route
+                .quality
+                .risk_factors
+                .iter()
+                .map(|risk| RiskPenaltyResponse {
+                    code: risk.reason_code(),
+                    penalty_basis_points: config.risk_penalties.for_risk(risk),
+                })
+                .collect(),
+            risk_penalty_basis_points: route.risk_penalty,
+            score_basis_points: route.score,
+        }
+    }
 }
 
 impl EvaluatedRouteResponse {
@@ -1456,6 +1608,9 @@ impl EvaluatedRouteResponse {
                 .value()
                 .map(|_| as_percent(route.signals.fee_reasonableness)),
             risk_penalty: as_percent(route.risk_penalty),
+            score_contributions: ScoreContributionsResponse::from_ranked(route),
+            fedimint_metrics: None,
+            liquidity_evidence: None,
         }
     }
 }
