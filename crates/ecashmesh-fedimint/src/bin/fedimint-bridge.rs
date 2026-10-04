@@ -658,7 +658,15 @@ async fn info(State(b): State<Arc<BridgeState>>, h: HeaderMap) -> HttpResult<Jso
             catalog.get(&federation_id),
             b.get_client(federation_id).await,
         ) {
-            let balance = client.get_balance_for_btc().await.map_err(internal)?;
+let balance = match client.get_balance_for_btc().await {
+    Ok(balance) => Some(balance.msats),
+    Err(error) => {
+        eprintln!(
+            "Fedimint bridge: balance unavailable for {federation_id}: {error:#}"
+        );
+        None
+    }
+};
             let native_config = client.config().await;
             let network = if let Ok(ln) = client.get_first_module::<LightningClientModule>() {
                 native_config
@@ -681,7 +689,7 @@ async fn info(State(b): State<Arc<BridgeState>>, h: HeaderMap) -> HttpResult<Jso
                 .pointer("/global/meta")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            response.insert(entry.federation_id.to_string(), json!({"label":entry.label,"meta":meta,"totalAmountMsat":balance.msats,"network":network,"config":config_json}));
+            response.insert(entry.federation_id.to_string(), json!({"label":entry.label,"meta":meta,"totalAmountMsat":balance,"network":network,"config":config_json}));
         }
     }
     Ok(Json(Value::Object(response)))
