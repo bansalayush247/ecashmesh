@@ -2,7 +2,7 @@
 
 **BOSS Battle 2026 · Track 03: Freedom Stack (Nostr + Ecash)**
 
-▶ **Demo video (4 min):** (https://youtu.be/UGRxNYp_cpI)
+▶ **Demo video (5 min):** https://youtu.be/UGRxNYp_cpI
 
 ## Interoperability across Cashu and Fedimint
 
