@@ -48,6 +48,12 @@ transaction fee (gatewayd default 2000 msat + 3000 ppm). Cashu fees are the
 NUT-05 melt fee reserve (an upper bound) and NUT-02 input fees (ppk per input,
 dependent on the proofs selected).
 
+A gateway's Lightning fee is also its **routing-fee budget**: what it may pay
+the Lightning network for this payment (a Cashu mint's is its melt fee
+reserve). A source whose measured route fee exceeds that budget is excluded
+before ranking (`INFEASIBLE_FEE_BUDGET`); see
+[liquidity-probing.md](liquidity-probing.md#routing-fee-feasibility).
+
 ## Funding
 
 Fedimint quotes carry wallet balance, required balance (amount + federation +
@@ -88,7 +94,7 @@ Cashu has no liabilities endpoint in this lab's CDK version: Cashu solvency is
 
 `scripts/ecashmesh-lab-route-executor.py reliability` pays fresh `lnd-2`
 invoices through each source with the native clients (CDK melt, Fedimint LNv2
-send) and appends each real outcome to `observations/payments.jsonl` with
+send) and appends each real outcome to `observations/<run_id>/payments.jsonl` with
 source, time, amount, fee, gateway and failure class:
 
 - `liquidity`: no route / insufficient channel liquidity;
@@ -107,7 +113,7 @@ Probes, channel state, gateway discovery and fee quotes are never outcomes.
 The same evidence is used for the hop's route reliability and the connector's
 own reliability (single-hop live routes). The connector's first-observed time
 is the earliest record in the history (payments or liquidity observations, the
-latter appended by the API to `observations/observations.jsonl` per evaluation).
+latter appended by the API to `observations/<run_id>/observations.jsonl` per evaluation).
 `historical_behavior` uses the existing formula; it measures how much history
 exists, while success is measured by reliability.
 
@@ -177,7 +183,7 @@ scripts/ecashmesh-lab-services.sh start         # bridge + API with every lab ev
 scripts/ecashmesh-lab-route-executor.py fund-cashu
 scripts/ecashmesh-lab-route-executor.py reliability --rounds 5
 scripts/ecashmesh-lab-rank-acceptance.py 10000 --verify-topology
-scripts/ecashmesh-lab-experiments.py            # 9 controlled experiments, lab restored after each
+scripts/ecashmesh-lab-experiments.py            # 10 controlled experiments, lab restored after each
 ```
 
 An LNv2 gateway funds every incoming contract with its own ecash in that
@@ -192,7 +198,19 @@ Generated, never committed (`.regtest/` is ignored):
 `ecashmesh-services.json` (source map, client map, probe map, history path;
 paths only), `lab-credentials.env` (0600: gateway admin password from
 devimint's generated env, guardian API password read from the pinned devimint
-source), `observations/` (history), `experiments/` (results).
+source), `observations/<run_id>/` (history of that lab run only), `executor.lock` (one executor at a time), `experiments/` (results).
+
+Lab deadlines (set by `ecashmesh-lab-services.sh`; production defaults in
+brackets): `ECASHMESH_LAB_FEDIMINT_CLI_TIMEOUT_MS` 6000 [2500] per lab
+`fedimint-cli` call, `ECASHMESH_FEDIMINT_REQUEST_TIMEOUT_SECONDS` 15 [3] per
+bridge request (the API's per-source deadline is this + 1 s),
+`ECASHMESH_BRIDGE_GATEWAY_TIMEOUT_MS` 4000 [750/1500] for gateway listing and
+routing info. The lab runs 16 debug guardians and 8 Lightning nodes on one
+machine; the production defaults drop Fedimint quotes under that load. The
+bridge also re-audits guardians every 20 s in the background, so no
+evaluation waits for an audit. Lab payment commands (`fund-*`,
+`reliability`, the matrix) hold the lab wallets; evaluations run alongside
+them may lose Fedimint quotes, so run them one at a time.
 
 `--verify-topology` fails unless all four Fedimint sources are ranked with a
 registered LNv2 gateway that is reachable, has an active channel, non-zero

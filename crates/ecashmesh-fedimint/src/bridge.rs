@@ -43,6 +43,8 @@ struct QuoteEvidence {
     #[serde(default)]
     gateway_fee_ppm: Option<u64>,
     #[serde(default)]
+    gateway_routing_fee_budget_msat: Option<u64>,
+    #[serde(default)]
     gateway_routing_available: Option<bool>,
     #[serde(default)]
     gateway_candidate_count: Option<u64>,
@@ -56,6 +58,8 @@ struct GatewayCandidateEvidence {
     gateway_id: String,
     gateway_url: String,
     gateway_fee_msat: u64,
+    #[serde(default)]
+    routing_fee_budget_msat: Option<u64>,
     fee_base_msat: u64,
     fee_ppm: u64,
     #[serde(default)]
@@ -143,6 +147,13 @@ pub(super) fn parse(
     {
         return Err("Inconsistent Fedimint funding evidence".into());
     }
+    // The routing budget is the part of the gateway fee the gateway may pass
+    // on to Lightning; it can never exceed the fee itself.
+    if q.gateway_routing_fee_budget_msat
+        .is_some_and(|budget| budget > q.gateway_fee_msat)
+    {
+        return Err("Inconsistent Fedimint gateway fee evidence".into());
+    }
     if !q.gateway_identity_verified
         || q.selected_gateway_id.len() != 66
         || !q.selected_gateway_id.bytes().all(|c| c.is_ascii_hexdigit())
@@ -178,6 +189,7 @@ pub(super) fn parse(
             ConfidenceLevel::Medium,
         ),
         selected_gateway_id: Some(q.selected_gateway_id.clone()),
+        routing_fee_budget_msat: q.gateway_routing_fee_budget_msat,
         observed_at: timestamp,
         expires_at_unix_seconds: Some(q.expires_at_unix_seconds),
         metrics: quote_metrics(&q, required),
@@ -206,6 +218,7 @@ fn quote_metrics(q: &QuoteEvidence, required: u64) -> super::FedimintMetrics {
             fee_ppm: q.gateway_fee_ppm,
             gateway_fee_sats: Some(ceil_sats(q.gateway_fee_msat).sats()),
             routing_available: q.gateway_routing_available,
+            routing_fee_budget_msat: q.gateway_routing_fee_budget_msat,
             outbound_liquidity_sats: None,
             liquidity_status: q.gateway_liquidity.clone(),
         }),
@@ -299,7 +312,10 @@ pub(super) fn parse_gateway_estimate(
                 && matches!(candidate.gateway_protocol.as_str(), "lnv1" | "lnv2")
                 && candidate.gateway_protocol == q.gateway_protocol
                 && gateway_url_allowed(&candidate.gateway_url, lab_regtest)
-                && expected_fee == Some(candidate.gateway_fee_msat);
+                && expected_fee == Some(candidate.gateway_fee_msat)
+                && candidate
+                    .routing_fee_budget_msat
+                    .is_none_or(|budget| budget <= candidate.gateway_fee_msat);
             valid.then_some(FedimintGatewayCandidate {
                 gateway_id: candidate.gateway_id,
                 gateway_url: candidate.gateway_url,
@@ -477,6 +493,31 @@ mod tests {
             )
             .unwrap_err(),
             "Invalid Fedimint gateway estimate evidence"
+        );
+    }
+
+    #[test]
+    fn routing_fee_budget_is_carried_only_when_within_the_gateway_fee() {
+        assert_eq!(
+            parse_test(&evidence()).unwrap().routing_fee_budget_msat,
+            None
+        );
+        let mut value = evidence();
+        value["gateway_routing_fee_budget_msat"] = json!(1001);
+        let quote = parse_test(&value).unwrap();
+        assert_eq!(quote.routing_fee_budget_msat, Some(1001));
+        assert_eq!(
+            quote
+                .metrics
+                .selected_gateway
+                .unwrap()
+                .routing_fee_budget_msat,
+            Some(1001)
+        );
+        value["gateway_routing_fee_budget_msat"] = json!(1002);
+        assert_eq!(
+            parse_test(&value).unwrap_err(),
+            "Inconsistent Fedimint gateway fee evidence"
         );
     }
 

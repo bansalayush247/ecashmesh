@@ -76,6 +76,8 @@ struct RegtestClient {
     /// Regtest guardian API password for the read-only `admin audit`. Passed to
     /// `fedimint-cli` through its environment, never as an argument.
     guardian_password: Option<String>,
+    /// Deadline per `fedimint-cli` call; raise it on a loaded lab host.
+    cli_timeout: Duration,
     audit: Mutex<Option<(Instant, Value)>>,
     audit_refreshing: std::sync::atomic::AtomicBool,
 }
@@ -89,9 +91,32 @@ const GUARDIAN_AUDIT_TIMEOUT: Duration = Duration::from_millis(1_500);
 /// the consumer's 120 s solvency freshness window; older ones are refreshed
 /// inline so an idle bridge never hands out stale solvency.
 const GUARDIAN_AUDIT_SERVE_STALE: Duration = Duration::from_secs(90);
+/// The lab bridge re-audits every federation on this interval so an
+/// evaluation never waits for an audit (audits share each lab wallet's
+/// `fedimint-cli` lock with balance reads and fee quotes).
+const GUARDIAN_AUDIT_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
 
 const LNV2_GATEWAY_LIST_TIMEOUT: Duration = Duration::from_millis(750);
 const LNV2_GATEWAY_PROBE_BUDGET: Duration = Duration::from_millis(1_500);
+/// `ECASHMESH_BRIDGE_GATEWAY_TIMEOUT_MS` overrides both gateway budgets (list
+/// and routing info), e.g. for a loaded regtest lab host.
+static GATEWAY_TIMEOUT_OVERRIDE: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+
+fn gateway_list_timeout() -> Duration {
+    GATEWAY_TIMEOUT_OVERRIDE
+        .get()
+        .copied()
+        .flatten()
+        .unwrap_or(LNV2_GATEWAY_LIST_TIMEOUT)
+}
+
+fn gateway_probe_budget() -> Duration {
+    GATEWAY_TIMEOUT_OVERRIDE
+        .get()
+        .copied()
+        .flatten()
+        .unwrap_or(LNV2_GATEWAY_PROBE_BUDGET)
+}
 const GATEWAY_REGISTRY_TIMEOUT: Duration = Duration::from_millis(1_250);
 // The lab's pinned fedimint-cli is a debug build; startup alone can take ~2s.
 const REGTEST_CLI_TIMEOUT: Duration = Duration::from_millis(2_500);
@@ -225,6 +250,12 @@ fn load_regtest_clients() -> anyhow::Result<HashMap<FederationId, RegtestClient>
     ensure!(cli.is_file(), "ECASHMESH_LAB_FEDIMINT_CLI does not exist");
     let names: HashMap<String, String> =
         serde_json::from_str(&mapping).context("invalid regtest client mapping")?;
+    let cli_timeout = env::var("ECASHMESH_LAB_FEDIMINT_CLI_TIMEOUT_MS")
+        .ok()
+        .map(|value| value.parse::<u64>().map(Duration::from_millis))
+        .transpose()
+        .context("ECASHMESH_LAB_FEDIMINT_CLI_TIMEOUT_MS must be an integer")?
+        .unwrap_or(REGTEST_CLI_TIMEOUT);
     let guardian_password = env::var("ECASHMESH_LAB_GUARDIAN_PASSWORD")
         .ok()
         .filter(|password| !password.is_empty());
@@ -250,6 +281,7 @@ fn load_regtest_clients() -> anyhow::Result<HashMap<FederationId, RegtestClient>
                 cli: cli.clone(),
                 lock: Mutex::new(()),
                 guardian_password: guardian_password.clone(),
+                cli_timeout,
                 audit: Mutex::new(None),
                 audit_refreshing: std::sync::atomic::AtomicBool::new(false),
             },
@@ -272,7 +304,7 @@ async fn regtest_cli_with_env(
     args: &[&str],
     envs: &[(&str, &str)],
 ) -> anyhow::Result<Value> {
-    regtest_cli_bounded(client, args, envs, REGTEST_CLI_TIMEOUT).await
+    regtest_cli_bounded(client, args, envs, client.cli_timeout).await
 }
 
 async fn regtest_cli_bounded(
@@ -434,6 +466,38 @@ async fn regtest_guardian_audit(
             Some(audit)
         }
         _ => Some(refresh_guardian_audit(regtest, &peers).await),
+    }
+}
+
+/// Regtest lab only: periodically refreshes audits older than the TTL.
+async fn keep_guardian_audits_warm(bridge: Arc<BridgeState>) {
+    loop {
+        for (federation_id, regtest) in &bridge.regtest_clients {
+            if regtest.guardian_password.is_none() {
+                continue;
+            }
+            let due = regtest
+                .audit
+                .lock()
+                .await
+                .as_ref()
+                .is_none_or(|(at, _)| at.elapsed() >= GUARDIAN_AUDIT_TTL);
+            if !due {
+                continue;
+            }
+            if let Some(client) = bridge.get_client(*federation_id).await {
+                let peers = client
+                    .config()
+                    .await
+                    .global
+                    .api_endpoints
+                    .keys()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                refresh_guardian_audit(regtest, &peers).await;
+            }
+        }
+        tokio::time::sleep(GUARDIAN_AUDIT_REFRESH_INTERVAL).await;
     }
 }
 
@@ -860,7 +924,7 @@ impl BridgeState {
             return Vec::new();
         };
         let Ok(Ok(gateways)) =
-            tokio::time::timeout(LNV2_GATEWAY_LIST_TIMEOUT, lnv2.list_gateways(None)).await
+            tokio::time::timeout(gateway_list_timeout(), lnv2.list_gateways(None)).await
         else {
             return Vec::new();
         };
@@ -869,8 +933,7 @@ impl BridgeState {
             let lnv2 = &lnv2;
             async move {
                 let routing =
-                    tokio::time::timeout(LNV2_GATEWAY_PROBE_BUDGET, lnv2.routing_info(&gateway))
-                        .await;
+                    tokio::time::timeout(gateway_probe_budget(), lnv2.routing_info(&gateway)).await;
                 (gateway, routing)
             }
         }))
@@ -1389,14 +1452,14 @@ async fn lnv2_gateway_candidates(
     amount_msat: u64,
 ) -> Option<Vec<Value>> {
     let Ok(Ok(gateways)) =
-        tokio::time::timeout(LNV2_GATEWAY_LIST_TIMEOUT, lnv2.list_gateways(None)).await
+        tokio::time::timeout(gateway_list_timeout(), lnv2.list_gateways(None)).await
     else {
         return None;
     };
     let mut candidates = Vec::new();
     let responses = futures::future::join_all(gateways.into_iter().map(|gateway| async move {
         let routing =
-            tokio::time::timeout(LNV2_GATEWAY_PROBE_BUDGET, lnv2.routing_info(&gateway)).await;
+            tokio::time::timeout(gateway_probe_budget(), lnv2.routing_info(&gateway)).await;
         (gateway, routing)
     }))
     .await;
@@ -1408,9 +1471,21 @@ async fn lnv2_gateway_candidates(
         if !fee.is_within(&fedimint_lnv2_common::gateway_api::PaymentFee::SEND_FEE_LIMIT) {
             continue;
         }
+        // The gateway's Lightning routing-fee budget, exactly as its send state
+        // machine derives `max_fee`: the contract amount the client funds
+        // (`fee.add_to(amount)`) minus the gateway's `min_contract_amount`
+        // (`send_fee_minimum.add_to(amount)`). The gateway cancels a contract
+        // below that minimum as underfunded, so such a gateway is unusable.
+        let Some(routing_fee_budget) = fee
+            .add_to(amount_msat)
+            .checked_sub(routing.send_fee_minimum.add_to(amount_msat))
+        else {
+            continue;
+        };
         candidates.push(json!({
             "gateway_id":routing.lightning_public_key.to_string(), "gateway_url":gateway.to_string(),
             "gateway_fee_msat":fee.fee(amount_msat).msats,
+            "routing_fee_budget_msat":routing_fee_budget.msats,
             "fee_base_msat":fee.base.msats, "fee_ppm":fee.parts_per_million,
             "expiration_delta":expiration_delta,
             "lightning_alias":routing.lightning_alias,
@@ -1485,6 +1560,7 @@ async fn lnv2_regtest_quote(
         "selected_gateway_id":selected["gateway_id"], "gateway_identity_verified":true,
         "gateway_protocol":"lnv2", "gateway_url":selected["gateway_url"],
         "gateway_fee_base_msat":selected["fee_base_msat"], "gateway_fee_ppm":selected["fee_ppm"],
+        "gateway_routing_fee_budget_msat":selected["routing_fee_budget_msat"],
         // The selected gateway returned routing info for this federation; this
         // is not a payment probe and says nothing about channel liquidity.
         "gateway_routing_available":true, "gateway_candidate_count":candidates.len(),
@@ -1707,6 +1783,12 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let token = load_or_create_token(&root.join("bridge-token"))?;
+    let gateway_timeout = env::var("ECASHMESH_BRIDGE_GATEWAY_TIMEOUT_MS")
+        .ok()
+        .map(|value| value.parse::<u64>().map(Duration::from_millis))
+        .transpose()
+        .context("ECASHMESH_BRIDGE_GATEWAY_TIMEOUT_MS must be an integer")?;
+    let _ = GATEWAY_TIMEOUT_OVERRIDE.set(gateway_timeout);
     let regtest_clients = load_regtest_clients()?;
     let catalog_path = root.join("catalog.json");
     let catalog = load_catalog(&catalog_path)?;
@@ -1749,6 +1831,13 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+    }
+    if bridge
+        .regtest_clients
+        .values()
+        .any(|client| client.guardian_password.is_some())
+    {
+        tokio::spawn(keep_guardian_audits_warm(Arc::clone(&bridge)));
     }
     let app = Router::new()
         .route("/health", get(health))

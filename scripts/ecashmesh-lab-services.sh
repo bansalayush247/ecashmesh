@@ -71,6 +71,13 @@ ECASHMESH_LAB_HISTORY_DIR="$(field history_dir)"
 ROUTING_MODE=live
 ECASHMESH_CASHU_MAX_AGE_SECONDS="${ECASHMESH_CASHU_MAX_AGE_SECONDS:-300}"
 ECASHMESH_FEDIMINT_MAX_AGE_SECONDS="${ECASHMESH_FEDIMINT_MAX_AGE_SECONDS:-300}"
+# The lab runs 16 debug guardians, 5 LNDs and 3 LDK nodes on one machine.
+# Under load a single fedimint-cli call can take seconds, so the lab uses
+# longer deadlines than the production defaults (2.5 s per call, 3 s per
+# bridge request, 0.75/1.5 s for gateway listing/routing info). Override any.
+ECASHMESH_LAB_FEDIMINT_CLI_TIMEOUT_MS="${ECASHMESH_LAB_FEDIMINT_CLI_TIMEOUT_MS:-6000}"
+ECASHMESH_FEDIMINT_REQUEST_TIMEOUT_SECONDS="${ECASHMESH_FEDIMINT_REQUEST_TIMEOUT_SECONDS:-15}"
+ECASHMESH_BRIDGE_GATEWAY_TIMEOUT_MS="${ECASHMESH_BRIDGE_GATEWAY_TIMEOUT_MS:-4000}"
 ECASHMESH_CASHU_MINTS="$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1]))["sources"]; print(json.dumps([{"id":k,"url":v["mint_url"]} for k,v in s.items() if v["kind"]=="cashu"]))' "$config")"
 ECASHMESH_FEDIMINT_FEDERATIONS='[]'
 ECASHMESH_FEDIMINT_BRIDGE_URL=http://127.0.0.1:3333

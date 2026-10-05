@@ -8,6 +8,10 @@ non-loopback endpoints.
 
     scripts/ecashmesh-lab-rank-acceptance.py [amount_sats] [--json out.json]
         [--invoice lnbcrt...] [--verify-topology]
+
+Always checks the evaluator-vs-execution invariant: no ranked source, least
+of all the recommended one, has a measured Lightning route fee above the
+routing-fee budget of the node that would pay it (exit 1 otherwise).
 """
 
 import argparse
@@ -108,6 +112,11 @@ def probe_report(result, labels):
         fee = f"routing fee {v['routing_fee_msat']} msat " if v.get("routing_fee_msat") is not None else ""
         print(f"   PROBE   {name(o):<20} from {v['node']:<14} {v['probed_amount_sats']} sats -> {v['outcome']} "
               f"conf={v['confidence']} {o['state']} effect={o['effect']} {fee}{v.get('failure_reason') or ''}".rstrip())
+    for o in sorted(observations(result, "routing_fee_budget"), key=name):
+        v = o["value"]
+        print(f"   BUDGET  {name(o):<20} route fee {v['probe_fee_msat']} msat ({v['probe_fee_bound']}, "
+              f"{v['probe_fee_basis']}) vs {v['budget_kind']} {v['fee_budget_msat']} msat -> {v['reason']} "
+              f"effect={o['effect']}")
     for o in sorted(observations(result, "lightning_channel_state"), key=name):
         v = o["value"]
         direct = v.get("payee_direct_outbound_sats")
@@ -189,6 +198,18 @@ def report(result):
         print(f"   GATEWAY-ESTIMATE-ONLY {estimate['source_id']}: {estimate['reason']}")
 
 
+def fee_budget_violations(result):
+    """Evaluator-vs-execution invariant: a ranked (above all the selected)
+    source's measured route fee never exceeds its node's routing-fee budget."""
+    violations = []
+    for rank, route in enumerate(ranked(result), 1):
+        check = (route.get("liquidity_evidence") or {}).get("fee_budget") or {}
+        fee, budget = check.get("probe_fee_msat"), check.get("fee_budget_msat")
+        if check.get("feasible") is False or (None not in (fee, budget) and fee > budget):
+            violations.append(f"#{rank} {route['source_id']}: route fee {fee} msat > budget {budget} msat")
+    return violations
+
+
 def verify_topology(result):
     """All four Fedimint sources must be ranked with a registered LNv2 gateway
     that is reachable, actively connected, has outbound liquidity and fresh
@@ -246,6 +267,11 @@ def main():
           f"ranked={len(rows)} excluded={len(excluded)}")
     report(result)
     probe_report(result, labels)
+    violations = fee_budget_violations(result)
+    for violation in violations:
+        print(f"   FEE-BUDGET INVARIANT VIOLATED {violation}")
+    if violations:
+        return 1
     if args.verify_topology:
         failures = verify_topology(result)
         for failure in failures:

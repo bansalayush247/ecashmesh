@@ -42,6 +42,25 @@ generates it (`scripts/ecashmesh-lab-config.py`).
 |---|---|---|
 | `lnd` (`rest_url`, `tls_cert`, `macaroon`) | Cashu mints (`cashu-lnd-A…D`), Fedimint A (gateway A's LND) | Probe: `GET /v1/getinfo`, `GET /v1/payreq/{invoice}`, `POST /v2/router/route/estimatefee`. Channel state when no gateway is configured: `GET /v1/channels` |
 | `gateway_channels` (`api_url`) | Fedimint A–D | `GET /list_channels`, `GET /info`, bearer `ECASHMESH_LAB_GATEWAY_PASSWORD` |
+| `relay_lnd` (with `gateway_channels`) | Fedimint B–D (LDK gateways, no probe API) | Relayed probe: the same `estimatefee` probe, sent by the gateway's only channel peer (lab payee `lnd-2`) |
+
+**Relayed probes.** The pinned LDK gatewayd exposes no probe or route API.
+When every active gateway channel leads to the relay node, every payment from
+that gateway passes through it, so a live probe has two legs measured
+together: the gateway's own channel table (outbound must cover the amount plus
+the relay route's fees) and a non-settling probe from the relay to the payee.
+Routable counts as **Medium** (Low if only a route-hint hop was reached),
+weaker than an end-to-end probe; relay no-route/insufficient excludes the
+gateway ("Every route from gateway-B passes through lnd-2, …"). Not sent when
+the gateway has a direct channel to the payee (channel state decides). One
+relay probe is shared by all gateways behind it for 5 s.
+
+**One probe at a time per payee.** Probe HTLCs toward the same payee are
+serialized. Sent concurrently, eight probes would compete for payee-side HTLC
+limits (an LDK node accepts only 10% of a channel's capacity in flight, e.g.
+15,000 sats on a 150,000-sat channel) and fail each other — and their
+failures would penalize the path in LND's mission control — which a single
+real payment never would.
 
 - Loopback URLs only; LND with the **readonly** macaroon and its own
   `tls.cert` pinned byte-for-byte (LND marks it as a CA, which WebPKI rejects
@@ -74,6 +93,7 @@ Decision per source (`probe::combined_effect`), in order:
 | Fresh channel state: active outbound < amount | Excluded (no route can carry more than the node's total spendable outbound) | `channel_state` |
 | Probe `routable`, payee reached | Liquidity = probed amount (no maximum), Observer, **High** → 10000 | `active_probe` |
 | Probe `routable`, only a route-hint hop reached | Same, **Medium** → 6000 | `active_probe` |
+| Relayed probe `routable` (payee / hint hop) | Same, **Medium** → 6000 / **Low** → 2500 | `active_probe` |
 | Fresh probe `insufficient_liquidity` / `no_route` | Excluded with the reason; no balance is invented | `active_probe` |
 | Active direct channel to the payee with outbound ≥ amount | Liquidity = the amount, Connector, **Medium** → 6000 (HTLC limits are not visible in balances, so never High) | `channel_state` |
 | Outbound ≥ amount but no direct channel to the payee | Unknown (supporting evidence only) | `unknown` |
@@ -81,6 +101,49 @@ Decision per source (`probe::combined_effect`), in order:
 
 A probe is never payment history and never touches reliability, solvency or
 historical behaviour. A successful probe of X sats says nothing about X+1.
+
+## Routing-fee feasibility
+
+A routable probe is not enough: the node that pays the route also caps what it
+will spend on routing fees, and fails any route that costs more. Feasibility
+is decided **before ranking** (`crates/ecashmesh-api/src/fee_budget.rs`,
+`live::rank_feasible_sources`); an infeasible source is excluded, never
+ranked, and with none left the result is the usual no-route outcome.
+
+| Source | Budget the paying node enforces | Evaluator reads it from |
+|---|---|---|
+| Fedimint LNv2 gateway | `max_fee = contract amount − min_contract_amount` = send fee − the gateway's minimum send fee, i.e. its configured Lightning fee (gatewayd `send_sm.rs`) | the bridge quote's `gateway_routing_fee_budget_msat`, computed from the same native `RoutingInfo` the client builds the contract from (`send_parameters`, `send_fee_minimum`) |
+| Cashu (CDK) mint | `max_fee_amount = fee_reserve` of the melt quote, a fixed msat LND fee limit (`cdk-lnd`) | the melt quote's fee reserve |
+
+The budget is what the paying node may spend on routing. It is part of the fee
+the payer is charged, not that fee; the two are never compared.
+
+The route fee is what the paying node itself would pay, from fresh evidence
+for exactly this amount, bound to the selected gateway's node:
+
+| Evidence | Route fee |
+|---|---|
+| Own-node probe, payee reached | `routing_fee_msat`, exact |
+| Own-node probe, only a route-hint hop reached | at least `routing_fee_msat` |
+| Relayed probe | relay's `routing_fee_msat` + the relay's own forwarding fee (`relay_hop_fee_msat`), exact when LND's route from the gateway (`QueryRoutes` with `source_pub_key`) has the relay as first hop and its remainder costs exactly what the relay probed; otherwise at least the relay's fee |
+| Active direct channel to the payee covering the amount | 0, exact (no hop in between) |
+| Payee is the selected gateway's own node | 0, exact (no Lightning payment) |
+
+| Fee vs budget | `feasible` | `reason` | Effect |
+|---|---|---|---|
+| exact ≤ budget | `true` | `WITHIN_FEE_BUDGET` | ranked as before |
+| exact or lower bound > budget | `false` | `INFEASIBLE_FEE_BUDGET` | excluded |
+| lower bound ≤ budget | `null` | `PROBE_FEE_LOWER_BOUND_WITHIN_BUDGET` | ranked as before |
+| no fresh fee evidence / no quoted budget | `null` | `PROBE_FEE_UNKNOWN` / `FEE_BUDGET_UNKNOWN` | ranked as before |
+
+Each verdict is a `routing_fee_budget` observation and appears on ranked
+routes as `liquidity_evidence.fee_budget`. Invariant: no ranked route uses a
+source with `feasible: false`; the API fails the evaluation rather than return
+one, and `ecashmesh-lab-rank-acceptance.py` and the experiments exit or raise
+if a ranked source's route fee exceeds its budget. The `fee_budget`
+experiment reproduces the original mismatch (gateway A at gatewayd's default
+Lightning fee of 0): Fed A is excluded, the recommended source pays for real,
+and Fed A's own payment is refunded by its gateway.
 
 ## Freshness
 

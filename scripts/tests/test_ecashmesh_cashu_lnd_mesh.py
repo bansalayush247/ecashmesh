@@ -130,6 +130,59 @@ class CashuLndMeshTests(unittest.TestCase):
         self.assertIn('cashu_lnd_runtime_ports()', self.teardown)
         self.assertIn('cashu-lightning-backends.json', self.teardown)
 
+    def test_cashu_nodes_resync_gossip_and_wait_for_lnd1_routes_both_ways(self):
+        start = self.launcher.index("start_cashu_lnd() {")
+        config = self.launcher[start:self.launcher.index("[Bitcoin]", start)]
+        self.assertIn("historicalsyncinterval=10s", config)
+        for index in "ABCD":
+            self.assertIn(f"'{index} lnd1 cashu_{index.lower()}_to_lnd1'", self.launcher)
+            self.assertIn(f"'lnd1 {index} lnd1_to_cashu_{index.lower()}'", self.launcher)
+        self.assertIn('lnd1) printf \'%s\' "$lnd1_id"', self.launcher)
+        # Graph readiness gates every smoke test that pays through LND #1.
+        self.assertLess(
+            self.launcher.index("if ! cashu_wait_for_graph_routes; then"),
+            self.launcher.index('"$cashu_smoke_target" smoke "$index"'),
+        )
+
+    def test_missing_channel_policies_are_healed_by_a_verified_round_trip(self):
+        start = self.launcher.index("lightning_heal_missing_policies() {")
+        heal = self.launcher[start:self.launcher.index("\ncashu_wait_for_graph_routes() {", start)]
+        wave_start = self.launcher.index("lightning_policy_wave() {")
+        wave = self.launcher[wave_start:start]
+        # Only directions that some node is missing, owned by a lab node.
+        self.assertIn('not edge.get(f"node{side}_policy")', heal)
+        # A real change, then the original values, each verified on every node.
+        self.assertIn('lightning_policy_wave "$work" 1', heal)
+        self.assertIn('lightning_policy_wave "$work" 0', heal)
+        self.assertLess(heal.index('lightning_policy_wave "$work" 1'), heal.index('lightning_policy_wave "$work" 0'))
+        self.assertIn('--base_fee_msat "$((base + offset))"', wave)
+        self.assertIn("int(policy[\"fee_base_msat\"]) != int(base) + offset", wave)
+        self.assertNotIn("sleep 90", wave)
+        wait = self.launcher[self.launcher.index("cashu_wait_for_graph_routes() {"):]
+        self.assertIn('if [[ "$attempt" -eq 20 && "$healed" -eq 0 ]]; then', wait)
+
+    def test_every_channel_open_waits_for_the_opener_to_reach_the_chain_tip(self):
+        loop = self.launcher[self.launcher.index("for pair in 'A B' 'A C' 'A D' 'A lnd2'; do"):]
+        loop = loop[:loop.index("\ndone")]
+        self.assertLess(loop.index('cashu_wait_chain_synced "$1"'), loop.index('cashu_open_channel "$1" "$2"'))
+        helper = self.launcher[self.launcher.index("cashu_wait_chain_synced() {"):]
+        helper = helper[:helper.index("\n}\n")]
+        self.assertIn("btccli getblockcount", helper)
+        self.assertIn('d.get("synced_to_chain") is True', helper)
+        self.assertIn('int(d["block_height"]) >= int(sys.argv[1])', helper)
+
+    def test_gateways_get_channels_and_ecash_before_the_route_matrix(self):
+        provision = self.launcher.index('scripts/ecashmesh-lab-gateway-liquidity.py"')
+        matrix = self.launcher.index('scripts/ecashmesh-lab-route-executor.py" >"$state/route-executor.log"')
+        self.assertLess(provision, matrix)
+        self.assertLess(self.launcher.index('scripts/ecashmesh-lab-config.py"'), matrix)
+        # Routing is proven and Cashu wallets funded before the matrix.
+        readiness = self.launcher.index('scripts/ecashmesh-lab-route-readiness.py"')
+        funding = self.launcher.index('scripts/ecashmesh-lab-route-executor.py" fund-cashu')
+        self.assertLess(provision, readiness)
+        self.assertLess(readiness, funding)
+        self.assertLess(funding, matrix)
+
 
 if __name__ == "__main__":
     unittest.main()

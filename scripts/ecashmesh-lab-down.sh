@@ -105,10 +105,21 @@ if same_process "$state/runner.pid" "$state/runner.start"; then
     done
   fi
   if same_process "$state/runner.pid" "$state/runner.start"; then
+    # A supervisor interrupted during startup has not installed its shutdown
+    # handler yet and ignores INT/TERM. It is still the verified lab process
+    # (PID and start time); stop it, and the port sweep below stops the
+    # daemons it started.
+    kill -KILL "$runner_pid"
+    for _ in $(seq 1 10); do
+      same_process "$state/runner.pid" "$state/runner.start" || break
+      sleep 1
+    done
+  fi
+  if same_process "$state/runner.pid" "$state/runner.start"; then
     command="$(/bin/ps -p "$runner_pid" -o command= 2>/dev/null || true)"
     record_teardown_state FAILED "$(python3 - "$runner_pid" "$command" <<'PY'
 import json, sys
-print(json.dumps([{"pid": int(sys.argv[1]), "command": sys.argv[2], "reason": "lab supervisor did not exit after SIGINT and SIGTERM"}]))
+print(json.dumps([{"pid": int(sys.argv[1]), "command": sys.argv[2], "reason": "lab supervisor did not exit after SIGINT, SIGTERM and SIGKILL"}]))
 PY
 )"
     echo "EcashMesh lab teardown could not stop the verified lab supervisor; see $state/teardown-diagnostics.json" >&2

@@ -313,7 +313,21 @@ def fund_fedimint(args):
         print(f"{config['sources'][source]['label']}: {balance} -> {clients.balance_sats(source)} sats (walletv2 peg-in)")
     return 0
 
+def exclusive_lab_lock():
+    """One executor at a time: concurrent runs block on the same lab wallet
+    databases, and a blocked attempt would be recorded as a source failure."""
+    import fcntl
+    handle = open(STATE / "executor.lock", "a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.seek(0)
+        raise SystemExit(f"another lab executor is running ({handle.read().strip() or 'unknown'}); wait for it to finish")
+    handle.seek(0); handle.truncate(); handle.write(f"pid {os.getpid()}: {' '.join(sys.argv[1:]) or 'route matrix'}"); handle.flush()
+    return handle
+
 def main():
+    lock = exclusive_lab_lock()
     if len(sys.argv) > 1:
         parser = argparse.ArgumentParser()
         sub = parser.add_subparsers(dest="command", required=True)

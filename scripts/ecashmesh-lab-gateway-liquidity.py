@@ -10,9 +10,9 @@ result is read back from the gateway's `/list_channels`.
 
 Sizes and routing fees differ on purpose so the ranker has realistic
 differences to work with. Fees are each gateway operator's own per-federation
-Lightning fee (`/set_fees`). The gateway's quoted LNv2 send fee is that fee
-plus its transaction fee (gatewayd default 2000 msat + 3000 ppm), so the lab
-quotes A 2000+3000, B 3000+4000, C 4000+6000 and D 5000+8000 (msat + ppm).
+Lightning fee (`/set_fees`), which is also the gateway's routing-fee budget
+(see GATEWAY_FEES). The quoted LNv2 send fee is that fee plus the gateway's
+transaction fee (gatewayd default 2000 msat + 3000 ppm).
 It also gives all four gateways (A-D) ecash in their own federation through a
 real walletv2 peg-in: an LNv2 gateway funds every *incoming* contract with its
 own ecash, so without it no Lightning payment can be received into a
@@ -52,12 +52,20 @@ LDK_GATEWAYS = {
     "C": ("http://127.0.0.1:39102", 400_000, 100_000),
     "D": ("http://127.0.0.1:39103", 150_000, 50_000),
 }
-# gateway name -> (base fee msat, proportional fee ppm). 1 ppm = 0.0001%, so
+# gateway name -> (Lightning fee base msat, ppm). 1 ppm = 0.0001%, so
 # 3000 ppm = 0.3% = 30 basis points (not 3000 basis points).
+#
+# An LNv2 gateway's Lightning fee is also its routing-fee budget: it pays an
+# invoice with at most `send_fee_default - send_fee_minimum` in Lightning
+# fees, which is exactly this Lightning fee. With 0 (gatewayd's default) a
+# gateway can only pay payees it has a direct channel to. The lab's longest
+# route has two intermediate hops at ~1,001 msat each, so every gateway keeps
+# at least ~4,000 msat of budget at 1,000 sats; fees still differ per gateway.
 GATEWAY_FEES = {
-    "B": (1_000, 1_000),
-    "C": (2_000, 3_000),
-    "D": (3_000, 5_000),
+    "A": (3_000, 1_000),
+    "B": (3_000, 2_000),
+    "C": (4_000, 3_000),
+    "D": (5_000, 5_000),
 }
 GATEWAY_A_API = "http://127.0.0.1:39100"
 # Ecash each gateway holds in its federation to fund incoming LNv2 contracts.
@@ -242,7 +250,8 @@ def main():
         fund_gateway_ecash(all_gateways, federations, bitcoind)
     if not args.check:
         for name, (base_msat, ppm) in GATEWAY_FEES.items():
-            gateways[name].call("/set_fees", {
+            fee_gateways = {"A": Gateway("A", GATEWAY_A_API, password), **gateways}
+            fee_gateways[name].call("/set_fees", {
                 "federation_id": federations[name], "lightning_base": base_msat,
                 "lightning_parts_per_million": ppm, "transaction_base": None,
                 "transaction_parts_per_million": None,

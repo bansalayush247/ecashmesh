@@ -8,6 +8,10 @@ effect, every penalty change, and the reason for the ranking change.
 
 Conditions are real, never injected into EcashMesh:
   fee            gateway B operator raises its routing fee (/set_fees)
+  fee_budget     gateway A at gatewayd's default Lightning fee (0, no routing
+                 budget), paying an invoice two hops beyond lnd-2: the
+                 recommended source then really pays it, and Fed A's own
+                 attempt shows the gateway refusing the route
   liquidity      gateway C pays out until 20k sats outbound remain (still enough)
   insufficient   gateway C pays out until ~5k sats remain (below the amount)
   funding        Fed D moves ecash out of band (mintv2 send), then reclaims it
@@ -50,6 +54,8 @@ def load(name, file):
 
 acceptance = load("acceptance", "ecashmesh-lab-rank-acceptance.py")
 executor = load("executor", "ecashmesh-lab-route-executor.py")
+gateway_liquidity = load("gateway_liquidity", "ecashmesh-lab-gateway-liquidity.py")
+readiness = load("readiness", "ecashmesh-lab-route-readiness.py")
 CONFIG = json.loads((LAB / "ecashmesh-services.json").read_text())
 ATTESTATION = json.loads((LAB / "fedimint-attestation.json").read_text())
 CREDENTIALS = dict(
@@ -162,6 +168,10 @@ def refill_gateway(name, amount):
 def evaluate(amount, invoice=None):
     invoice = invoice or acceptance.payee_invoice(amount)
     status, result = acceptance.evaluate(amount, invoice)
+    violations = acceptance.fee_budget_violations(result) if status == 200 else []
+    if violations:
+        raise RuntimeError(f"evaluator selected an unaffordable route: {violations}")
+    budgets = {o["connector"]: o["value"] for o in acceptance.observations(result, "routing_fee_budget")}
     rows = {}
     if status == 200:
         for rank, route in enumerate(acceptance.ranked(result), 1):
@@ -175,9 +185,11 @@ def evaluate(amount, invoice=None):
                 "liquidity": (route.get("liquidity_evidence") or {}).get("basis"),
                 "solvency": ((route.get("fedimint_metrics") or {}).get("reserve") or {}).get("guardian_audit"),
                 "reliability": route.get("reliability_evidence"),
+                "fee_budget": budgets.get(route["source_id"]),
             }
         for excluded in result.get("excluded_sources", []):
-            rows[excluded["source_id"]] = {"rank": None, "excluded": excluded["reason"]}
+            rows[excluded["source_id"]] = {"rank": None, "excluded": excluded["reason"],
+                                           "fee_budget": budgets.get(excluded["source_id"])}
     else:
         for detail in (result.get("error") or {}).get("details") or []:
             rows.setdefault("_error", []).append(detail)
@@ -223,12 +235,47 @@ def table(snapshot):
 def exp_fee(amount):
     target = source("Fedimint B")
     before = evaluate(amount)
-    set_gateway_fee("B", 1_000, 9_000)
+    base, ppm = gateway_liquidity.GATEWAY_FEES["B"]
+    set_gateway_fee("B", base, ppm + 8_000)
     try:
         after = evaluate(amount)
     finally:
-        set_gateway_fee("B", 1_000, 1_000)
-    return target, before, after, "gateway B lightning fee 1000 msat + 1000 ppm -> 1000 msat + 9000 ppm"
+        set_gateway_fee("B", base, ppm)
+    return target, before, after, f"gateway B lightning fee {base} msat + {ppm} ppm -> {base} msat + {ppm + 8_000} ppm"
+
+
+def exp_fee_budget(amount):
+    target = source("Fedimint A")
+    backend = json.loads((LAB / "cashu-lightning-backends.json").read_text())["backends"]["B"]
+    # Every gateway reaches cashu-lnd-B only via lnd-2 and cashu-lnd-A, so
+    # each route pays two forwarding fees.
+    payee = readiness.Lnd("cashu-lnd-B", backend["rest_port"], LAB / "cashu-lnd-B")
+    before = evaluate(amount, payee.invoice(amount, "fee budget: before"))
+    base, ppm = gateway_liquidity.GATEWAY_FEES["A"]
+    set_gateway_fee("A", 0, 0)
+    try:
+        invoice = payee.invoice(amount, "fee budget: after")
+        after = evaluate(amount, invoice)
+        ranked = sorted((row["rank"], sid) for sid, row in after["rows"].items()
+                        if not sid.startswith("_") and row.get("rank"))
+        if not ranked:
+            raise RuntimeError(f"no executable source: {after['rows']}")
+        selected = ranked[0][1]
+        execution = {"selected": LABEL[selected], "fee_budget": after["rows"][selected]["fee_budget"]}
+        try:
+            execution["selected_payment"] = {"outcome": "succeeded", **CLIENTS.pay(selected, invoice)}
+        except Exception as error:  # report the real outcome either way
+            execution["selected_payment"] = {"outcome": "failed", "error": str(error)[:300]}
+        try:
+            refused = CLIENTS.pay(target, payee.invoice(amount, "fee budget: excluded gateway"))
+            execution["excluded_payment"] = {"outcome": "succeeded", **refused}
+        except Exception as error:
+            execution["excluded_payment"] = {"outcome": "failed", "error": str(error)[:300]}
+    finally:
+        set_gateway_fee("A", base, ppm)
+    return (target, before, after,
+            f"gateway A lightning fee {base} msat + {ppm} ppm -> 0 (gatewayd default); payee cashu-lnd-B",
+            execution)
 
 
 def exp_liquidity(amount):
@@ -339,7 +386,7 @@ def exp_conflict(amount):
 
 
 EXPERIMENTS = {
-    "fee": exp_fee, "liquidity": exp_liquidity, "insufficient": exp_insufficient,
+    "fee": exp_fee, "fee_budget": exp_fee_budget, "liquidity": exp_liquidity, "insufficient": exp_insufficient,
     "funding": exp_funding, "gateway": exp_gateway, "stale": exp_stale,
     "reliability": exp_reliability, "solvency": exp_solvency, "conflict": exp_conflict,
 }
@@ -361,8 +408,10 @@ def main():
         print(f"baseline ({args.amount} sats):\n{table(baseline)}")
         results.append({"experiment": "baseline", "snapshot": baseline})
         for name in args.experiments:
-            target, before, after, condition = EXPERIMENTS[name](args.amount)
+            target, before, after, condition, *execution = EXPERIMENTS[name](args.amount)
             report = explain(target, before, after)
+            if execution:
+                report["execution"] = execution[0]
             if name == "conflict" or name == "solvency":
                 report["guardian_audit"] = (after["rows"].get(target) or {}).get("solvency")
             results.append({"experiment": name, "condition": condition, "report": report,
@@ -375,6 +424,8 @@ def main():
             for change in report["penalty_changes"]:
                 print(f"   penalty {change}")
             print(f"   reason  {report['reason']}")
+            for key, value in (report.get("execution") or {}).items():
+                print(f"   exec    {key}: {value}")
             if report.get("guardian_audit"):
                 audit = report["guardian_audit"]
                 print(f"   audit   {audit['agreeing']}/{audit['guardian_count']} agree, "

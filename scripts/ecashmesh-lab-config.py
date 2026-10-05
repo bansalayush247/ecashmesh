@@ -5,7 +5,7 @@ Reads the running lab's attestation and backend state under
 `.regtest/ecashmesh-lab/` (never the repository) and writes two files there:
 
 - `ecashmesh-services.json`: source identities, the explicit Fedimint lab
-  client mapping, the liquidity probe map, the history directory and the
+  client mapping, the liquidity probe map, the per-run history directory and the
   pinned `fedimint-cli`. Paths only; no credential values.
 - `lab-credentials.env` (mode 0600): the regtest gateway admin password (from
   devimint's generated `fedimint/env`) and the guardian API password (devimint's
@@ -100,6 +100,16 @@ def main():
             "gateway_url": gateway["url"], "gateway_backend": gateway["lightning_backend"],
         }
         probe = {"gateway_channels": {"node": f"gateway-{name}", "api_url": api_url}}
+        if gateway["lightning_backend"] != "lnd":
+            # LDK gateways have no probe API. Their only channel peer is the
+            # lab payee node, so every route passes through it: probe the
+            # rest of the route from there (relayed probe).
+            probe["relay_lnd"] = {
+                "node": "lnd-2",
+                "rest_url": "https://localhost:39402",
+                "tls_cert": str(LAB / "lnd-2" / "tls.cert"),
+                "macaroon": str(LAB / "lnd-2" / "data/chain/bitcoin/regtest/readonly.macaroon"),
+            }
         if gateway["lightning_backend"] == "lnd":
             # Gateway A is LND-backed: it can also send non-settling probes.
             probe["lnd"] = {
@@ -127,7 +137,9 @@ def main():
         "fedimint_client_root": str(LAB / "fedimint" / "clients"),
         "fedimint_client_map": client_map,
         "liquidity_probes": probes,
-        "history_dir": str(LAB / "observations"),
+        # Scoped to this lab run: sources such as cashu:mint-a keep their IDs
+        # across labs, so a new lab must never inherit another lab's history.
+        "history_dir": str(LAB / "observations" / attestation["run_id"]),
         "payee": {"node": "lnd-2", "rest_url": "https://127.0.0.1:39402", "dir": str(LAB / "lnd-2")},
         "bitcoin_rpc_port": runtime.get("ECASHMESH_LAB_BITCOIN_RPC_PORT"),
     }

@@ -117,6 +117,10 @@ pub struct FedimintGatewayMetrics {
     pub gateway_fee_sats: Option<u64>,
     /// The gateway returned routing info for this federation, if reported.
     pub routing_available: Option<bool>,
+    /// What the gateway may spend on Lightning routing fees for this payment
+    /// (`LNv2`: the contract's send fee minus the gateway's minimum send fee),
+    /// when quoted. Part of the gateway fee, never in addition to it.
+    pub routing_fee_budget_msat: Option<u64>,
     pub outbound_liquidity_sats: Option<u64>,
     pub liquidity_status: String,
 }
@@ -282,6 +286,9 @@ pub struct FedimintQuote {
     pub payable: Option<bool>,
     pub spendable_balance_sats: Evidence<Amount>,
     pub selected_gateway_id: Option<String>,
+    /// The selected gateway's Lightning routing-fee budget for this payment,
+    /// from its native routing info (`LNv2` only); `None` when not quoted.
+    pub routing_fee_budget_msat: Option<u64>,
     pub observed_at: EvidenceTimestamp,
     pub expires_at_unix_seconds: Option<u64>,
     /// Funding and selected-gateway evidence bound to this quote.
@@ -332,6 +339,20 @@ pub struct FedimintService {
     max_age_seconds: u64,
     /// Accept loopback HTTP gateways in regtest estimates (gated lab only).
     lab_loopback_gateways: bool,
+    request_timeout: Duration,
+}
+
+/// Default deadline for one bridge request.
+pub const DEFAULT_BRIDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+fn bridge_client(timeout: Duration) -> Result<Client, String> {
+    Client::builder()
+        // The bridge is loopback-only. A slow federation probe must not
+        // consume the interactive route-evaluation budget.
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())
 }
 
 impl FedimintService {
@@ -347,19 +368,14 @@ impl FedimintService {
         for config in &configs {
             config.validate()?;
         }
-        let client = Client::builder()
-            // The bridge is loopback-only. A slow federation probe must not
-            // consume the interactive route-evaluation budget.
-            .timeout(Duration::from_secs(3))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|error| error.to_string())?;
+        let client = bridge_client(DEFAULT_BRIDGE_REQUEST_TIMEOUT)?;
         Ok(Self {
             client,
             configs: Arc::new(RwLock::new(configs)),
             catalog_host: None,
             joined_ids: Arc::new(RwLock::new(Vec::new())),
             lab_loopback_gateways: false,
+            request_timeout: DEFAULT_BRIDGE_REQUEST_TIMEOUT,
             max_age_seconds,
         })
     }
@@ -372,6 +388,23 @@ impl FedimintService {
             .read()
             .expect("federation catalog lock")
             .clone()
+    }
+
+    /// Overrides the per-request bridge deadline (e.g. for a loaded lab host).
+    ///
+    /// # Errors
+    ///
+    /// Returns a description when the HTTP client cannot be rebuilt.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Result<Self, String> {
+        self.client = bridge_client(timeout)?;
+        self.request_timeout = timeout;
+        Ok(self)
+    }
+
+    /// The per-request bridge deadline.
+    #[must_use]
+    pub const fn request_timeout(&self) -> Duration {
+        self.request_timeout
     }
 
     /// Lets gateway estimates name loopback HTTP gateways, for regtest
@@ -624,6 +657,7 @@ impl FedimintService {
                         gateway_status: "registered".into(),
                         fee_base_msat: gateway.routing_fee_base_msat,
                         fee_ppm: gateway.routing_fee_ppm,
+                        routing_fee_budget_msat: None,
                         gateway_fee_sats: None,
                         routing_available: gateway.routing_available,
                         outbound_liquidity_sats: None,

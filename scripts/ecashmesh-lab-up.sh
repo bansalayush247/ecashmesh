@@ -874,11 +874,27 @@ print(json.dumps(items))
 PY
 )"
 }
+# LND refuses to open a channel until its wallet has caught up with the chain.
+# Mining between opens moves the tip, so wait for the opener to reach the
+# current height (polled state, not a fixed sleep) before every open.
+cashu_wait_chain_synced() {
+  local index="$1" attempt height info
+  for attempt in $(seq 1 180); do
+    height="$(btccli getblockcount)" || return 1
+    if info="$(cashu_lnd_cli "$index" getinfo 2>/dev/null)" \
+      && python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("synced_to_chain") is True and int(d["block_height"]) >= int(sys.argv[1])' "$height" <<<"$info" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
 # Each 200k channel pushes 100k to its peer, leaving 100k outbound liquidity
 # at both endpoints. Confirm between opens so the initiating wallet's change
 # output is real, confirmed funding for the next channel.
 for pair in 'A B' 'A C' 'A D' 'A lnd2'; do
   set -- $pair
+  cashu_wait_chain_synced "$1" || { cashu_stage "$1" lightning_mesh FAILED '{}' "Cashu LND $1 did not sync to the chain tip before opening a channel to $2"; fail "Cashu LND $1 did not sync to the chain tip before opening a channel to $2"; }
   cashu_open_channel "$1" "$2" || { cashu_stage "$1" lightning_mesh FAILED "{\"capacity_sat\":$cashu_channel_capacity_sat,\"push_sat\":$cashu_channel_push_sat}" "channel open from $1 to $2 failed"; fail "Cashu LND channel open from $1 to $2 failed"; }
   btccli generatetoaddress 6 "$(btccli getnewaddress)" >/dev/null || fail "Bitcoin Core could not confirm Cashu LND channel from $1 to $2"
 done
@@ -968,8 +984,93 @@ PY
     return 1
   fi
 }
+lightning_node_cli() {
+  local node="$1"
+  shift
+  case "$node" in lnd1) lncli1 "$@" ;; lnd2) lncli2 "$@" ;; *) cashu_lnd_cli "$node" "$@" ;; esac
+}
+# A node can miss one channel_update during its first graph sync: it keeps the
+# channel but not that direction's policy, so pathfinding never uses it.
+# LND's resync only fetches unknown channels, and an unchanged re-signed update
+# is a "keep alive" that peers ignore for 24 hours. The heal is therefore a
+# real round trip by the channel's owner, verified on every node's graph:
+# base fee +1 msat until every node shows it, then back to the original until
+# every node shows that. The final policy is exactly the original.
+lightning_policy_snapshot() {
+  local work="$1" node
+  for node in lnd1 lnd2 A B C D; do
+    lightning_node_cli "$node" describegraph >"$work/$node.graph" || return 1
+  done
+}
+lightning_policy_wave() {
+  local work="$1" offset="$2" owner chan_id chan_point base ppm delta attempt
+  while read -r owner chan_id chan_point base ppm delta; do
+    lightning_node_cli "$owner" updatechanpolicy --base_fee_msat "$((base + offset))" --fee_rate_ppm "$ppm" --time_lock_delta "$delta" --chan_point "$chan_point" >/dev/null || return 1
+  done <"$work/plan"
+  for attempt in $(seq 1 120); do
+    lightning_policy_snapshot "$work" || return 1
+    python3 - "$work" "$offset" <<'PY' && return 0
+import json, pathlib, sys
+work, offset = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+nodes = ["lnd1", "lnd2", "A", "B", "C", "D"]
+identity = {node: json.loads((work / f"{node}.info").read_text())["identity_pubkey"] for node in nodes}
+for line in (work / "plan").read_text().splitlines():
+    owner, chan_id, _, base, _, _ = line.split()
+    for node in nodes:
+        edge = next((e for e in json.loads((work / f"{node}.graph").read_text())["edges"] if e["channel_id"] == chan_id), None)
+        if edge is None:
+            continue  # an unknown channel is not a policy gap; the route wait reports it
+        policy = edge["node1_policy"] if edge["node1_pub"] == identity[owner] else edge["node2_policy"]
+        if not policy or int(policy["fee_base_msat"]) != int(base) + offset:
+            raise SystemExit(1)
+PY
+    sleep 5
+  done
+  return 1
+}
+lightning_heal_missing_policies() {
+  local work node owner chan_id report
+  work="$(mktemp -d "$state/policy-heal.XXXXXX")"
+  for node in lnd1 lnd2 A B C D; do
+    lightning_node_cli "$node" getinfo >"$work/$node.info" || return 1
+  done
+  lightning_policy_snapshot "$work" || return 1
+  # One line per (owning node, channel) whose policy some node lacks.
+  python3 - "$work" >"$work/missing" <<'PY' || return 1
+import json, pathlib, sys
+work = pathlib.Path(sys.argv[1])
+nodes = ["lnd1", "lnd2", "A", "B", "C", "D"]
+identity = {json.loads((work / f"{node}.info").read_text())["identity_pubkey"]: node for node in nodes}
+missing = set()
+for node in nodes:
+    for edge in json.loads((work / f"{node}.graph").read_text())["edges"]:
+        for side in ("1", "2"):
+            owner = identity.get(edge[f"node{side}_pub"])
+            if owner and not edge.get(f"node{side}_policy"):
+                missing.add((owner, edge["channel_id"]))
+for owner, chan_id in sorted(missing):
+    print(owner, chan_id)
+PY
+  [[ -s "$work/missing" ]] || return 0
+  : >"$work/plan"
+  while read -r owner chan_id; do
+    report="$(lightning_node_cli "$owner" feereport)" || return 1
+    python3 - "$owner" "$chan_id" "$report" "$(lightning_node_cli "$owner" getchaninfo --chan_id "$chan_id")" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["identity_pubkey"])' "$work/$owner.info")" >>"$work/plan" <<'PY' || return 1
+import json, sys
+owner, chan_id, report, info, me = sys.argv[1:]
+fee = next(item for item in json.loads(report)["channel_fees"] if item["chan_id"] == chan_id)
+edge = json.loads(info)
+policy = edge["node1_policy"] if edge["node1_pub"] == me else edge["node2_policy"]
+print(owner, chan_id, fee["channel_point"], fee["base_fee_msat"], fee["fee_per_mil"], policy["time_lock_delta"])
+PY
+  done <"$work/missing"
+  lightning_diag "$(python3 -c 'import json,sys; print(json.dumps({"policy_heal":{"status":"STARTING","missing":[l.split()[:2] for l in open(sys.argv[1]).read().splitlines()]}}))' "$work/missing")"
+  lightning_policy_wave "$work" 1 || return 1
+  lightning_policy_wave "$work" 0 || return 1
+  lightning_diag '{"policy_heal":{"status":"READY","result":"every node shows the original policies again"}}'
+}
 cashu_wait_for_graph_routes() {
-  local attempt spec sender receiver label route routes all_ready
+  local attempt spec sender receiver label route routes all_ready healed=0
   for attempt in $(seq 1 240); do
     routes='[]'
     all_ready=1
@@ -995,6 +1096,10 @@ PY
     done
     cashu_route_readiness="$routes"
     [[ "$all_ready" -eq 1 ]] && return 0
+    if [[ "$attempt" -eq 20 && "$healed" -eq 0 ]]; then
+      healed=1
+      lightning_heal_missing_policies || fail "missing Lightning channel policies could not be healed"
+    fi
     sleep 1
   done
   return 1
@@ -1276,6 +1381,18 @@ python3 "$root/scripts/ecashmesh-lab-gateway-liquidity.py" >"$state/gateway-liqu
   fail "LDK gateway Lightning liquidity could not be established"
 }
 python3 "$root/scripts/ecashmesh-lab-config.py" >/dev/null || fail "EcashMesh lab service configuration could not be generated"
+# New channels reach every node only through gossip, and provisioning mines
+# many blocks. Prove (polled, real payments for the LDK gateways) that every
+# matrix payer can route before the matrix runs, then top up the Cashu lab
+# wallets with real mint-quote payments so payer funding is not the limit.
+python3 "$root/scripts/ecashmesh-lab-route-readiness.py" >"$state/route-readiness.log" 2>&1 || {
+  tail -20 "$state/route-readiness.log" >&2
+  fail "lab Lightning routing is not ready for the route matrix; see $state/route-readiness.log"
+}
+python3 "$root/scripts/ecashmesh-lab-route-executor.py" fund-cashu --target 20000 >"$state/cashu-funding.log" 2>&1 || {
+  tail -20 "$state/cashu-funding.log" >&2
+  fail "Cashu lab wallets could not be funded for the route matrix"
+}
 
 # The route executor runs against the already live, isolated topology.  It
 # writes incremental route evidence but never results.json; the separate

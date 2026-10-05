@@ -26,6 +26,7 @@ mod comparison;
 mod connectors;
 mod evidence_items;
 mod federation_setup;
+mod fee_budget;
 mod history;
 mod lab;
 mod live;
@@ -540,7 +541,8 @@ fn gateway_comparison_diagnostic(
     }
 }
 
-/// The regtest-lab liquidity reason a source was excluded, if any.
+/// The regtest-lab liquidity or routing-fee-budget reason a source was
+/// excluded, if any.
 fn liquidity_issue<'a>(quotes: &'a [serde_json::Value], id: &str) -> Option<&'a str> {
     quotes
         .iter()
@@ -552,6 +554,7 @@ fn liquidity_issue<'a>(quotes: &'a [serde_json::Value], id: &str) -> Option<&'a 
                         "lightning_liquidity"
                             | "lightning_liquidity_probe"
                             | "lightning_channel_state"
+                            | "routing_fee_budget"
                     )
                 )
         })
@@ -1440,6 +1443,7 @@ impl EvaluateResponse {
                 evidence["probe"] = find("lightning_liquidity_probe").map_or(json!(null), detail);
                 evidence["channel_state"] =
                     find("lightning_channel_state").map_or(json!(null), detail);
+                evidence["fee_budget"] = find("routing_fee_budget").map_or(json!(null), detail);
                 evidence
             });
         }

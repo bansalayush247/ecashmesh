@@ -312,6 +312,15 @@ impl Provider {
                     federations.retain(|config| config.id != bridge.id);
                     federations.push(bridge);
                 }
+                let request_timeout = std::env::var("ECASHMESH_FEDIMINT_REQUEST_TIMEOUT_SECONDS")
+                    .ok()
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .map_err(|_| "ECASHMESH_FEDIMINT_REQUEST_TIMEOUT_SECONDS must be an integer")?
+                    .map_or(
+                        ecashmesh_fedimint::DEFAULT_BRIDGE_REQUEST_TIMEOUT,
+                        std::time::Duration::from_secs,
+                    );
                 let fedimint_ttl = std::env::var("ECASHMESH_FEDIMINT_MAX_AGE_SECONDS")
                     .unwrap_or_else(|_| "300".into())
                     .parse::<u64>()
@@ -320,6 +329,7 @@ impl Provider {
                     cashu: Arc::new(DiscoveryService::new(seeds, directories, allowed, ttl)?),
                     fedimint: Arc::new(
                         FedimintService::new(federations, fedimint_ttl)?
+                            .with_request_timeout(request_timeout)?
                             .with_regtest_lab_loopback_gateways(
                                 std::env::var("PAYMENT_ENVIRONMENT").as_deref() == Ok("regtest")
                                     && std::env::var("ECASHMESH_LAB_MODE").as_deref() == Ok("true"),

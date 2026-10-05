@@ -51,7 +51,13 @@ pub(crate) enum ProbeOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProbeMethod {
+    /// A non-settling probe sent by the source's own Lightning node.
     LightningProbe,
+    /// For a gateway without a probe API (LDK) whose every active channel
+    /// leads to one relay node: the gateway's own channel table proves the
+    /// first leg, and a non-settling probe from the relay proves the rest.
+    /// Both legs are measured together; weaker than an end-to-end probe.
+    RelayedProbe,
 }
 
 /// Where channel-state evidence was read.
@@ -108,7 +114,7 @@ pub(crate) struct ChannelState {
 }
 
 impl ChannelState {
-    fn new(source_id: &str, method: ChannelStateMethod, node: &str, now: u64) -> Self {
+    pub(crate) fn new(source_id: &str, method: ChannelStateMethod, node: &str, now: u64) -> Self {
         Self {
             source_id: source_id.to_owned(),
             method,
@@ -198,7 +204,15 @@ pub(crate) struct LiquidityEvidence {
     pub failure_reason: Option<String>,
     /// `false` when LND could only probe up to a route-hint hop.
     pub reached_destination: Option<bool>,
+    /// Fee of the probed route from the probing node: the relay, for a
+    /// relayed probe.
     pub routing_fee_msat: Option<u64>,
+    /// Relayed probes: the relay's own forwarding fee, which the gateway pays
+    /// on top of `routing_fee_msat` (`None`: not determined).
+    pub relay_hop_fee_msat: Option<u64>,
+    /// Relayed probes: the node every route from the gateway passes through.
+    pub relay_node: Option<String>,
+    pub relay_pubkey: Option<String>,
     pub confidence: &'static str,
     pub observed_at_unix_seconds: u64,
     pub expires_at_unix_seconds: u64,
@@ -207,7 +221,13 @@ pub(crate) struct LiquidityEvidence {
 }
 
 impl LiquidityEvidence {
-    fn new(source_id: &str, method: ProbeMethod, node: &str, amount: u64, now: u64) -> Self {
+    pub(crate) fn new(
+        source_id: &str,
+        method: ProbeMethod,
+        node: &str,
+        amount: u64,
+        now: u64,
+    ) -> Self {
         Self {
             source_id: source_id.to_owned(),
             source_type: if source_id.starts_with("fedimint:") {
@@ -224,6 +244,9 @@ impl LiquidityEvidence {
             failure_reason: None,
             reached_destination: None,
             routing_fee_msat: None,
+            relay_hop_fee_msat: None,
+            relay_node: None,
+            relay_pubkey: None,
             confidence: "none",
             observed_at_unix_seconds: now,
             expires_at_unix_seconds: now.saturating_add(PROBE_FRESH_SECONDS),
@@ -246,19 +269,13 @@ impl LiquidityEvidence {
     /// Whether this cached observation answers a new request. Payee-dependent
     /// results are reused only for the same invoice.
     fn applies_to(&self, amount: u64, same_invoice: bool) -> bool {
-        match (self.evidence_source, self.outcome) {
+        match self.outcome {
             // Routable at X implies routable at no more than X to that payee.
-            (ProbeMethod::LightningProbe, ProbeOutcome::Routable) => {
-                same_invoice && amount <= self.probed_amount_sats
-            }
+            ProbeOutcome::Routable => same_invoice && amount <= self.probed_amount_sats,
             // Local outbound balance does not depend on the payee.
-            (ProbeMethod::LightningProbe, ProbeOutcome::InsufficientLiquidity) => {
-                amount >= self.probed_amount_sats
-            }
-            (ProbeMethod::LightningProbe, ProbeOutcome::NoRoute) => {
-                same_invoice && amount >= self.probed_amount_sats
-            }
-            (_, ProbeOutcome::Unknown) => false,
+            ProbeOutcome::InsufficientLiquidity => amount >= self.probed_amount_sats,
+            ProbeOutcome::NoRoute => same_invoice && amount >= self.probed_amount_sats,
+            ProbeOutcome::Unknown => false,
         }
     }
 }
@@ -286,10 +303,13 @@ pub(crate) fn effect(evidence: &LiquidityEvidence, amount: Amount, now: u64) -> 
     }
     match evidence.outcome {
         ProbeOutcome::Routable if evidence.probed_amount_sats >= amount.sats() => {
-            let confidence = if evidence.reached_destination == Some(true) {
-                ConfidenceLevel::High
-            } else {
-                ConfidenceLevel::Medium
+            let reached = evidence.reached_destination == Some(true);
+            let confidence = match (evidence.evidence_source, reached) {
+                (ProbeMethod::LightningProbe, true) => ConfidenceLevel::High,
+                (ProbeMethod::LightningProbe, false) | (ProbeMethod::RelayedProbe, true) => {
+                    ConfidenceLevel::Medium
+                }
+                (ProbeMethod::RelayedProbe, false) => ConfidenceLevel::Low,
             };
             ProbeEffect::Liquidity(liquidity(
                 evidence.probed_amount_sats,
@@ -401,6 +421,24 @@ pub(crate) fn combined_effect(
 }
 
 fn exclusion_reason(evidence: &LiquidityEvidence, amount: Amount) -> String {
+    if let (ProbeMethod::RelayedProbe, Some(relay)) =
+        (evidence.evidence_source, evidence.relay_node.as_deref())
+    {
+        return format!(
+            "Every route from {} passes through {relay}, and a Lightning probe from {relay} found {} for {} sats",
+            evidence
+                .node
+                .split(" via ")
+                .next()
+                .unwrap_or(&evidence.node),
+            if evidence.outcome == ProbeOutcome::NoRoute {
+                "no route"
+            } else {
+                "insufficient liquidity"
+            },
+            amount.sats()
+        );
+    }
     match evidence.outcome {
         ProbeOutcome::NoRoute => format!(
             "Lightning probe from {} found no route for {} sats",
@@ -498,6 +536,9 @@ struct GatewayConfig {
 struct TargetConfig {
     lnd: Option<LndConfig>,
     gateway_channels: Option<GatewayConfig>,
+    /// With `gateway_channels` and no `lnd`: the node the gateway's channels
+    /// lead to, used for relayed probes.
+    relay_lnd: Option<LndConfig>,
 }
 
 struct Lnd {
@@ -516,6 +557,7 @@ struct Gateway {
 struct Target {
     lnd: Option<Lnd>,
     gateway: Option<Gateway>,
+    relay: Option<Lnd>,
 }
 
 /// Everything known about one source's Lightning liquidity for one request.
@@ -538,7 +580,18 @@ struct ProbeState {
 pub(crate) struct LiquidityProbes {
     targets: BTreeMap<String, (Target, Mutex<ProbeState>)>,
     gateway_password: Option<String>,
+    /// Relayed probes are identical for every gateway behind the same relay:
+    /// one probe per (relay, invoice, amount) is shared for a few seconds.
+    relay_probes: Mutex<BTreeMap<(String, String, u64), LiquidityEvidence>>,
+    /// Probe HTLCs toward one payee are sent one at a time. Concurrent probes
+    /// from every source would compete for the payee-side HTLC limits (an LDK
+    /// node accepts only 10% of a channel's capacity in flight) and fail each
+    /// other, which a single real payment never would.
+    payee_slots: Mutex<BTreeMap<String, std::sync::Arc<Mutex<()>>>>,
 }
+
+/// How long one relay probe answers the other gateways behind that relay.
+const RELAY_PROBE_SHARE_SECONDS: u64 = 5;
 
 fn loopback(url: &str, schemes: &[&str]) -> Result<String, String> {
     let parsed = reqwest::Url::parse(url).map_err(|_| format!("invalid probe URL: {url}"))?;
@@ -643,6 +696,44 @@ fn http_client(pinned_der: Option<Vec<u8>>) -> Result<reqwest::Client, String> {
     builder.build().map_err(|error| error.to_string())
 }
 
+fn lnd_target(source_id: &str, config: LndConfig) -> Result<Lnd, String> {
+    let LndConfig {
+        node,
+        rest_url,
+        tls_cert,
+        macaroon,
+    } = config;
+    let pem = fs::read_to_string(&tls_cert)
+        .map_err(|_| format!("{source_id}: cannot read LND TLS certificate"))?;
+    let certificate = pem_certificate_der(&pem)
+        .ok_or_else(|| format!("{source_id}: invalid LND TLS certificate"))?;
+    let macaroon =
+        fs::read(&macaroon).map_err(|_| format!("{source_id}: cannot read LND macaroon"))?;
+    Ok(Lnd {
+        node,
+        rest_url: loopback(&rest_url, &["https"])?,
+        macaroon_hex: macaroon.iter().fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        }),
+        client: http_client(Some(certificate))?,
+    })
+}
+
+impl Target {
+    /// The probe this source gets, if any: its own node's, else relayed.
+    fn probe_origin(&self) -> Option<(ProbeMethod, String)> {
+        match (&self.lnd, &self.relay, &self.gateway) {
+            (Some(lnd), _, _) => Some((ProbeMethod::LightningProbe, lnd.node.clone())),
+            (None, Some(relay), Some(gateway)) => Some((
+                ProbeMethod::RelayedProbe,
+                format!("{} via {}", gateway.node, relay.node),
+            )),
+            _ => None,
+        }
+    }
+}
+
 impl LiquidityProbes {
     /// Loads `ECASHMESH_LAB_LIQUIDITY_PROBES`. Absent means disabled; present
     /// outside the gated regtest lab is a startup error.
@@ -668,31 +759,21 @@ impl LiquidityProbes {
                     "{source_id}: configure lnd and/or gateway_channels"
                 ));
             }
-            let lnd = match config.lnd {
-                Some(LndConfig {
-                    node,
-                    rest_url,
-                    tls_cert,
-                    macaroon,
-                }) => {
-                    let pem = fs::read_to_string(&tls_cert)
-                        .map_err(|_| format!("{source_id}: cannot read LND TLS certificate"))?;
-                    let certificate = pem_certificate_der(&pem)
-                        .ok_or_else(|| format!("{source_id}: invalid LND TLS certificate"))?;
-                    let macaroon = fs::read(&macaroon)
-                        .map_err(|_| format!("{source_id}: cannot read LND macaroon"))?;
-                    Some(Lnd {
-                        node,
-                        rest_url: loopback(&rest_url, &["https"])?,
-                        macaroon_hex: macaroon.iter().fold(String::new(), |mut hex, byte| {
-                            let _ = write!(hex, "{byte:02x}");
-                            hex
-                        }),
-                        client: http_client(Some(certificate))?,
-                    })
-                }
-                None => None,
-            };
+            if config.relay_lnd.is_some()
+                && (config.lnd.is_some() || config.gateway_channels.is_none())
+            {
+                return Err(format!(
+                    "{source_id}: relay_lnd needs gateway_channels and no lnd"
+                ));
+            }
+            let lnd = config
+                .lnd
+                .map(|lnd| lnd_target(&source_id, lnd))
+                .transpose()?;
+            let relay = config
+                .relay_lnd
+                .map(|lnd| lnd_target(&source_id, lnd))
+                .transpose()?;
             let gateway = match config.gateway_channels {
                 Some(GatewayConfig { node, api_url }) => {
                     needs_password = true;
@@ -706,7 +787,14 @@ impl LiquidityProbes {
             };
             targets.insert(
                 source_id,
-                (Target { lnd, gateway }, Mutex::new(ProbeState::default())),
+                (
+                    Target {
+                        lnd,
+                        gateway,
+                        relay,
+                    },
+                    Mutex::new(ProbeState::default()),
+                ),
             );
         }
         let gateway_password = env::var("ECASHMESH_LAB_GATEWAY_PASSWORD").ok();
@@ -718,6 +806,8 @@ impl LiquidityProbes {
         Ok(Some(Self {
             targets,
             gateway_password,
+            relay_probes: Mutex::new(BTreeMap::new()),
+            payee_slots: Mutex::new(BTreeMap::new()),
         }))
     }
 
@@ -739,26 +829,25 @@ impl LiquidityProbes {
         let (target, state) = self.targets.get(source_id)?;
         let mut state = state.lock().await;
         let same_invoice = state.last_invoice.as_deref() == Some(invoice);
+        let request = Request {
+            invoice,
+            payee,
+            amount,
+            now,
+            same_invoice,
+        };
         let rate_limited = state
             .last_attempt_unix_seconds
             .is_some_and(|last| now.saturating_sub(last) < PROBE_MIN_INTERVAL_SECONDS);
         if rate_limited {
-            return Some(state.cached(
-                source_id,
-                target.lnd.as_ref().map(|lnd| lnd.node.as_str()),
-                Request {
-                    invoice,
-                    payee,
-                    amount,
-                    now,
-                    same_invoice,
-                },
-            ));
+            return Some(state.cached(source_id, target.probe_origin(), request));
         }
         state.last_attempt_unix_seconds = Some(now);
+        let slot = self.payee_slot(payee.unwrap_or(invoice)).await;
         let probe = async {
             match &target.lnd {
-                Some(lnd) => Some(
+                Some(lnd) => Some({
+                    let _turn = slot.lock().await;
                     lnd_probe(
                         LiquidityEvidence::new(
                             source_id,
@@ -770,8 +859,8 @@ impl LiquidityProbes {
                         lnd,
                         invoice,
                     )
-                    .await,
-                ),
+                    .await
+                }),
                 None => None,
             }
         };
@@ -809,18 +898,13 @@ impl LiquidityProbes {
                 None
             }
         };
-        let (probe, channels) = tokio::join!(probe, channels);
-        Some(state.settle(
-            probe,
-            channels,
-            Request {
-                invoice,
-                payee,
-                amount,
-                now,
-                same_invoice,
-            },
-        ))
+        let (mut probe, channels) = tokio::join!(probe, channels);
+        if let (None, Some(relay), Some(gateway)) = (&target.lnd, &target.relay, &target.gateway) {
+            probe = self
+                .relayed_probe(source_id, relay, &gateway.node, channels.as_ref(), request)
+                .await;
+        }
+        Some(state.settle(probe, channels, request))
     }
 }
 
@@ -839,7 +923,7 @@ impl ProbeState {
     fn cached(
         &self,
         source_id: &str,
-        lnd_node: Option<&str>,
+        origin: Option<(ProbeMethod, String)>,
         request: Request<'_>,
     ) -> SourceLiquidity {
         let Request {
@@ -849,21 +933,15 @@ impl ProbeState {
             same_invoice,
             ..
         } = request;
-        let probe = lnd_node.map(|node| match self.last.as_ref() {
+        let probe = origin.map(|(method, node)| match self.last.as_ref() {
             Some(last)
                 if last.freshness(now) != "expired"
                     && last.applies_to(amount.sats(), same_invoice) =>
             {
                 reuse(last)
             }
-            _ => LiquidityEvidence::new(
-                source_id,
-                ProbeMethod::LightningProbe,
-                node,
-                amount.sats(),
-                now,
-            )
-            .unknown("probe rate limited; no applicable recent evidence"),
+            _ => LiquidityEvidence::new(source_id, method, &node, amount.sats(), now)
+                .unknown("probe rate limited; no applicable recent evidence"),
         });
         let channels = self
             .channels
@@ -961,6 +1039,195 @@ async fn lnd_get(client: &reqwest::Client, url: String, macaroon: &str) -> Resul
         .json()
         .await
         .map_err(|error| error.without_url().to_string())
+}
+
+impl LiquidityProbes {
+    async fn payee_slot(&self, payee: &str) -> std::sync::Arc<Mutex<()>> {
+        let mut slots = self.payee_slots.lock().await;
+        // Bounded: drop slots nobody is using.
+        slots.retain(|_, slot| std::sync::Arc::strong_count(slot) > 1);
+        std::sync::Arc::clone(slots.entry(payee.to_owned()).or_default())
+    }
+
+    /// A relayed probe for a gateway without a probe API. Sent only when no
+    /// direct channel to the payee already decides; counted only if every
+    /// active gateway channel leads to the relay and the gateway's outbound
+    /// covers the amount plus the fees the relay's route needs.
+    async fn relayed_probe(
+        &self,
+        source_id: &str,
+        relay: &Lnd,
+        gateway_node: &str,
+        channels: Option<&ChannelState>,
+        request: Request<'_>,
+    ) -> Option<LiquidityEvidence> {
+        let Request {
+            invoice,
+            payee,
+            amount,
+            now,
+            ..
+        } = request;
+        let channels = channels?;
+        if channels.payee_direct_outbound_sats.is_some() {
+            return None;
+        }
+        let evidence = LiquidityEvidence::new(
+            source_id,
+            ProbeMethod::RelayedProbe,
+            &format!("{gateway_node} via {}", relay.node),
+            amount.sats(),
+            now,
+        );
+        if !channels.reachable {
+            return Some(
+                evidence.unknown("gateway channel state unavailable; the first leg is unverified"),
+            );
+        }
+        // Held across the probe so concurrent gateways wait for one result.
+        let mut shared = self.relay_probes.lock().await;
+        shared.retain(|_, probe| {
+            now.saturating_sub(probe.observed_at_unix_seconds) <= RELAY_PROBE_SHARE_SECONDS
+        });
+        let key = (relay.node.clone(), invoice.to_owned(), amount.sats());
+        let raw = if let Some(raw) = shared.get(&key) {
+            raw.clone()
+        } else {
+            let slot = self.payee_slot(payee.unwrap_or(invoice)).await;
+            let _turn = slot.lock().await;
+            let raw = lnd_probe(evidence.clone(), relay, invoice).await;
+            shared.insert(key, raw.clone());
+            raw
+        };
+        drop(shared);
+        let mut probe = adopt(evidence, &raw);
+        if let (
+            ProbeOutcome::Routable,
+            Some(true),
+            Some(fee),
+            Some(gateway),
+            Some(payee),
+            Some(relay_pubkey),
+        ) = (
+            probe.outcome,
+            probe.reached_destination,
+            probe.routing_fee_msat,
+            channels.node_pubkey.as_deref(),
+            payee,
+            raw.node_pubkey.as_deref(),
+        ) {
+            probe.relay_hop_fee_msat =
+                relay_hop_fee_msat(relay, gateway, payee, relay_pubkey, amount, fee).await;
+        }
+        Some(compose_relayed(probe, channels, payee, &relay.node))
+    }
+}
+
+/// The relay's forwarding fee on a gateway's route to `payee`: LND's own
+/// route from the gateway (`QueryRoutes` with `source_pub_key`, mission
+/// control on), counted only if its first hop is the relay and the rest costs
+/// exactly what the relay's probe measured, i.e. it is the probed route.
+async fn relay_hop_fee_msat(
+    relay: &Lnd,
+    gateway: &str,
+    payee: &str,
+    relay_pubkey: &str,
+    amount: Amount,
+    probed_fee_msat: u64,
+) -> Option<u64> {
+    let hex = |key: &str| key.len() == 66 && key.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !hex(gateway) || !hex(payee) {
+        return None;
+    }
+    let routes = lnd_get(
+        &relay.client,
+        format!(
+            "{}/v1/graph/routes/{payee}/{}?source_pub_key={gateway}&use_mission_control=true",
+            relay.rest_url,
+            amount.sats()
+        ),
+        &relay.macaroon_hex,
+    )
+    .await
+    .ok()?;
+    relay_hop_fee(&routes, relay_pubkey, probed_fee_msat)
+}
+
+fn relay_hop_fee(routes: &Value, relay_pubkey: &str, probed_fee_msat: u64) -> Option<u64> {
+    let route = routes["routes"].get(0)?;
+    let msat = |value: &Value| value.as_str().and_then(|value| value.parse::<u64>().ok());
+    let first = route["hops"].get(0)?;
+    if first["pub_key"].as_str() != Some(relay_pubkey) {
+        return None;
+    }
+    let hop_fee = msat(&first["fee_msat"])?;
+    (msat(&route["total_fees_msat"])?.checked_sub(hop_fee)? == probed_fee_msat).then_some(hop_fee)
+}
+
+/// This source's evidence with the outcome of a shared relay probe.
+fn adopt(mut evidence: LiquidityEvidence, raw: &LiquidityEvidence) -> LiquidityEvidence {
+    evidence.node_pubkey.clone_from(&raw.node_pubkey);
+    evidence
+        .destination_pubkey
+        .clone_from(&raw.destination_pubkey);
+    evidence.outcome = raw.outcome;
+    evidence.failure_reason.clone_from(&raw.failure_reason);
+    evidence.reached_destination = raw.reached_destination;
+    evidence.routing_fee_msat = raw.routing_fee_msat;
+    evidence.confidence = raw.confidence;
+    evidence.observed_at_unix_seconds = raw.observed_at_unix_seconds;
+    evidence.expires_at_unix_seconds = raw.expires_at_unix_seconds;
+    evidence.reused_from_cache = raw.source_id != evidence.source_id;
+    evidence
+}
+
+/// Combines the relay's probe with the gateway's channel table.
+fn compose_relayed(
+    mut probe: LiquidityEvidence,
+    channels: &ChannelState,
+    payee: Option<&str>,
+    relay_node: &str,
+) -> LiquidityEvidence {
+    let relay_pubkey = probe.node_pubkey.take();
+    probe.relay_node = Some(relay_node.to_owned());
+    probe.relay_pubkey.clone_from(&relay_pubkey);
+    // The source node is the gateway, so a Fedimint quote can bind to it.
+    probe.node_pubkey.clone_from(&channels.node_pubkey);
+    let Some(relay_pubkey) = relay_pubkey else {
+        return probe;
+    };
+    if payee == Some(relay_pubkey.as_str()) {
+        return probe.unknown("the payee is the relay; channel state decides");
+    }
+    let active = channels
+        .peers
+        .iter()
+        .filter(|peer| peer.active)
+        .collect::<Vec<_>>();
+    if active.is_empty() || active.iter().any(|peer| peer.remote_pubkey != relay_pubkey) {
+        return probe.unknown(format!(
+            "gateway has active channels to peers other than {relay_node}; its routes need not pass through it"
+        ));
+    }
+    if probe.outcome == ProbeOutcome::Routable {
+        let fees = probe
+            .routing_fee_msat
+            .unwrap_or_default()
+            .saturating_add(probe.relay_hop_fee_msat.unwrap_or_default())
+            .div_ceil(1_000);
+        if channels.outbound_sats < probe.probed_amount_sats.saturating_add(fees) {
+            return probe.unknown(format!(
+                "gateway outbound {} sats does not cover the amount plus {fees} sats of downstream fees",
+                channels.outbound_sats
+            ));
+        }
+        probe.confidence = if probe.reached_destination == Some(true) {
+            "medium"
+        } else {
+            "low"
+        };
+    }
+    probe
 }
 
 async fn lnd_probe(mut evidence: LiquidityEvidence, lnd: &Lnd, invoice: &str) -> LiquidityEvidence {
@@ -1399,6 +1666,141 @@ mod tests {
             (gateway[0].outbound_sats, gateway[0].inbound_sats),
             (296_000, 96_000)
         );
+    }
+
+    fn relay_probe(outcome: ProbeOutcome, reached: bool) -> LiquidityEvidence {
+        let mut probe = LiquidityEvidence::new(
+            "fedimint:b",
+            ProbeMethod::RelayedProbe,
+            "gateway-B via lnd-2",
+            10_000,
+            NOW,
+        );
+        probe.node_pubkey = Some("02relay".into());
+        probe.outcome = outcome;
+        probe.reached_destination = Some(reached);
+        probe.routing_fee_msat = Some(1_010);
+        probe.confidence = "high";
+        probe
+    }
+
+    fn gateway_state(peers: Vec<ChannelPeer>) -> ChannelState {
+        let mut state = channels(peers, Some("02payee"));
+        state.node_pubkey = Some("02gateway".into());
+        state
+    }
+
+    #[test]
+    fn relayed_probes_cover_ldk_gateways_only_when_every_route_uses_the_relay() {
+        let amount = Amount::from_sats(10_000);
+        let only_relay = gateway_state(vec![peer("02relay", true, 785_000)]);
+        // Relay reaches the payee: medium, bound to the gateway's own node.
+        let composed = compose_relayed(
+            relay_probe(ProbeOutcome::Routable, true),
+            &only_relay,
+            Some("02payee"),
+            "lnd-2",
+        );
+        assert_eq!(composed.node_pubkey.as_deref(), Some("02gateway"));
+        assert_eq!(composed.relay_pubkey.as_deref(), Some("02relay"));
+        let ProbeEffect::Liquidity(evidence) = effect(&composed, amount, NOW) else {
+            panic!("relayed routable probe is liquidity evidence");
+        };
+        assert_eq!(
+            evidence.observation().unwrap().confidence,
+            ConfidenceLevel::Medium
+        );
+        // Only a route-hint hop reached: low.
+        let hinted = compose_relayed(
+            relay_probe(ProbeOutcome::Routable, false),
+            &only_relay,
+            Some("02payee"),
+            "lnd-2",
+        );
+        let ProbeEffect::Liquidity(evidence) = effect(&hinted, amount, NOW) else {
+            panic!("hinted relayed probe is liquidity evidence");
+        };
+        assert_eq!(
+            evidence.observation().unwrap().confidence,
+            ConfidenceLevel::Low
+        );
+        // Another active peer means routes need not pass through the relay.
+        let two_peers = gateway_state(vec![
+            peer("02relay", true, 785_000),
+            peer("02other", true, 50_000),
+        ]);
+        let composed = compose_relayed(
+            relay_probe(ProbeOutcome::Routable, true),
+            &two_peers,
+            Some("02payee"),
+            "lnd-2",
+        );
+        assert_eq!(composed.outcome, ProbeOutcome::Unknown);
+        assert_eq!(effect(&composed, amount, NOW), ProbeEffect::Keep);
+        // The relay finding no route proves the gateway cannot route either.
+        let ProbeEffect::Exclude(reason) = effect(
+            &compose_relayed(
+                relay_probe(ProbeOutcome::NoRoute, false),
+                &only_relay,
+                Some("02payee"),
+                "lnd-2",
+            ),
+            amount,
+            NOW,
+        ) else {
+            panic!("relay no-route excludes");
+        };
+        assert!(
+            reason.contains("Every route from gateway-B passes through lnd-2"),
+            "{reason}"
+        );
+        // Gateway outbound must cover the amount plus downstream fees.
+        let tight = gateway_state(vec![peer("02relay", true, 10_000)]);
+        assert_eq!(
+            compose_relayed(
+                relay_probe(ProbeOutcome::Routable, true),
+                &tight,
+                Some("02payee"),
+                "lnd-2"
+            )
+            .outcome,
+            ProbeOutcome::Unknown
+        );
+        // Paying the relay itself is decided by channel state.
+        assert_eq!(
+            compose_relayed(
+                relay_probe(ProbeOutcome::Routable, true),
+                &only_relay,
+                Some("02relay"),
+                "lnd-2"
+            )
+            .outcome,
+            ProbeOutcome::Unknown
+        );
+    }
+
+    #[test]
+    fn relay_hop_fee_is_counted_only_for_the_probed_route_through_the_relay() {
+        // LND's route from gateway B on lnd-2's graph in the regtest lab:
+        // lnd-2 forwards (1,001 msat), cashu-lnd-A forwards (1,001 msat).
+        let relay = format!("02{}", "aa".repeat(32));
+        let routes = json!({"routes": [{
+            "total_fees_msat": "2002",
+            "hops": [
+                {"pub_key": relay, "fee_msat": "1001"},
+                {"pub_key": format!("03{}", "bb".repeat(32)), "fee_msat": "1001"},
+                {"pub_key": format!("02{}", "cc".repeat(32)), "fee_msat": "0"},
+            ],
+        }]});
+        assert_eq!(relay_hop_fee(&routes, &relay, 1_001), Some(1_001));
+        // The rest of the route must cost what the relay's probe measured.
+        assert_eq!(relay_hop_fee(&routes, &relay, 900), None);
+        // Its first hop must be the relay.
+        assert_eq!(
+            relay_hop_fee(&routes, &format!("03{}", "dd".repeat(32)), 1_001),
+            None
+        );
+        assert_eq!(relay_hop_fee(&json!({"routes": []}), &relay, 1_001), None);
     }
 
     #[test]

@@ -31,6 +31,39 @@ class RouteExecutorTests(unittest.TestCase):
     def test_each_attempt_gets_a_new_uuid(self):
         self.assertIn("attempt_id = str(uuid.uuid4())", PATH.read_text())
 
+    def test_executor_attributes_never_shadow_its_methods(self):
+        # `self.cashu = {...}` once shadowed `def cashu(...)` and failed every
+        # Cashu <-> Fedimint route with "'dict' object is not callable".
+        import ast
+        tree = ast.parse(PATH.read_text())
+        for cls in (node for node in tree.body if isinstance(node, ast.ClassDef)):
+            methods = {item.name for item in cls.body if isinstance(item, ast.FunctionDef)}
+            attributes = {
+                target.attr
+                for node in ast.walk(cls)
+                if isinstance(node, ast.Assign)
+                for target in node.targets
+                if isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+            }
+            self.assertFalse(methods & attributes, f"{cls.name}: {methods & attributes}")
+
+    def test_only_one_lab_executor_runs_at_a_time(self):
+        import tempfile
+        original = MODULE.STATE
+        with tempfile.TemporaryDirectory() as directory:
+            MODULE.STATE = pathlib.Path(directory)
+            try:
+                first = MODULE.exclusive_lab_lock()
+                with self.assertRaises(SystemExit) as raised:
+                    MODULE.exclusive_lab_lock()
+                self.assertIn("another lab executor is running", str(raised.exception))
+                first.close()
+                MODULE.exclusive_lab_lock().close()
+            finally:
+                MODULE.STATE = original
+
 
 if __name__ == "__main__":
     unittest.main()

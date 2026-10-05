@@ -88,7 +88,10 @@ class LncliContextTests(unittest.TestCase):
         self.assertIn("teardown-diagnostics.json", teardown)
         self.assertIn("wait_for_port_release || exit 78", teardown)
         self.assertIn('kill -TERM "$runner_pid"', teardown)
-        self.assertIn("lab supervisor did not exit after SIGINT and SIGTERM", teardown)
+        self.assertIn("lab supervisor did not exit after SIGINT, SIGTERM and SIGKILL", teardown)
+        # A supervisor stopped mid-startup ignores INT/TERM; KILL comes last.
+        self.assertLess(teardown.index('kill -INT "$runner_pid"'), teardown.index('kill -TERM "$runner_pid"'))
+        self.assertLess(teardown.index('kill -TERM "$runner_pid"'), teardown.index('kill -KILL "$runner_pid"'))
 
     def test_clean_lab_start_archives_lnd2_chain_state(self):
         self.assertIn('[[ ! -d "$state/lnd-2" ]] || mv "$state/lnd-2" "$archive/lnd-2"', self.launcher)
