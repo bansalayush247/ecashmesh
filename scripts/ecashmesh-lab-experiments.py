@@ -44,6 +44,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 LAB = Path(os.environ.get("ECASHMESH_LAB_STATE_ROOT", ROOT / ".regtest" / "ecashmesh-lab"))
 
+if __name__ == "__main__":
+    # lab-up deletes results.json when it starts and writes it only after the
+    # 56-route matrix settles; experiments on a half-built lab mean nothing.
+    if not (LAB / "results.json").is_file():
+        sys.exit("the lab is not ready: wait for scripts/ecashmesh-lab-up.sh to finish")
+    # The services read the config of the lab running when they started.
+    started = LAB / "ecashmesh-api.pid"
+    if not started.is_file() or started.stat().st_mtime < (LAB / "fedimint-attestation.json").stat().st_mtime:
+        sys.exit("start the services for this lab first: scripts/ecashmesh-lab-services.sh start")
+
 
 def load(name, file):
     spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / file)

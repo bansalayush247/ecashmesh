@@ -1,116 +1,223 @@
 # EcashMesh
 
-**One payment. More options.** Compare fees across Cashu mints and Fedimint
-federations from a single screen.
+## Interoperability across Cashu and Fedimint
 
-The demo reads live fees without sending a payment. Empty wallets can still
-appear in comparisons. Each result says what its fee includes.
+Ecash today is siloed: ecash from one Cashu mint or Fedimint federation can
+only be spent where that mint or federation is accepted. **EcashMesh connects
+independent ecash systems** so value can move between them, using Lightning as
+the common settlement layer.
 
-## Start the demo
+EcashMesh runs a real interoperability mesh on Bitcoin regtest:
+**4 Cashu mints and 4 Fedimint federations**, each with its own Lightning
+infrastructure. From a clean start, **all 56 directed source-to-source
+payments settle** — every mint and federation pays every other one, with real
+Lightning payments and verified credit at the destination.
 
-Install Nix first. Its development shell provides Rust, Node.js and npm.
-Run these commands from the repository root.
+The next layer is **intelligent source selection**: using live evidence to
+decide which of a user's ecash sources can execute a payment and which one is
+the best choice. Its experimental foundation — evidence collection, Lightning
+probing, feasibility checks and ranking — is already in this repository.
 
-Build and install dependencies once, and again after dependency changes:
-
-```sh
-./scripts/demo.sh build
-```
-
-Then use three terminals:
-
-```sh
-# Terminal 1 — local Fedimint clients, port 3333
-./scripts/demo.sh bridge
-```
-
-```sh
-# Terminal 2 — API, port 5000
-./scripts/demo.sh api
-```
-
-```sh
-# Terminal 3 — browser app, port 8081
-./scripts/demo.sh web
-```
-
-Open [localhost:8081](http://localhost:8081). Stop each process with Ctrl+C.
-After changing Rust code, rebuild and restart the affected process. The frontend
-reloads source changes; restart it after changing environment variables.
-
-## A two-minute walkthrough
-
-1. Open **Manage payment sources**. Add Cashu mint URLs and connect the
-   federations you want to compare. Use **Save locally**; Nostr sync is optional.
-2. Select **Compare a payment**. Enter an amount and a fresh Lightning invoice
-   for that amount.
-3. Leave **Include sources with no balance** enabled. Select **Compare fees**.
-4. Show the ordered results. Open **Fee details** or **Not included** only when
-   explaining a particular source.
-
-Only enabled sources in the browser's list are considered. An empty source
-list stays empty. Joining a federation is always an explicit action.
-
-## What the result means
-
-| Result                        | What is known                                                                            |
-| ----------------------------- | ---------------------------------------------------------------------------------------- |
-| Cashu fee reserve             | The mint's current reserve; final fees may differ and proof input fees may be additional |
-| Fedimint gateway fee          | The verified gateway's fee; federation fees are not included                             |
-| Fedimint payment fee estimate | A native fee quote using the local client's actual notes                                 |
-
-Comparison orders the listed fees from low to high, ignoring wallet balances.
-A partial fee can rank first without being the lowest total payment cost.
-Every comparison has `executable: false`. Unknown balances remain unknown;
-missing fees are never turned into zero fees.
-
-Turning off **Include sources with no balance** opens normal payment evaluation.
-That path retains its existing quote and funding checks. A Cashu quote alone
-still does not prove the browser owns spendable funds.
-
-## Architecture
+## How the mesh works
 
 ```mermaid
 flowchart TD
-    Browser[Browser :8081] --> API[EcashMesh API :5000]
-    API --> Cashu[Cashu mints: metadata and unpaid quotes]
-    API -->|Local bearer token| Bridge[Fedimint bridge :3333]
-    Bridge --> A[Federation client A]
-    Bridge --> B[Federation client B]
-    A --> DB[One RocksDB: separate federation namespaces]
-    B --> DB
+    EM[EcashMesh]
+    EM --- CA[Cashu mint A] & CB[Cashu mint B] & FA[Fedimint federation A] & FB[Fedimint federation B]
+    CA & CB --- LN((Lightning network))
+    FA & FB --- GW[Fedimint Lightning gateways] --- LN
 ```
 
-The bridge uses the pinned **Fedimint v0.12.1** libraries: one process, one
-mnemonic, one database, many clients. It has no payment endpoint. The API keeps
-its token server-side; the browser stores source references and preferences.
+Each Cashu mint has its own Lightning node; each federation reaches Lightning
+through its own gateway. A cross-source payment goes:
 
-- [Architecture and API](docs/architecture.md): code map, ranking modes and boundaries.
-- [Connect federations](docs/federation-connection.md): invite flow and local persistence.
-- [Manage sources](docs/source-registry.md): local storage and optional Nostr sync.
-- [Frontend development](apps/reference-wallet/README.md): browser tests and configuration.
-- [Regtest development](docs/regtest.md): optional local payment testing, outside the demo.
+```text
+payment request
+      ↓
+EcashMesh
+      ↓
+source ecash system     Cashu melt  /  Fedimint LNv2 send
+      ↓
+Lightning network       a real payment over real channels
+      ↓
+destination system      Cashu mint quote  /  Fedimint LNv2 receive
+      ↓
+settlement              new ecash issued and verified at the destination
+```
 
-## Troubleshooting
+Every step uses the native protocol of the system involved (CDK for Cashu,
+pinned Fedimint v0.12.1 clients for Fedimint). EcashMesh does not replace
+either protocol; it connects them.
 
-| Problem                            | What to do                                                                        |
-| ---------------------------------- | --------------------------------------------------------------------------------- |
-| `npm: command not found`           | Use the demo script or run npm inside `nix develop`                               |
-| Bridge appears to do nothing       | It is a foreground server. Check `curl http://127.0.0.1:3333/health`              |
-| API cannot see joined federations  | Start bridge and API with the same home directory; the script sets the token path |
-| Invoice expired or amount mismatch | Create a fresh invoice for the amount entered                                     |
-| No comparison for a source         | Open **Not included**; check the gateway or quote failure                         |
-| Insufficient Fedimint balance      | Keep balance-independent comparison enabled; native funding quotes need notes     |
-| Port already in use                | Stop the previous process in its terminal before restarting                       |
+## Proven: 56 of 56 routes
 
-## Checks
+The regtest lab has **8 ecash sources**. Each one pays each of the other 7
+(self-routes are excluded): **8 × 7 = 56 directed payments**.
+
+| Route class | Routes | Source pays with | Destination receives with |
+|---|---|---|---|
+| Cashu → Cashu | 12 | Cashu melt | Cashu mint quote, proofs issued |
+| Cashu → Fedimint | 16 | Cashu melt | Fedimint LNv2 receive, claimed |
+| Fedimint → Cashu | 16 | Fedimint LNv2 send via its gateway | Cashu mint quote, proofs issued |
+| Fedimint → Fedimint | 12 | Fedimint LNv2 send via its gateway | Fedimint LNv2 receive, claimed |
+
+A route counts as successful only when the Lightning payment settles and the
+destination's credit is verified. Results from a clean lab:
+
+```text
+TOTAL: 56 SUCCEEDED: 56 FAILED: 0
+```
+
+This validates real interoperability, not just API compatibility: the mints,
+federations, gateways and Lightning nodes are independent processes with their
+own keys, databases and channels.
+
+## Current and future
+
+| Current — demonstrated | Future |
+|---|---|
+| Cashu → Cashu payments | Automatic source selection for every payment |
+| Cashu → Fedimint payments | Evidence-weighted ranking as the default decision |
+| Fedimint → Cashu payments | Execution-aware recommendations across the mesh |
+| Fedimint → Fedimint payments | Adaptive selection from accumulated payment history |
+| Real Lightning settlement with verified destination credit | Interoperability on live networks, not only regtest |
+| Clean-start topology validation and the 56-route matrix | Additional ecash protocols |
+| Read-only discovery and fee quotes for real mints and federations | |
+| Evidence collection and diagnostics (experimental selection layer) | |
+
+## Run it
+
+Both modes use [Nix](https://nixos.org/download), which provides the pinned
+Rust, Node.js and tools. Run commands from the repository root.
+
+### Regtest lab — the interoperability mesh
 
 ```sh
-nix develop -c cargo fmt --check
-nix develop -c cargo check --workspace
-nix develop -c cargo test --workspace
-nix develop -c cargo clippy --workspace --all-targets -- -D warnings
-nix develop -c npm --prefix apps/reference-wallet run typecheck
-nix develop -c npm --prefix apps/reference-wallet test
-nix develop -c npm --prefix apps/reference-wallet run test:e2e
+./scripts/ecashmesh-lab-up.sh
 ```
+
+This builds and starts everything — `bitcoind`, 4 federations with their
+gateways, 4 Cashu mints with their Lightning nodes, the channels between them —
+proves routing, and then runs the 56-route matrix. It ends with
+`Verified sources: 8 (4 Cashu + 4 Fedimint)`. The first run compiles pinned
+Fedimint, CDK and LND from source and takes a long time; later runs take
+roughly 10–15 minutes.
+
+Check the result:
+
+```sh
+tail -1 .regtest/ecashmesh-lab/route-executor.log   # TOTAL: 56 SUCCEEDED: 56 FAILED: 0
+```
+
+View the route matrix in the web app (needs the services below):
+
+```sh
+nix develop -c cargo build -p ecashmesh-fedimint -p ecashmesh-api
+./scripts/ecashmesh-lab-services.sh start            # restart after every lab-up
+EXPO_PUBLIC_ENABLE_INTEROPERABILITY_LAB=true ./scripts/demo.sh web   # http://localhost:8081
+```
+
+Stop everything:
+
+```sh
+./scripts/ecashmesh-lab-services.sh stop
+./scripts/ecashmesh-lab-down.sh
+```
+
+See [docs/regtest-lab.md](docs/regtest-lab.md) for the topology and each step.
+
+### Live mode — real mints and federations, read-only
+
+Live mode connects to real public Cashu mints and Fedimint federations, reads
+their live quotes and gateway information, and compares them for a Lightning
+invoice. **It never makes a payment.**
+
+```sh
+./scripts/demo.sh build      # once
+./scripts/demo.sh bridge     # terminal 1 — Fedimint bridge, port 3333
+./scripts/demo.sh api        # terminal 2 — API, port 5000
+./scripts/demo.sh web        # terminal 3 — http://localhost:8081
+```
+
+In the app: **Manage payment sources** → add mint URLs / connect federations →
+**Compare a payment** → enter an amount and a fresh Lightning invoice for it.
+See [docs/live-mode.md](docs/live-mode.md).
+
+## Future: intelligent source selection
+
+A user with ecash in several mints and federations has to decide which one
+should pay. The next layer of EcashMesh makes that decision automatically,
+while respecting what each source can really execute:
+
+```mermaid
+flowchart LR
+    D[Discover enabled sources] --> E[Collect live evidence]
+    E --> F{Can this source<br/>execute the payment?}
+    F -- no --> X[Exclude, with the reason]
+    F -- yes --> K[Rank viable sources]
+    K --> R[Recommend the best source]
+```
+
+The selection considers fees, Lightning liquidity, routing cost and the
+routing-fee budget of the paying gateway or mint, reliability from real
+payment history, evidence freshness, federation solvency (guardian audits) and
+historical behaviour. Unknown or conflicting evidence is penalised — never
+treated as zero or as good.
+
+**Experimental infrastructure already in place:**
+
+- `POST /v1/routes/evaluate` collects evidence for each enabled source,
+  excludes sources that cannot fund the payment, cannot route it, or whose
+  route costs more than their routing-fee budget, then ranks the rest with an
+  explanation for every decision ([architecture](docs/architecture.md)).
+- In the regtest lab: Lightning probes from each source's own node, guardian
+  solvency audits, and reliability from recorded payments.
+- Lab tools that check the decisions against real execution:
+
+```sh
+# (lab and services running, see above)
+python3 scripts/ecashmesh-lab-rank-acceptance.py 1000 --verify-topology   # rank all 8 sources, show all evidence
+python3 scripts/ecashmesh-lab-experiments.py fee_budget --amount 1000     # change one real condition, re-rank, restore
+```
+
+In the `fee_budget` experiment, a gateway with no routing-fee budget is
+excluded before ranking; the recommended source then pays for real, while the
+excluded gateway's own attempt is refunded — the evaluator agrees with
+execution.
+
+The longer-term goal is to **automatically select the best ecash source for a
+payment while respecting real execution constraints.**
+
+## Repository
+
+| Path | Contents |
+|---|---|
+| `crates/ecashmesh-cashu` | Cashu integration: mint discovery, metadata, quotes |
+| `crates/ecashmesh-fedimint` | Fedimint integration: bridge with native v0.12.1 clients, quote validation, guardian audits |
+| `crates/ecashmesh-lab-runner` | Regtest mesh supervisor: bitcoind, federations, gateways |
+| `crates/ecashmesh-cashu-smoke-runner` | Native Cashu wallet runner used for mesh payments |
+| `scripts/ecashmesh-lab-*` | Regtest mesh: bring-up, 56-route executor, validation, experiments |
+| `crates/ecashmesh-api` | HTTP API: source evidence, Lightning probing, feasibility (selection layer) |
+| `crates/ecashmesh-core` | Evidence model, deterministic ranking, explanations (selection layer) |
+| `apps/reference-wallet` | Web app (React Native / Expo): sources, comparisons, lab route matrix |
+| `scripts/demo.sh` | Live-mode launcher |
+
+## Tests
+
+```sh
+nix develop -c cargo test
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+nix develop -c npm --prefix apps/reference-wallet test
+```
+
+The regtest lab is itself the end-to-end test: it validates the full
+eight-source topology and the 56-route matrix from a clean start.
+
+## Safety
+
+Live mode is read-only and never makes a payment. Real payments happen only in
+the isolated regtest lab, which refuses to run unless
+`PAYMENT_ENVIRONMENT=regtest` and listens on loopback addresses only.
+Credentials stay server-side: LND is read with read-only macaroons, passwords
+are passed through environment variables, and no secret appears in API
+responses.

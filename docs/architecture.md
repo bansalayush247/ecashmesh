@@ -1,94 +1,104 @@
-# Architecture and API
+# Architecture
 
-EcashMesh selects a payment source. It does not calculate Lightning network
-hops. Cashu and Fedimint handle their own native protocols.
+EcashMesh connects independent Cashu mints and Fedimint federations through
+Lightning; the [regtest lab](regtest-lab.md) proves real payments between all
+of them. This document covers the layer built on top of that mesh: the
+experimental **source-selection** API, which decides which ecash source should
+pay a Lightning invoice. EcashMesh does not route Lightning payments itself:
+each Cashu mint and Fedimint gateway pays through its own Lightning node with
+its native protocol.
 
-## Responsibilities
+## Components
 
-| Component            | Responsibility                                                    |
-| -------------------- | ----------------------------------------------------------------- |
-| `reference-wallet`   | Source preferences, payment input and result display              |
-| `ecashmesh-api`      | Validation, concurrent collection, deadlines and HTTP responses   |
-| `comparison.rs`      | Balance-independent ordering of current fee evidence              |
-| `ecashmesh-core`     | Normal source feasibility, deterministic ranking and explanations |
-| `ecashmesh-cashu`    | Mint discovery, public metadata and unpaid quotes                 |
-| `ecashmesh-fedimint` | Native client bridge and verified fee evidence                    |
+| Component | Responsibility |
+|---|---|
+| `apps/reference-wallet` | Source list, payment form, results and explanations |
+| `ecashmesh-api` | Validates requests, collects evidence concurrently with deadlines, decides feasibility, returns ranked results |
+| `ecashmesh-core` | Evidence model, deterministic ranking, risk penalties, explanations |
+| `ecashmesh-cashu` | Cashu mint discovery, metadata (NUT-06), keysets, melt/mint quotes |
+| `ecashmesh-fedimint` | `fedimint-bridge`: one process hosting native Fedimint v0.12.1 clients; fee quotes, gateway info, guardian audits |
 
-## Two result modes
+The bridge has no payment endpoint. The browser never receives a credential.
 
-`POST /v1/routes/compare` is the demo's default. It uses the same validated
-source collection as evaluation, then orders current fee observations by their
-listed sats. It ignores balance. Ties prefer non-gateway-only evidence, then
-source ID, gateway protocol and gateway ID. This ordering is not a quality
-score or a guarantee of total payment cost.
-
-Comparisons can succeed with only unfunded Fedimint gateway estimates. They
-have no `quote_id` or executable route binding. All candidates declare
-`executable: false`; failed verification and expired evidence are excluded.
-
-`POST /v1/routes/evaluate` retains normal quote and feasibility checks. It can
-return a recommendation, alternatives and exclusions, or `NO_VIABLE_ROUTE`.
-Unfunded Fedimint clients cannot supply native funding quotes. Verified gateway
-estimates can still be displayed separately.
-
-Both endpoints accept the same body:
+## Request flow (`POST /v1/routes/evaluate`)
 
 ```json
 {
   "amount": 1000,
   "asset": "BTC",
-  "destination": { "type": "lightning", "value": "<fresh invoice>" },
+  "destination": { "type": "lightning", "value": "<invoice for exactly 1000 sats>" },
   "payment_intent": "send",
   "strict_source_registry": true,
-  "wallet_mint_urls": ["https://your-mint.example"],
+  "wallet_mint_urls": ["https://mint.example"],
   "federation_connector_ids": ["fedimint:<federation-id>"]
 }
 ```
 
-The browser supplies only enabled, user-authorized sources. Empty registries
-never expand to public sources. Cashu destinations also support `creqA...` and
-`cashu://request?...` requests; bearer tokens are not payment requests.
+1. **Sources.** Only the mints and federations the user enabled. An empty list
+   stays empty; public directories never add sources.
+2. **Evidence**, read in parallel (each source has its own deadline, so one
+   slow source cannot block the rest):
+   - Cashu: a melt quote for the invoice (fee reserve, expiry), mint health.
+   - Fedimint: a native, non-committing fee quote (federation fee + gateway
+     fee), wallet balance, selected gateway and its routing-fee budget,
+     federation reserve.
+   - Regtest lab only: Lightning probes and channel state from each source's
+     own node, guardian solvency audits, and real recorded payment outcomes.
+3. **Feasibility** — a source is excluded, with a reason, when:
+   - its wallet cannot fund amount + fees;
+   - fresh channel state or a probe shows its node cannot route the amount;
+   - the measured route fee exceeds the **routing-fee budget** of the node
+     that pays it (`INFEASIBLE_FEE_BUDGET`): for an LNv2 gateway its
+     send fee minus its minimum send fee, for a Cashu mint its melt fee
+     reserve. A gateway with a 0 budget can only pay its direct peers.
+4. **Ranking** of the remaining sources (below). If none remain the API
+   answers `NO_VIABLE_ROUTE` with every exclusion reason; it never falls back
+   to an infeasible source.
+5. **Response:** recommended source, alternatives, excluded sources, and for
+   each route its score breakdown, risk flags and every evidence item with
+   provenance and freshness.
 
-## Collection and deadlines
+`POST /v1/routes/compare` (the live demo's default) uses the same sources but
+only orders the current fee quotes, ignoring balances; nothing in it is
+executable.
 
-Independent Cashu and federation reads run concurrently. The API bounds a
-federation's quote plus fallback work to four seconds and Cashu source quoting
-to five seconds. Evaluation and comparison have an overall twelve-second
-deadline, shorter than the browser's fifteen-second timeout. A slow source
-should not discard usable results from other sources.
+## Ranking
 
-The bridge supports legacy `ln` and `lnv2` modules. Guardian queries and gateway
-probes are bounded and concurrent. Legacy announcements retain native proof
-validation; identity checks are not bypassed. LNv2 uses the pinned native
-registry and routing-info APIs. An LNv2 module's presence does not disable an
-available legacy quote path. Not every registered gateway can supply usable
-fee evidence in time.
+Every signal is in basis points, 0–10000.
 
-## Storage and execution
+| Signal | Weight | Input |
+|---|---|---|
+| Liquidity confidence | 25% | Probe/channel evidence that this source's node can route this amount: High 10000, Medium 6000, Low 2500, unknown 0 |
+| Reliability | 20% | Success rate of real recorded payments, capped by health |
+| Fee reasonableness | 15% | Total fee as a share of the amount; 1% or more scores 0 |
+| Freshness | 15% | Share of the evidence that is fresh (stale counts a quarter) |
+| Solvency confidence | 15% | Fedimint guardian audit: assets cover liabilities, agreed by a threshold of guardians |
+| Historical behaviour | 10% | How long and how much the source has been observed |
 
-The bridge stores one wallet root and isolates each client's database with a
-deterministic federation prefix. The non-secret catalog stores federation ID
-and label. Mnemonic entropy and bridge token stay in protected local files.
-Invites are not kept in the catalog or browser registry.
+`base = Σ signal × weight / 100` and `score = max(0, base − min(Σ penalties, 10000))`.
 
-There is no bridge payment endpoint, no CLI subprocess, and no automatic join.
-Comparison does not register an executable payment with the API. Optional
-Cashu regtest settlement lives in the host wallet and is disabled in the demo.
+| Penalty | bp |
+|---|---|
+| Unknown evidence (per fact) | 800 |
+| Stale evidence | 500 |
+| Weak evidence | 350 |
+| Poor reliability | 1000 |
+| New or unobserved source | 500 |
+| Conflicting evidence (e.g. guardians disagree) | 1000 |
+
+Ties are broken by fee, then hop count, then source ID, so results are
+deterministic. Stale evidence also halves its signal.
+
+**Unknown is never zero or good.** A quote is not proof of liquidity, a
+reachable service is not proof of reliability, and a wallet balance is never
+used as a liability.
 
 ## Other endpoints
 
-| Endpoint                              | Use                                                    |
-| ------------------------------------- | ------------------------------------------------------ |
-| `GET /health`                         | API readiness                                          |
-| `GET /v1/connectors`                  | Current source observations                            |
-| `POST /v1/connectors/discover`        | Inspect authorized source references                   |
-| `GET /v1/federations/setup`           | Local federation catalog                               |
-| `POST /v1/federations/setup/identify` | Identify an invite without joining                     |
-| `POST /v1/federations/setup/preview`  | Prepare explicit connection confirmation               |
-| `POST /v1/federations/setup/connect`  | Confirm the join                                       |
-| `POST /v1/routes/rank`                | Core ranking interface                                 |
-| `POST /v1/payments/prepare`           | Optional regtest preparation; never used by comparison |
-
-Unknown observations stay unknown. A reachable service is not proof of
-liquidity or reliability. The demo uses live evidence; test fixtures are
-confined to tests and the explicitly enabled offline gallery.
+| Endpoint | Use |
+|---|---|
+| `GET /health` | Readiness |
+| `GET /v1/connectors` | Current source observations |
+| `POST /v1/routes/compare` | Fee-only comparison (live demo) |
+| `GET /v1/federations/setup`, `POST /v1/federations/setup/{identify,preview,connect}` | Join a federation explicitly from an invite |
+| `GET /v1/lab/results/latest` | Regtest lab only: the verified 56-route results |

@@ -5,11 +5,13 @@ opens on port 8081. Comparison is the default and never sends a payment.
 
 ## Run
 
-Follow the [root quick start](../../README.md#start-the-demo) to build and start
-the bridge and API. From the repository root, start the browser app:
+Start the bridge and API first: [live mode](../../docs/live-mode.md) or the
+[regtest lab](../../docs/regtest-lab.md). From the repository root:
 
 ```sh
 ./scripts/demo.sh web
+# regtest lab: also show the verified 56-route results
+EXPO_PUBLIC_ENABLE_INTEROPERABILITY_LAB=true ./scripts/demo.sh web
 ```
 
 Use **Manage payment sources → Compare a payment → Compare fees**.
@@ -21,13 +23,14 @@ Results show names and fees. Technical IDs, balances and expiry times are under
 These variables are read when Expo starts. Never put a bridge token in an
 `EXPO_PUBLIC_` variable.
 
-| Variable                             | Default                 | Purpose                                              |
-| ------------------------------------ | ----------------------- | ---------------------------------------------------- |
-| `EXPO_PUBLIC_ECASHMESH_API_URL`      | `http://127.0.0.1:5000` | Local API address                                    |
-| `EXPO_PUBLIC_ROUTE_COMPARISON_ONLY`  | enabled unless `false`  | Initial comparison toggle; the user can change it    |
-| `EXPO_PUBLIC_NOSTR_RELAYS`           | App bootstrap relays    | Optional JSON array for Nostr sync and discovery     |
-| `EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY` | disabled                | Separate local regtest wallet; see the regtest guide |
-| `EXPO_PUBLIC_SOURCE_FIXTURES`        | disabled                | Offline source-card gallery for UI development       |
+| Variable                                  | Default                 | Purpose                                           |
+| ----------------------------------------- | ----------------------- | ------------------------------------------------- |
+| `EXPO_PUBLIC_ECASHMESH_API_URL`           | `http://127.0.0.1:5000` | Local API address                                 |
+| `EXPO_PUBLIC_ROUTE_COMPARISON_ONLY`       | enabled unless `false`  | Initial comparison toggle; the user can change it |
+| `EXPO_PUBLIC_NOSTR_RELAYS`                | App bootstrap relays    | Optional JSON array for Nostr sync and discovery  |
+| `EXPO_PUBLIC_ENABLE_INTEROPERABILITY_LAB` | disabled                | Show the regtest lab's 56-route results           |
+| `EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY`      | disabled                | Developer-only local regtest wallet               |
+| `EXPO_PUBLIC_SOURCE_FIXTURES`             | disabled                | Offline source-card gallery for UI development    |
 
 The demo script explicitly enables comparison and disables regtest custody.
 To test normal evaluation as the initial mode:

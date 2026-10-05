@@ -47,6 +47,15 @@ fi
 [[ "$action" == start ]] || { echo "usage: $0 [start|stop]" >&2; exit 64; }
 [[ "${PAYMENT_ENVIRONMENT:-regtest}" == regtest ]] || { echo "PAYMENT_ENVIRONMENT must be regtest" >&2; exit 78; }
 
+# The bridge runs the lab's pinned fedimint-cli for every lab wallet read; the
+# debug build starts too slowly under parallel quotes, so build a release once
+# (kept across lab restarts; the config prefers it).
+if [[ ! -x "$lab/fedimint-target-release/release/fedimint-cli" ]]; then
+  echo "building the lab's pinned fedimint-cli (release, once)..."
+  CARGO_TARGET_DIR="$lab/fedimint-target-release" \
+    nix develop --accept-flake-config "$lab/fedimint-source" -c \
+    cargo build --release --locked -p fedimint-cli --manifest-path "$lab/fedimint-source/Cargo.toml"
+fi
 python3 "$root/scripts/ecashmesh-lab-config.py" >/dev/null
 config="$lab/ecashmesh-services.json"
 for binary in fedimint-bridge ecashmesh-api; do
