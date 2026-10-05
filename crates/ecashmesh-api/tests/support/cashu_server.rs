@@ -36,29 +36,53 @@ impl ApiServer {
         allowed: &Value,
         federations: &Value,
     ) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap().to_string();
-        drop(listener);
-        let child = Command::new(env!("CARGO_BIN_EXE_ecashmesh-api"))
-            .env("ECASHMESH_API_ADDRESS", &address)
-            .env("ROUTING_MODE", "live")
-            .env("ECASHMESH_CASHU_MAX_AGE_SECONDS", "300")
-            .env("ECASHMESH_CASHU_MINTS", seeds.to_string())
-            .env("ECASHMESH_CASHU_DIRECTORIES", directories.to_string())
-            .env("ECASHMESH_CASHU_ALLOWED_MINTS", allowed.to_string())
-            .env("ECASHMESH_FEDIMINT_FEDERATIONS", federations.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let server = Self { child, address };
-        for _ in 0..100 {
-            if TcpStream::connect(&server.address).is_ok() {
-                return server;
+        // The free port is released before the API binds it, so a fixture in a
+        // parallel test can take it first. Only the API's own health answer
+        // counts as ready; if the API exits (port taken), retry on a new port.
+        for _ in 0..5 {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap().to_string();
+            drop(listener);
+            let child = Command::new(env!("CARGO_BIN_EXE_ecashmesh-api"))
+                .env("ECASHMESH_API_ADDRESS", &address)
+                .env("ROUTING_MODE", "live")
+                .env("ECASHMESH_CASHU_MAX_AGE_SECONDS", "300")
+                .env("ECASHMESH_CASHU_MINTS", seeds.to_string())
+                .env("ECASHMESH_CASHU_DIRECTORIES", directories.to_string())
+                .env("ECASHMESH_CASHU_ALLOWED_MINTS", allowed.to_string())
+                .env("ECASHMESH_FEDIMINT_FEDERATIONS", federations.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut server = Self { child, address };
+            for _ in 0..250 {
+                if server.child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                if server.is_ready() {
+                    return server;
+                }
+                thread::sleep(Duration::from_millis(20));
             }
-            thread::sleep(Duration::from_millis(20));
         }
         panic!("API failed to start");
+    }
+
+    fn is_ready(&self) -> bool {
+        let Ok(mut stream) = TcpStream::connect(&self.address) else {
+            return false;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut response = String::new();
+        write!(
+            stream,
+            "GET /health HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            self.address
+        )
+        .is_ok()
+            && stream.read_to_string(&mut response).is_ok()
+            && response.ends_with(r#"{"status":"ok"}"#)
     }
 
     pub fn post(&self, path: &str, body: &Value) -> (u16, Value) {

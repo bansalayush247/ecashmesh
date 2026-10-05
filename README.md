@@ -2,7 +2,7 @@
 
 **BOSS Battle 2026 · Track 03: Freedom Stack (Nostr + Ecash)**
 
-▶ **Demo video (4 min):** _add the video link here_
+▶ **Demo video (4 min):** (https://youtu.be/UGRxNYp_cpI)
 
 ## Interoperability across Cashu and Fedimint
 
@@ -93,7 +93,8 @@ own keys, databases and channels.
 ## Run it
 
 **Prerequisites:** macOS or Linux (x86_64 or arm64), [Nix](https://nixos.org/download)
-with flakes enabled, Python 3, and git. Nix provides the pinned Rust, Node.js
+with flakes enabled, Python 3, and git. Developed and tested on macOS (Apple
+Silicon); the Nix flake also targets Linux, which we have not tested. Nix provides the pinned Rust, Node.js
 and tools; nothing else needs installing. The regtest lab compiles pinned
 Fedimint, CDK and LND from source: allow plenty of free disk (about 100 GB to
 be safe) and an hour or more for the first run. Run commands from the
