@@ -9,7 +9,6 @@ import type {
 } from "../ecashmesh/contracts";
 import { EcashMeshError } from "../ecashmesh/transport";
 import { collectPayment } from "./payment";
-import type { RegtestCustody } from "./regtestCustody";
 import type { PaymentSourceProfile } from "../nostr/sourceRegistry";
 import type { LabPayment } from "./useRegtestLab";
 
@@ -19,31 +18,11 @@ type FlowOptions = {
   defaultAmount?: string;
 };
 
-type Receipt = {
-  status: string;
-  quote_id: string;
-  route_id: string;
-  amount: number;
-  asset: "BTC";
-  fee: {
-    amount: number;
-    asset: "sats";
-    freshness: "fresh";
-    estimated_fee_sats: number;
-    fee_reserve_sats: number;
-    estimate_kind: "reserve_estimate";
-  };
-  path: string[];
-  message: string;
-  payment_id: string;
-};
-
 export type Screen =
   "home" | "payment" | "decision" | "details" | "confirmation" | "success";
 
 export function usePaymentFlow(
   ecashmesh: EcashMeshClient,
-  regtestCustody?: RegtestCustody,
   authorizedProfiles: readonly PaymentSourceProfile[] = [],
   { labPay, defaultAmount = "100000" }: FlowOptions = {},
 ) {
@@ -59,14 +38,11 @@ export function usePaymentFlow(
   const [decision, setDecision] = useState<RouteDecision | null>(null);
   const [comparison, setComparison] = useState<RouteComparison | null>(null);
   const [comparisonOnly, setComparisonOnly] = useState(
-    !regtestCustody &&
-      !labPay &&
-      process.env.EXPO_PUBLIC_ROUTE_COMPARISON_ONLY !== "false",
+    !labPay && process.env.EXPO_PUBLIC_ROUTE_COMPARISON_ONLY !== "false",
   );
   const [selected, setSelected] = useState<PaymentSource | null>(null);
   const [inspectedOption, setInspectedOption] =
     useState<ComparisonOption | null>(null);
-  const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [labReceipt, setLabReceipt] = useState<LabPayment | null>(null);
   const [error, setError] = useState<EcashMeshError | null>(null);
   const [busy, setBusy] = useState(false);
@@ -88,7 +64,6 @@ export function usePaymentFlow(
     setComparison(null);
     setSelected(null);
     setPayment(null);
-    setReceipt(null);
     setLabReceipt(null);
     setScreen("payment");
   }
@@ -116,7 +91,7 @@ export function usePaymentFlow(
         selectedSourceIds.length
           ? authorizedProfiles.filter((p) => selectedSourceIds.includes(p.id))
           : authorizedProfiles,
-        !regtestCustody,
+        true,
       );
     } catch (error) {
       setError(asError(error));
@@ -128,7 +103,6 @@ export function usePaymentFlow(
     setDecision(null);
     setComparison(null);
     setSelected(null);
-    setReceipt(null);
     setError(null);
     setBusy(true);
     setScreen("decision");
@@ -167,45 +141,8 @@ export function usePaymentFlow(
     if (inspectedOption) return;
     if (comparisonOnly || comparison) return;
     if (!payment || !decision || !selected || active.current) return;
-    if (labPay) {
-      await payInLab(selected.connector);
-      return;
-    }
-    const controller = new AbortController();
-    active.current = controller;
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await executeRegtestPayment(
-        ecashmesh,
-        regtestCustody,
-        decision.quote_id,
-        selected,
-        payment,
-        controller.signal,
-      );
-      if (active.current !== controller) return;
-      // Check receipt correlation only; feasibility and risk stay on the server.
-      if (
-        result.quote_id !== decision.quote_id ||
-        result.route_id !== selected.route_id ||
-        result.amount !== payment.amount
-      ) {
-        throw new EcashMeshError(
-          "INVALID_RESPONSE",
-          "Payment receipt does not match the selected payment.",
-        );
-      }
-      setReceipt(result);
-      setScreen("success");
-    } catch (error) {
-      if (active.current === controller) setError(asError(error));
-    } finally {
-      if (active.current === controller) {
-        active.current = null;
-        setBusy(false);
-      }
-    }
+    // Only the regtest lab executes payments; live mode is a fee preview.
+    await payInLab(selected.connector);
   }
 
   /** Regtest lab: a real payment from `source`, including a source the
@@ -266,7 +203,6 @@ export function usePaymentFlow(
     comparisonOnly,
     setComparisonOnly,
     selected,
-    receipt,
     labReceipt,
     payInLab,
     error,
@@ -284,65 +220,6 @@ export function usePaymentFlow(
     select,
     confirm,
     back,
-  };
-}
-
-async function executeRegtestPayment(
-  ecashmesh: EcashMeshClient,
-  custody: RegtestCustody | undefined,
-  quoteId: string,
-  route: PaymentSource,
-  payment: PaymentInput,
-  signal: AbortSignal,
-): Promise<Receipt> {
-  if (!custody) {
-    throw new EcashMeshError(
-      "CUSTODY_UNAVAILABLE",
-      "This host has no regtest Cashu custody adapter. It cannot create real proofs.",
-    );
-  }
-  const prepared = await ecashmesh.preparePayment(
-    quoteId,
-    route.route_id,
-    signal,
-  );
-  if (payment.destination.type !== "lightning") {
-    throw new EcashMeshError(
-      "UNSUPPORTED_DESTINATION",
-      "Host custody can execute BOLT11 melts today. Cashu-to-Cashu settlement remains an explicit wallet transfer flow.",
-    );
-  }
-  // The API binds the evaluated route to a regtest payment ID. The host then
-  // executes directly against that selected mint; proof material never crosses
-  // the EcashMesh API boundary.
-  const result = await custody.meltBolt11({
-    mintUrl: prepared.source_mint_url,
-    invoice: payment.destination.value,
-    paymentId: prepared.payment_id,
-  });
-  if (result.status !== "settled") {
-    throw new EcashMeshError(
-      "PAYMENT_PENDING",
-      "The mint accepted the melt asynchronously. Its recovery record remains in this browser wallet.",
-    );
-  }
-  return {
-    status: "settled",
-    quote_id: prepared.quote_id,
-    route_id: prepared.route_id,
-    amount: prepared.amount_sats,
-    asset: "BTC",
-    fee: {
-      amount: result.finalFeeSats,
-      asset: "sats",
-      freshness: "fresh",
-      estimated_fee_sats: result.finalFeeSats,
-      fee_reserve_sats: prepared.fee_reserve_sats,
-      estimate_kind: "reserve_estimate",
-    },
-    path: route.path,
-    message: "Real regtest Cashu melt settled by host-held proofs.",
-    payment_id: prepared.payment_id,
   };
 }
 

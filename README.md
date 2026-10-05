@@ -1,5 +1,9 @@
 # EcashMesh
 
+**BOSS Battle 2026 · Track 03: Freedom Stack (Nostr + Ecash)**
+
+▶ **Demo video (4 min):** _add the video link here_
+
 ## Interoperability across Cashu and Fedimint
 
 Ecash today is siloed: ecash from one Cashu mint or Fedimint federation can
@@ -83,12 +87,21 @@ own keys, databases and channels.
 | Real Lightning settlement with verified destination credit | Interoperability on live networks, not only regtest |
 | Clean-start topology validation and the 56-route matrix | Additional ecash protocols |
 | Read-only discovery and fee quotes for real mints and federations | |
+| Nostr source list: NIP-60 import, encrypted NIP-78 sync, NIP-87 discovery | |
 | Evidence collection and diagnostics (experimental selection layer) | |
 
 ## Run it
 
-Both modes use [Nix](https://nixos.org/download), which provides the pinned
-Rust, Node.js and tools. Run commands from the repository root.
+**Prerequisites:** macOS or Linux (x86_64 or arm64), [Nix](https://nixos.org/download)
+with flakes enabled, Python 3, and git. Nix provides the pinned Rust, Node.js
+and tools; nothing else needs installing. The regtest lab compiles pinned
+Fedimint, CDK and LND from source: allow plenty of free disk (about 100 GB to
+be safe) and an hour or more for the first run. Run commands from the
+repository root.
+
+```sh
+git clone https://github.com/bansalayush247/ecashmesh.git && cd ecashmesh
+```
 
 ### Regtest lab — the interoperability mesh
 
@@ -202,6 +215,46 @@ execution.
 The longer-term goal is to **automatically select the best ecash source for a
 payment while respecting real execution constraints.**
 
+## Why Freedom Stack
+
+Ecash is custodial; the track asks to make the trust underneath it visible.
+EcashMesh does that where it can measure it, and keeps the user in control:
+
+- **No single custodian lock-in.** Value in one mint or federation can pay into
+  any other through Lightning, so leaving a custodian does not mean losing
+  access to everyone who uses it.
+- **Solvency is measured, not assumed.** In the lab, Fedimint guardian audits
+  must agree, by threshold, that assets cover liabilities; disagreement is
+  flagged. Cashu mints expose no equivalent, so their solvency is shown as
+  unknown and penalised.
+- **The user's source list lives on Nostr**, encrypted to their own key
+  (NIP-60 import, NIP-44-encrypted NIP-78 sync, NIP-87 discovery). Discovered
+  sources are never enabled automatically.
+
+## What is not finished
+
+- **Real payments run only on regtest.** Live mode on real mints and
+  federations is read-only by design.
+- **Source selection is experimental.** It is demonstrated in the lab, and it
+  is not yet the default way payments are made.
+- **Solvency evidence is lab-only.** Guardian audits need guardian API access.
+  Cashu solvency stays unknown, and there is no cryptographic
+  proof-of-reserves.
+- **Reliability starts at zero** for every source. It comes only from recorded
+  real payments, kept per lab run.
+- **Fee scores are 0 for small payments.** Any fee of 1% or more scores 0, and
+  Cashu's fee reserve is 2%; use about 10,000 sats to see fees compared.
+- **The lab is heavy.** It needs a long first build and a lot of disk.
+- See also [regtest-lab.md § Known limitations](docs/regtest-lab.md#known-limitations).
+
+**Next:**
+- Proof-of-liabilities and proof-of-reserves for mints, published as signed
+  Nostr events, so solvency is verifiable outside the lab.
+- Execute payments on live networks with user-held keys.
+- Make source selection the default, learning from accumulated payment history.
+
+Design decisions and trade-offs: [docs/design.md](docs/design.md).
+
 ## Repository
 
 | Path | Contents |
@@ -235,3 +288,8 @@ the isolated regtest lab, which refuses to run unless
 Credentials stay server-side: LND is read with read-only macaroons, passwords
 are passed through environment variables, and no secret appears in API
 responses.
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your
+option.

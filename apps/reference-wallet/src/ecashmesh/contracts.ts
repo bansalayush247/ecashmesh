@@ -514,28 +514,6 @@ export type PaymentInput = {
   strictSourceRegistry?: boolean;
 };
 
-export const paymentStatusSchema = z
-  .object({
-    mode: z.literal("live"),
-    environment: z.enum(["regtest", "mainnet"]),
-    payment_id: z.string().min(1),
-    quote_id: z.string().min(1),
-    route_id: z.string().min(1),
-    amount_sats: unsigned,
-    fee_reserve_sats: unsigned,
-    status: z.enum([
-      "prepared",
-      "pending",
-      "settled",
-      "failed",
-      "recovery_required",
-    ]),
-    settled: z.boolean(),
-    source_mint_url: z.string(),
-  })
-  .passthrough();
-export type PaymentStatus = z.infer<typeof paymentStatusSchema>;
-
 export function paymentToWire(payment: PaymentInput) {
   return {
     amount: payment.amount,

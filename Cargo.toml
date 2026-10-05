@@ -11,7 +11,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/ecashmesh/ecashmesh"
+repository = "https://github.com/bansalayush247/ecashmesh"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

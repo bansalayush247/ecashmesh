@@ -16,7 +16,6 @@ import {
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { createEcashMeshClient } from "./src/ecashmesh/client";
 import type { RouteDecision } from "./src/ecashmesh/contracts";
-import { useRegtestCustody } from "./src/host/useRegtestCustody";
 import { usePaymentFlow } from "./src/host/usePaymentFlow";
 import { useNostrSourceRegistry } from "./src/host/useNostrSourceRegistry";
 import {
@@ -24,7 +23,6 @@ import {
   SourceSummary,
   ExcludedSources,
 } from "./src/ui/SourceManager";
-import { SourceFixtureGallery } from "./src/ui/SourceFixtureGallery";
 import {
   Button,
   colors,
@@ -58,8 +56,6 @@ const baseUrl =
     ? "http://10.0.2.2:5000"
     : "http://127.0.0.1:5000");
 const ecashmesh = createEcashMeshClient({ baseUrl });
-const regtestCustodyEnabled =
-  process.env.EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY === "true";
 const interoperabilityLabEnabled =
   process.env.EXPO_PUBLIC_ENABLE_INTEROPERABILITY_LAB === "true";
 
@@ -243,11 +239,7 @@ function LiveObservations({ decision }: { decision: RouteDecision }) {
 export default function App() {
   return (
     <SafeAreaProvider>
-      {process.env.EXPO_PUBLIC_SOURCE_FIXTURES === "true" ? (
-        <SourceFixtureGallery />
-      ) : (
-        <ReferenceWallet />
-      )}
+      <ReferenceWallet />
     </SafeAreaProvider>
   );
 }
@@ -330,15 +322,12 @@ function ReferenceWallet() {
   const btcUsdRate = useLiveBtcUsdRate();
   const nostr = useNostrSourceRegistry(baseUrl);
   const [sourcesOpen, setSourcesOpen] = useState(false);
-  const regtest = useRegtestCustody(regtestCustodyEnabled);
   // Regtest lab mode: the lab's 8 sources are the payment sources, and
   // payments are real regtest payments made through the API's lab endpoints.
   const lab = useRegtestLab(interoperabilityLabEnabled, baseUrl);
   const profiles = lab.enabled ? lab.profiles : nostr.profiles;
-  const realPayments = regtest.enabled || lab.enabled;
   const flow = usePaymentFlow(
     ecashmesh,
-    regtest.custody,
     profiles,
     lab.enabled ? { labPay: lab.pay, defaultAmount: "1000" } : {},
   );
@@ -348,7 +337,6 @@ function ReferenceWallet() {
   const errorExclusions = lab.enabled
     ? lab.relabelRows(flow.error?.diagnostics?.excluded_sources ?? [])
     : (flow.error?.diagnostics?.excluded_sources ?? []);
-  const [fundAmount, setFundAmount] = useState("1000");
   const scroll = useRef<ScrollView>(null);
   useEffect(() => {
     scroll.current?.scrollTo({ y: 0, animated: false });
@@ -456,11 +444,6 @@ function ReferenceWallet() {
                 <SourceSummary
                   registry={nostr}
                   open={() => setSourcesOpen(true)}
-                />
-                <RegtestCustodyCard
-                  custody={regtest}
-                  amount={fundAmount}
-                  setAmount={setFundAmount}
                 />
               </>
             )}
@@ -570,16 +553,10 @@ function ReferenceWallet() {
                         </Button>
                       ))}
                   </Disclosure>
-                  {!profiles.some((p) => p.enabled) && !regtest.custody && (
+                  {!profiles.some((p) => p.enabled) && (
                     <Text style={styles.small}>
                       No enabled sources. Add sources from Home → Manage payment
                       sources.
-                    </Text>
-                  )}
-                  {regtest.custody && (
-                    <Text style={styles.small}>
-                      Regtest custody uses the existing isolated regtest source
-                      configuration.
                     </Text>
                   )}
                 </Section>
@@ -760,7 +737,7 @@ function ReferenceWallet() {
               flow.selected && (
                 <>
                   <ScreenHeader
-                    title={realPayments ? "Confirm payment" : "Review option"}
+                    title={lab.enabled ? "Confirm payment" : "Review option"}
                     onBack={flow.back}
                   />
 
@@ -818,13 +795,11 @@ function ReferenceWallet() {
                       )}
                     </>
                   )}
-                  {realPayments && flow.busy ? (
+                  {lab.enabled && flow.busy ? (
                     <Loading label="Paying on regtest…" />
-                  ) : realPayments ? (
+                  ) : lab.enabled ? (
                     <Button onPress={() => void flow.confirm()}>
-                      {lab.enabled
-                        ? "Pay for real on regtest"
-                        : "Confirm real regtest payment"}
+                      Pay for real on regtest
                     </Button>
                   ) : (
                     <Text style={styles.small}>
@@ -849,138 +824,10 @@ function ReferenceWallet() {
                 </Button>
               </>
             )}
-            {flow.screen === "success" && flow.receipt && (
-              <>
-                <ScreenHeader title="Payment Complete" onBack={flow.home} />
-                <View style={local.successHero}>
-                  <View style={local.successMark}>
-                    <Text style={local.successCheck}>✓</Text>
-                  </View>
-                  <Text style={local.successTitle}>Payment Sent!</Text>
-                  <Text style={local.successAmount}>
-                    {sats(flow.receipt.amount)}
-                  </Text>
-                  <Text style={styles.body}>to Coffee Shop</Text>
-                </View>
-                <Text style={local.testEyebrow}>
-                  Pocket / Regtest settlement
-                </Text>
-                <Heading
-                  eyebrow="Real regtest payment settled"
-                  title="Payment complete"
-                >
-                  {flow.receipt.message}
-                </Heading>
-                <Surface>
-                  <Row
-                    label="Final fee"
-                    value={sats(flow.receipt.fee.amount)}
-                  />
-                  <Row
-                    label="Settlement source"
-                    value={flow.receipt.path[0] ?? "unknown"}
-                  />
-                  <Row label="Execution ID" value={flow.receipt.route_id} />
-                  <Row label="Payment ID" value={flow.receipt.payment_id} />
-                </Surface>
-                <Text style={styles.small}>
-                  This result was reported settled by the regtest Cashu mint.
-                </Text>
-                <Button secondary onPress={flow.home}>
-                  Back to home
-                </Button>
-              </>
-            )}
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
-  );
-}
-
-function RegtestCustodyCard({
-  custody,
-  amount,
-  setAmount,
-}: {
-  custody: ReturnType<typeof useRegtestCustody>;
-  amount: string;
-  setAmount: (value: string) => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  if (!custody.enabled) return null;
-  const requested = Number(amount);
-  return (
-    <Surface>
-      <Text style={local.custodyTitle}>Regtest Cashu custody</Text>
-      <Text style={styles.small}>
-        Proofs stay in this browser’s IndexedDB. Use only with disposable
-        regtest funds.
-      </Text>
-      <Text style={local.fieldLabel}>Mint URL</Text>
-      <TextInput
-        accessibilityLabel="Regtest custody mint URL"
-        value={custody.mintUrl}
-        onChangeText={custody.setMintUrl}
-        autoCapitalize="none"
-        autoCorrect={false}
-        style={local.destinationInput}
-      />
-      <Row label="Available proofs" value={sats(custody.balance)} />
-      <Text style={local.fieldLabel}>Fund wallet</Text>
-      <View style={local.amountWrap}>
-        <TextInput
-          accessibilityLabel="Regtest funding amount in sats"
-          keyboardType="number-pad"
-          value={amount}
-          onChangeText={setAmount}
-          style={local.amountInput}
-        />
-        <Text style={local.satsSuffix}>sats</Text>
-      </View>
-      <Button
-        disabled={
-          custody.loading || !Number.isSafeInteger(requested) || requested <= 0
-        }
-        onPress={() => void custody.requestMint(requested)}
-      >
-        Create funding invoice
-      </Button>
-      {custody.quote && (
-        <View style={local.quoteBox}>
-          <Text style={styles.small}>
-            Pay this BOLT11 invoice from the local regtest node, then claim it.
-          </Text>
-          <Text selectable style={styles.code}>
-            {compactDestination(custody.quote.request)}
-          </Text>
-          <Button
-            secondary
-            onPress={() =>
-              void navigator.clipboard
-                .writeText(custody.quote!.request)
-                .then(() => setCopied(true))
-            }
-          >
-            {copied ? "Invoice copied" : "Copy full invoice"}
-          </Button>
-          <Button
-            disabled={custody.loading}
-            onPress={() => void custody.claimMint()}
-          >
-            {`Claim paid ${sats(custody.quote.amount)}`}
-          </Button>
-        </View>
-      )}
-      <Button
-        secondary
-        disabled={custody.loading}
-        onPress={() => void custody.refresh()}
-      >
-        Refresh balance
-      </Button>
-      {custody.error && <Text style={local.custodyError}>{custody.error}</Text>}
-    </Surface>
   );
 }
 
@@ -1116,14 +963,6 @@ const local = StyleSheet.create({
     backgroundColor: colors.blue,
   },
   custodyTitle: { color: colors.ink, fontSize: 16, fontWeight: "800" },
-  quoteBox: {
-    gap: 9,
-    borderRadius: 10,
-    backgroundColor: "#F3F7FE",
-    padding: 11,
-  },
-  custodyError: { color: colors.red, fontSize: 12, lineHeight: 17 },
-  testEyebrow: { color: colors.faint, fontSize: 10, textAlign: "center" },
   confirmTop: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -1144,36 +983,4 @@ const local = StyleSheet.create({
   },
   confirmScoreNumber: { color: "#087D49", fontSize: 22, fontWeight: "800" },
   divider: { height: 1, backgroundColor: "#E7EDF6", marginVertical: 4 },
-  successHero: { alignItems: "center", gap: 7, paddingVertical: 32 },
-  successMark: {
-    width: 78,
-    height: 78,
-    borderRadius: 40,
-    backgroundColor: "#DDF8EB",
-    alignItems: "center",
-    justifyContent: "center",
-    shadowColor: colors.green,
-    shadowOpacity: 0.16,
-    shadowRadius: 18,
-    elevation: 3,
-  },
-  successCheck: {
-    color: "white",
-    backgroundColor: colors.green,
-    width: 43,
-    height: 43,
-    borderRadius: 22,
-    overflow: "hidden",
-    textAlign: "center",
-    lineHeight: 43,
-    fontSize: 27,
-    fontWeight: "700",
-  },
-  successTitle: {
-    color: colors.ink,
-    fontSize: 20,
-    fontWeight: "700",
-    marginTop: 10,
-  },
-  successAmount: { color: colors.ink, fontSize: 27, fontWeight: "800" },
 });

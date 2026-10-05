@@ -23,7 +23,6 @@ case "${1:-help}" in
   web)
     export EXPO_PUBLIC_ECASHMESH_API_URL="${EXPO_PUBLIC_ECASHMESH_API_URL:-http://127.0.0.1:5000}"
     export EXPO_PUBLIC_ROUTE_COMPARISON_ONLY=true
-    export EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY=false
     exec nix develop -c sh -c 'cd apps/reference-wallet && npm run web'
     ;;
   help|--help|-h)

@@ -1,7 +1,6 @@
 import {
   decisionSchema,
   comparisonSchema,
-  paymentStatusSchema,
   paymentToWire,
   type PaymentInput,
 } from "./contracts";
@@ -24,14 +23,6 @@ export function createEcashMeshClient(options: ClientOptions) {
         "/v1/routes/evaluate",
         paymentToWire(payment),
         decisionSchema,
-        signal,
-      );
-    },
-    preparePayment(quoteId: string, routeId: string, signal?: AbortSignal) {
-      return post(
-        "/v1/payments/prepare",
-        { quote_id: quoteId, route_id: routeId },
-        paymentStatusSchema,
         signal,
       );
     },

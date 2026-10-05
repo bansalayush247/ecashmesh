@@ -2,14 +2,6 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  testIgnore:
-    process.env.EXPO_PUBLIC_SOURCE_FIXTURES === "true"
-      ? [
-          "**/registry.spec.ts",
-          "**/wallet.spec.ts",
-          "**/federation-setup.spec.ts",
-        ]
-      : "**/fixtures.spec.ts",
   fullyParallel: true,
   workers: 2,
   timeout: 30000,

@@ -29,10 +29,8 @@ These variables are read when Expo starts. Never put a bridge token in an
 | `EXPO_PUBLIC_ROUTE_COMPARISON_ONLY`       | enabled unless `false`  | Initial comparison toggle; the user can change it |
 | `EXPO_PUBLIC_NOSTR_RELAYS`                | App bootstrap relays    | Optional JSON array for Nostr sync and discovery  |
 | `EXPO_PUBLIC_ENABLE_INTEROPERABILITY_LAB` | disabled                | Run the app on the regtest lab (real payments)    |
-| `EXPO_PUBLIC_ENABLE_REGTEST_CUSTODY`      | disabled                | Developer-only local regtest wallet               |
-| `EXPO_PUBLIC_SOURCE_FIXTURES`             | disabled                | Offline source-card gallery for UI development    |
 
-The demo script explicitly enables comparison and disables regtest custody.
+The demo script explicitly enables comparison.
 To test normal evaluation as the initial mode:
 
 ```sh
@@ -47,6 +45,7 @@ nix develop -c sh -c 'cd apps/reference-wallet && EXPO_PUBLIC_ROUTE_COMPARISON_O
 - `src/ui/RouteComparison.tsx`: compact comparison results, no payment actions.
 - `src/ui/RouteDecision.tsx`: normal evaluation and detailed evidence.
 - `src/ui/SourceManager.tsx`: sources, local save and optional Nostr sync.
+- `src/host/useRegtestLab.ts`, `src/ui/RegtestLab.tsx`: regtest lab mode (mesh, invoices, real payments).
 - `src/nostr/`: signer, registry encryption and discovery.
 
 ## Checks
