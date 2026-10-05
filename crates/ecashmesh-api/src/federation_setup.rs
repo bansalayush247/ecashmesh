@@ -432,6 +432,7 @@ mod tests {
                 payments: super::super::payment::PaymentService::from_env().unwrap(),
                 setup,
                 lab_results: None,
+                lab_actions: None,
             },
             mock,
             task,

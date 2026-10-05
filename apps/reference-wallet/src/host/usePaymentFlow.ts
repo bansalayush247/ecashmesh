@@ -11,6 +11,13 @@ import { EcashMeshError } from "../ecashmesh/transport";
 import { collectPayment } from "./payment";
 import type { RegtestCustody } from "./regtestCustody";
 import type { PaymentSourceProfile } from "../nostr/sourceRegistry";
+import type { LabPayment } from "./useRegtestLab";
+
+type FlowOptions = {
+  /** Regtest lab: pay for real through the API's lab endpoints. */
+  labPay?: (source: string, invoice: string) => Promise<LabPayment>;
+  defaultAmount?: string;
+};
 
 type Receipt = {
   status: string;
@@ -38,9 +45,10 @@ export function usePaymentFlow(
   ecashmesh: EcashMeshClient,
   regtestCustody?: RegtestCustody,
   authorizedProfiles: readonly PaymentSourceProfile[] = [],
+  { labPay, defaultAmount = "100000" }: FlowOptions = {},
 ) {
   const [screen, setScreen] = useState<Screen>("home");
-  const [amount, setAmount] = useState("100000");
+  const [amount, setAmount] = useState(defaultAmount);
   const [destination, setDestination] = useState("");
   const [destinationType, setDestinationType] = useState<"lightning" | "cashu">(
     "lightning",
@@ -52,12 +60,14 @@ export function usePaymentFlow(
   const [comparison, setComparison] = useState<RouteComparison | null>(null);
   const [comparisonOnly, setComparisonOnly] = useState(
     !regtestCustody &&
+      !labPay &&
       process.env.EXPO_PUBLIC_ROUTE_COMPARISON_ONLY !== "false",
   );
   const [selected, setSelected] = useState<PaymentSource | null>(null);
   const [inspectedOption, setInspectedOption] =
     useState<ComparisonOption | null>(null);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
+  const [labReceipt, setLabReceipt] = useState<LabPayment | null>(null);
   const [error, setError] = useState<EcashMeshError | null>(null);
   const [busy, setBusy] = useState(false);
   const active = useRef<AbortController | null>(null);
@@ -79,12 +89,13 @@ export function usePaymentFlow(
     setSelected(null);
     setPayment(null);
     setReceipt(null);
+    setLabReceipt(null);
     setScreen("payment");
   }
 
   function home() {
     edit();
-    setAmount("100000");
+    setAmount(defaultAmount);
     setDestination("");
     setDestinationType("lightning");
     setSourceMintUrl("");
@@ -156,6 +167,10 @@ export function usePaymentFlow(
     if (inspectedOption) return;
     if (comparisonOnly || comparison) return;
     if (!payment || !decision || !selected || active.current) return;
+    if (labPay) {
+      await payInLab(selected.connector);
+      return;
+    }
     const controller = new AbortController();
     active.current = controller;
     setBusy(true);
@@ -182,6 +197,38 @@ export function usePaymentFlow(
         );
       }
       setReceipt(result);
+      setScreen("success");
+    } catch (error) {
+      if (active.current === controller) setError(asError(error));
+    } finally {
+      if (active.current === controller) {
+        active.current = null;
+        setBusy(false);
+      }
+    }
+  }
+
+  /** Regtest lab: a real payment from `source`, including a source the
+   * evaluator excluded, so its refusal can be shown against real execution. */
+  async function payInLab(source: string) {
+    if (!labPay || !payment || active.current) return;
+    if (payment.destination.type !== "lightning") {
+      setError(
+        new EcashMeshError(
+          "UNSUPPORTED_DESTINATION",
+          "Lab payments pay a Lightning invoice.",
+        ),
+      );
+      return;
+    }
+    const controller = new AbortController();
+    active.current = controller;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await labPay(source, payment.destination.value);
+      if (active.current !== controller) return;
+      setLabReceipt(result);
       setScreen("success");
     } catch (error) {
       if (active.current === controller) setError(asError(error));
@@ -220,6 +267,8 @@ export function usePaymentFlow(
     setComparisonOnly,
     selected,
     receipt,
+    labReceipt,
+    payInLab,
     error,
     busy,
     edit,

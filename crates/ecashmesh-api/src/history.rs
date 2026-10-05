@@ -2,9 +2,10 @@
 //! observations, persisted as JSON lines under `ECASHMESH_LAB_HISTORY_DIR`.
 //!
 //! `payments.jsonl` is appended by the lab payment executor
-//! (`scripts/ecashmesh-lab-route-executor.py reliability`): one line per real
-//! regtest payment it attempted through a source. It is the only input to
-//! payment reliability. Probes, channel state, gateway discovery and fee
+//! (`scripts/ecashmesh-lab-route-executor.py reliability`) and by real
+//! payments made from the web app (`/v1/lab/pay`): one line per real regtest
+//! payment attempted through a source. It is the only input to payment
+//! reliability. Probes, channel state, gateway discovery and fee
 //! quotes are never payment outcomes.
 //!
 //! `observations.jsonl` is appended by this API: one line per source per
@@ -282,6 +283,19 @@ impl LabHistory {
                 ((*source).to_owned(), stats(source, &payments, first, now))
             })
             .collect()
+    }
+
+    /// Appends one real payment outcome, in the lab executor's record format.
+    pub(crate) async fn record_payment(&self, record: &Value) {
+        let _guard = self.write.lock().await;
+        let result = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join("payments.jsonl"))
+            .and_then(|mut file| file.write_all(format!("{record}\n").as_bytes()));
+        if let Err(error) = result {
+            eprintln!("EcashMesh lab history: cannot append a payment: {error}");
+        }
     }
 
     /// Appends one observation per source. Failures to persist are reported,

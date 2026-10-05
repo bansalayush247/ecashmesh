@@ -43,7 +43,14 @@ import {
 import { DecisionView, Risks, RouteDetails } from "./src/ui/RouteDecision";
 import { Disclosure } from "./src/ui/components";
 import { RouteComparisonView } from "./src/ui/RouteComparison";
-import { InteroperabilityLab } from "./src/ui/InteroperabilityLab";
+import { useRegtestLab } from "./src/host/useRegtestLab";
+import {
+  ExcludedAttempts,
+  GatewayBudgetExperiment,
+  InvoiceGenerator,
+  LabReceipt,
+  MeshStatus,
+} from "./src/ui/RegtestLab";
 
 const baseUrl =
   process.env.EXPO_PUBLIC_ECASHMESH_API_URL ??
@@ -324,7 +331,23 @@ function ReferenceWallet() {
   const nostr = useNostrSourceRegistry(baseUrl);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const regtest = useRegtestCustody(regtestCustodyEnabled);
-  const flow = usePaymentFlow(ecashmesh, regtest.custody, nostr.profiles);
+  // Regtest lab mode: the lab's 8 sources are the payment sources, and
+  // payments are real regtest payments made through the API's lab endpoints.
+  const lab = useRegtestLab(interoperabilityLabEnabled, baseUrl);
+  const profiles = lab.enabled ? lab.profiles : nostr.profiles;
+  const realPayments = regtest.enabled || lab.enabled;
+  const flow = usePaymentFlow(
+    ecashmesh,
+    regtest.custody,
+    profiles,
+    lab.enabled ? { labPay: lab.pay, defaultAmount: "1000" } : {},
+  );
+  // What the result screens show: in lab mode, sources carry mesh names.
+  const decision =
+    flow.decision && lab.enabled ? lab.relabel(flow.decision) : flow.decision;
+  const errorExclusions = lab.enabled
+    ? lab.relabelRows(flow.error?.diagnostics?.excluded_sources ?? [])
+    : (flow.error?.diagnostics?.excluded_sources ?? []);
   const [fundAmount, setFundAmount] = useState("1000");
   const scroll = useRef<ScrollView>(null);
   useEffect(() => {
@@ -364,7 +387,7 @@ function ReferenceWallet() {
   useEffect(() => {
     if (sourceKey) void nostr.refresh();
   }, [sourceKey, nostr.refresh]);
-  const localExclusions = nostr.profiles
+  const localExclusions = profiles
     .filter(
       (p) =>
         !p.enabled ||
@@ -406,7 +429,22 @@ function ReferenceWallet() {
                 <SourceManager registry={nostr} />
               </>
             )}
-            {flow.screen === "home" && !sourcesOpen && (
+            {flow.screen === "home" && !sourcesOpen && lab.enabled && (
+              <>
+                <Heading
+                  eyebrow="ECASHMESH · REGTEST"
+                  title="Interoperability across Cashu and Fedimint"
+                >
+                  Pay between independent mints and federations through
+                  Lightning, and let EcashMesh pick the source that can really
+                  execute the payment.
+                </Heading>
+                <Button onPress={flow.edit}>Make a payment</Button>
+                <MeshStatus lab={lab} baseUrl={baseUrl} />
+                <GatewayBudgetExperiment lab={lab} />
+              </>
+            )}
+            {flow.screen === "home" && !sourcesOpen && !lab.enabled && (
               <>
                 <Heading eyebrow="ECASHMESH" title="One payment. More options.">
                   Compare fees across your Cashu mints and Fedimint federations.
@@ -424,17 +462,19 @@ function ReferenceWallet() {
                   amount={fundAmount}
                   setAmount={setFundAmount}
                 />
-                {interoperabilityLabEnabled && (
-                  <InteroperabilityLab baseUrl={baseUrl} />
-                )}
               </>
             )}
 
             {flow.screen === "payment" && (
               <>
-                <ScreenHeader title="Compare a payment" onBack={flow.back} />
+                <ScreenHeader
+                  title={lab.enabled ? "Make a payment" : "Compare a payment"}
+                  onBack={flow.back}
+                />
                 <Text style={styles.small}>
-                  Enter an amount and a fresh invoice. No payment will be sent.
+                  {lab.enabled
+                    ? "Choose an amount and who gets paid, then let EcashMesh rank the 8 sources. You confirm before anything is paid."
+                    : "Enter an amount and a fresh invoice. No payment will be sent."}
                 </Text>
                 <Text style={local.fieldLabel}>Amount</Text>
                 <View style={local.amountWrap}>
@@ -449,10 +489,38 @@ function ReferenceWallet() {
                   <Text style={local.satsSuffix}>sats</Text>
                 </View>
                 <Text style={local.fiatHint}>
-                  {amountValueHint(flow.amount, btcUsdRate)}
+                  {lab.enabled
+                    ? "Regtest sats: local test coins with no real value"
+                    : amountValueHint(flow.amount, btcUsdRate)}
                 </Text>
-                <Text style={local.fieldLabel}>Payment destination type</Text>
-                <View style={local.destinationTypes}>
+                {lab.enabled && (
+                  <InvoiceGenerator
+                    lab={lab}
+                    amount={flow.amount}
+                    onInvoice={(invoice, payee) => {
+                      flow.setDestinationType("lightning");
+                      flow.setDestination(invoice);
+                      // A source never pays its own invoice.
+                      const own = lab.profileIds[payee];
+                      flow.setSelectedSourceIds(
+                        own
+                          ? profiles
+                              .filter((p) => p.id !== own)
+                              .map((p) => p.id)
+                          : [],
+                      );
+                    }}
+                  />
+                )}
+                {!lab.enabled && (
+                  <Text style={local.fieldLabel}>Payment destination type</Text>
+                )}
+                <View
+                  style={[
+                    local.destinationTypes,
+                    lab.enabled && { display: "none" },
+                  ]}
+                >
                   <Choice
                     title="Lightning invoice"
                     copy="Paste a checksummed BOLT11 invoice"
@@ -479,7 +547,7 @@ function ReferenceWallet() {
                     Leave all selected, or choose specific sources below.
                   </Text>
                   <Disclosure title="Choose specific sources">
-                    {nostr.profiles
+                    {profiles
                       .filter(
                         (p) =>
                           p.enabled && p.authorization === "user_authorized",
@@ -502,13 +570,12 @@ function ReferenceWallet() {
                         </Button>
                       ))}
                   </Disclosure>
-                  {!nostr.profiles.some((p) => p.enabled) &&
-                    !regtest.custody && (
-                      <Text style={styles.small}>
-                        No enabled sources. Add sources from Home → Manage
-                        payment sources.
-                      </Text>
-                    )}
+                  {!profiles.some((p) => p.enabled) && !regtest.custody && (
+                    <Text style={styles.small}>
+                      No enabled sources. Add sources from Home → Manage payment
+                      sources.
+                    </Text>
+                  )}
                   {regtest.custody && (
                     <Text style={styles.small}>
                       Regtest custody uses the existing isolated regtest source
@@ -547,6 +614,7 @@ function ReferenceWallet() {
                     flexDirection: "row",
                     alignItems: "center",
                     gap: 12,
+                    display: lab.enabled ? "none" : "flex",
                   }}
                 >
                   <Switch
@@ -586,44 +654,60 @@ function ReferenceWallet() {
                 {flow.busy && (
                   <Loading
                     label={
-                      flow.comparisonOnly
-                        ? "Checking fees…"
-                        : "Checking payment options…"
+                      lab.enabled && (flow.decision || flow.error)
+                        ? "Paying on regtest…"
+                        : flow.comparisonOnly
+                          ? "Checking fees…"
+                          : "Checking payment options…"
                     }
                   />
                 )}
                 {flow.error && (
                   <>
                     <ErrorNotice error={flow.error} />
-                    <ExcludedSources
-                      values={flow.error.diagnostics?.excluded_sources ?? []}
-                    />
+                    <ExcludedSources values={errorExclusions} />
+                    {lab.enabled && (
+                      <ExcludedAttempts
+                        lab={lab}
+                        excluded={errorExclusions}
+                        busy={flow.busy}
+                        onTry={(source) => void flow.payInLab(source)}
+                      />
+                    )}
                     <Button onPress={() => void flow.evaluate()}>
                       Retry evaluation
                     </Button>
                   </>
                 )}
-                {flow.decision && (
+                {decision && (
                   <>
                     <DecisionView
-                      decision={flow.decision}
+                      decision={decision}
                       inspect={flow.inspect}
                       inspectOption={flow.inspectOption}
                       select={flow.select}
                     />
                     <Disclosure title="Connection details">
-                      <LiveObservations decision={flow.decision} />
+                      <LiveObservations decision={decision} />
                     </Disclosure>
                     <ExcludedSources
-                      values={(flow.decision.excluded_sources ?? []).filter(
+                      values={(decision.excluded_sources ?? []).filter(
                         (value: unknown) =>
-                          !flow.decision?.gateway_estimated_sources?.some(
+                          !decision.gateway_estimated_sources?.some(
                             (option) =>
                               option.source_id ===
                               (value as { source_id?: string }).source_id,
                           ),
                       )}
                     />
+                    {lab.enabled && (
+                      <ExcludedAttempts
+                        lab={lab}
+                        excluded={decision.excluded_sources ?? []}
+                        busy={flow.busy}
+                        onTry={(source) => void flow.payInLab(source)}
+                      />
+                    )}
                   </>
                 )}
                 {flow.comparison && (
@@ -655,7 +739,7 @@ function ReferenceWallet() {
                 </Button>
               </>
             )}
-            {flow.screen === "details" && flow.decision && flow.selected && (
+            {flow.screen === "details" && decision && flow.selected && (
               <>
                 <ScreenHeader title="Source Details" onBack={flow.back} />
                 <Heading
@@ -664,7 +748,7 @@ function ReferenceWallet() {
                 />
                 <RouteDetails
                   key={flow.selected.route_id}
-                  decision={flow.decision}
+                  decision={decision}
                   route={flow.selected}
                   select={flow.select}
                 />
@@ -676,9 +760,7 @@ function ReferenceWallet() {
               flow.selected && (
                 <>
                   <ScreenHeader
-                    title={
-                      regtest.enabled ? "Confirm payment" : "Review option"
-                    }
+                    title={realPayments ? "Confirm payment" : "Review option"}
                     onBack={flow.back}
                   />
 
@@ -736,11 +818,13 @@ function ReferenceWallet() {
                       )}
                     </>
                   )}
-                  {regtest.enabled && flow.busy ? (
-                    <Loading label="Preparing real regtest payment…" />
-                  ) : regtest.enabled ? (
+                  {realPayments && flow.busy ? (
+                    <Loading label="Paying on regtest…" />
+                  ) : realPayments ? (
                     <Button onPress={() => void flow.confirm()}>
-                      Confirm real regtest payment
+                      {lab.enabled
+                        ? "Pay for real on regtest"
+                        : "Confirm real regtest payment"}
                     </Button>
                   ) : (
                     <Text style={styles.small}>
@@ -755,6 +839,16 @@ function ReferenceWallet() {
                 </>
               )}
 
+            {flow.screen === "success" && flow.labReceipt && (
+              <>
+                <ScreenHeader title="Payment" onBack={flow.home} />
+                <LabReceipt receipt={flow.labReceipt} lab={lab} />
+                <Button onPress={flow.edit}>Make another payment</Button>
+                <Button secondary onPress={flow.home}>
+                  Back to home
+                </Button>
+              </>
+            )}
             {flow.screen === "success" && flow.receipt && (
               <>
                 <ScreenHeader title="Payment Complete" onBack={flow.home} />

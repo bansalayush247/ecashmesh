@@ -10,6 +10,7 @@ import type {
   EvidenceItem,
   EvidenceState,
   FedimintMetrics,
+  FeeBudget,
   LiquidityEvidence,
   Reason,
   PaymentSource,
@@ -244,6 +245,26 @@ function LiquidityDetails({
       <Row label="Confidence" value={evidence.confidence ?? "None"} />
       <Row label="Freshness" value={evidence.freshness} />
       <Row label="Amount" value={known(evidence.amount_sats, " sats")} />
+      {evidence.fee_budget && (
+        <>
+          <Row
+            label="Route fee"
+            value={`${evidence.fee_budget.probe_fee_bound === "lower_bound" ? "at least " : ""}${msat(evidence.fee_budget.probe_fee_msat)}`}
+          />
+          <Row
+            label={
+              evidence.fee_budget.budget_kind === "gateway_routing_fee_budget"
+                ? "Gateway routing-fee budget"
+                : "Mint fee reserve"
+            }
+            value={msat(evidence.fee_budget.fee_budget_msat)}
+          />
+          <Row
+            label="Can execute"
+            value={humanize(evidence.fee_budget.reason)}
+          />
+        </>
+      )}
       {probe && (
         <>
           <Row
@@ -619,6 +640,37 @@ function EvidenceInventory({ items }: { items: EvidenceItem[] }) {
   );
 }
 
+const msat = (value: number | null) =>
+  value === null ? "unknown" : `${value.toLocaleString("en-US")} msat`;
+
+/** Whether the measured Lightning route fee fits the routing-fee budget of
+ * the gateway or mint that pays it. Only shown when lab evidence exists. */
+export function FeeBudgetLine({ budget }: { budget?: FeeBudget | null }) {
+  if (!budget) return null;
+  const payer =
+    budget.budget_kind === "gateway_routing_fee_budget"
+      ? "gateway budget"
+      : "mint fee reserve";
+  const bound = budget.probe_fee_bound === "lower_bound" ? "≥ " : "";
+  const verdict =
+    budget.feasible === true
+      ? "✓ fits"
+      : budget.feasible === false
+        ? "✗ exceeds"
+        : "? unknown";
+  return (
+    <Text
+      style={[
+        styles.small,
+        budget.feasible === true && { color: colors.green },
+        budget.feasible === false && { color: colors.red },
+      ]}
+    >
+      {`Route fee ${bound}${msat(budget.probe_fee_msat)} · ${payer} ${msat(budget.fee_budget_msat)} · ${verdict}`}
+    </Text>
+  );
+}
+
 export function Risks({ flags }: { flags: string[] }) {
   if (flags.length === 0) return null;
   return (
@@ -721,7 +773,10 @@ function RouteCard({
             <Text selectable style={local.routeName}>
               {route.source_label ?? compactId(route.connector)}
             </Text>
-            <Text style={styles.small}>{sats(route.fee.amount)}</Text>
+            <Text style={styles.small}>
+              {`${sats(route.fee.amount)} · score ${route.score_basis_points}/10000`}
+            </Text>
+            <FeeBudgetLine budget={route.liquidity_evidence?.fee_budget} />
           </View>
         </View>
       </View>
@@ -774,8 +829,9 @@ export function DecisionView({
           </Text>
           <Text style={local.fee}>{sats(recommended.fee.amount)}</Text>
           <Text style={styles.small}>
-            {feeEstimateLabel(recommended.fee.estimate_kind)}
+            {`${feeEstimateLabel(recommended.fee.estimate_kind)} · score ${recommended.score_basis_points}/10000`}
           </Text>
+          <FeeBudgetLine budget={recommended.liquidity_evidence?.fee_budget} />
           <Button onPress={() => select(recommended)}>Review option</Button>
           <Button secondary onPress={() => inspect(recommended)}>
             Details

@@ -29,6 +29,7 @@ mod federation_setup;
 mod fee_budget;
 mod history;
 mod lab;
+mod lab_actions;
 mod live;
 mod payment;
 mod payment_mode;
@@ -41,6 +42,7 @@ struct AppState {
     payments: std::sync::Arc<payment::PaymentService>,
     setup: std::sync::Arc<federation_setup::SetupService>,
     lab_results: Option<lab::LabResults>,
+    lab_actions: Option<std::sync::Arc<lab_actions::LabActions>>,
 }
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:5000";
@@ -76,11 +78,15 @@ fn app(provider: Provider) -> Router {
     let setup = federation_setup::SetupService::new().expect("setup transport initialization");
     let lab_results = lab::LabResults::from_env()
         .unwrap_or_else(|error| panic!("invalid lab configuration: {error}"));
+    let lab_actions = lab_actions::LabActions::from_env(lab_results.is_some())
+        .unwrap_or_else(|error| panic!("invalid lab configuration: {error}"))
+        .map(std::sync::Arc::new);
     let state = AppState {
         provider,
         payments,
         setup,
         lab_results,
+        lab_actions,
     };
     // Expo's local browser preview; native clients do not use browser CORS.
     let origins = std::env::var("ECASHMESH_WEB_ORIGIN").map_or_else(
@@ -123,6 +129,14 @@ fn app(provider: Provider) -> Router {
         .route("/v1/payments/prepare", post(payment::prepare))
         .route("/v1/lab/results/latest", get(lab::latest))
         .route("/api/lab/results/latest", get(lab::latest))
+        .route("/v1/lab/sources", get(lab_actions::sources))
+        .route("/v1/lab/balances", get(lab_actions::balances))
+        .route("/v1/lab/invoice", post(lab_actions::invoice))
+        .route("/v1/lab/pay", post(lab_actions::pay))
+        .route(
+            "/v1/lab/gateway-fee",
+            get(lab_actions::gateway_fee).post(lab_actions::set_gateway_fee),
+        )
         .with_state(state)
         .layer(
             CorsLayer::new()

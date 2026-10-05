@@ -49,6 +49,33 @@ EXPO_PUBLIC_ENABLE_INTEROPERABILITY_LAB=true ./scripts/demo.sh web   # http://lo
 ./scripts/ecashmesh-lab-down.sh
 ```
 
+## Demo in the web app
+
+With the lab and services running, start the app with lab mode on:
+
+```sh
+EXPO_PUBLIC_ENABLE_INTEROPERABILITY_LAB=true ./scripts/demo.sh web   # http://localhost:8081
+```
+
+The regular screens then work on the lab: the 8 lab sources are the payment
+sources, invoices are generated in the payment form, and **Pay for real on
+regtest** makes a real payment. Steps:
+
+| Screen | What to do | What it shows |
+|---|---|---|
+| Home | — | The 8 sources with live balances; 56/56 verified routes |
+| Make a payment | Pick who gets paid (external node, a mint or a federation) → **Generate invoice** → **Check payment options** | The other sources ranked; each card's route fee vs. the payer's routing-fee budget |
+| Review option | **Pay for real on regtest** | Source balance down, destination balance up, destination credit verified |
+| Home → experiment | **Set the gateway fee to 0**, then pay a Cashu mint again | Fedimint A under **Not included** with the reason; **Try paying with Fedimint A** is refused (refunded) by its gateway |
+
+The app reaches the lab only through the API's lab endpoints
+(`/v1/lab/sources`, `/balances`, `/invoice`, `/pay`, `/gateway-fee`). They
+exist only when the API runs with `PAYMENT_ENVIRONMENT=regtest` and
+`ECASHMESH_LAB_MODE=true`, use each system's native client (as the 56-route
+executor does), and hold the lab executor lock.
+
+## Before you start
+
 Wait for `ecashmesh-lab-up.sh` to finish (it ends with `Verified sources: 8`)
 before anything else, and **restart the services after every bring-up**: they
 read the configuration of the lab that was running when they started. The
@@ -100,9 +127,12 @@ it fails.
 ```
 
 `score = base − penalties`; the six signal columns are explained in
-[architecture.md](architecture.md#ranking). On a fresh lab, reliability and
-history are low because few payments have been recorded yet; run
-`ecashmesh-lab-route-executor.py reliability --rounds 5` to record some.
+[architecture.md](architecture.md#ranking). On a fresh lab, reliability is 0
+(unknown) for every source: no payment has been recorded for this lab run
+yet. It rises as sources make real payments — from the web app (**Pay for
+real on regtest**) or with
+`ecashmesh-lab-route-executor.py reliability --rounds 5` (5 payments per
+source). Confidence grows with the count: 5+ payments Medium, 20+ High.
 
 ## Evidence the lab adds
 
@@ -114,7 +144,7 @@ Live mode has quotes only. The lab also measures:
 | **Relayed probe** | LDK gateways (B–D) have no probe API; their only peer is `lnd-2`, so `lnd-2` probes the rest of the route | Same, at Medium confidence |
 | **Routing-fee budget** | The paying node's limit on routing fees: an LNv2 gateway's send fee minus its minimum send fee (from its native routing info), a Cashu mint's melt fee reserve. Compared with the probed route fee, including the relay's own forwarding fee | Fee > budget → **excluded** (`INFEASIBLE_FEE_BUDGET`) before ranking |
 | **Solvency** | Read-only `admin audit` sent to every guardian; liabilities (ecash outstanding) vs assets (on-chain funds) | Agreed by a threshold → solvency signal; guardians disagree → `conflicting_evidence` penalty; Cashu solvency stays unknown |
-| **Reliability, history** | Outcomes of real payments made by the executor (`observations/<run_id>/payments.jsonl`), classified as liquidity, infrastructure or funding failures | Success rate (funding failures excluded); amount of history |
+| **Reliability, history** | Outcomes of real payments made from the web app or by the executor's `reliability` command (`observations/<run_id>/payments.jsonl`, one history per lab run), classified as liquidity, infrastructure or funding failures | Success rate (funding failures excluded); amount of history |
 | **Health** | Guardian consensus, gateway state and sync, mint endpoints | Caps reliability; never counts as liquidity |
 
 | Evidence | Fresh | Stale (signal halved + penalty) | Then |
@@ -186,5 +216,7 @@ liquidity, solvency or reliability value is ever fabricated.
 | `lab-up` stops at a stage | Read the last `LAB-DIAGNOSTIC` line; logs are in `.regtest/ecashmesh-lab/` |
 | `build first: nix develop -c cargo build …` | Build the bridge and API, then start the services again |
 | Fedimint sources missing from a ranking | A lab payment command was running; wait for it and re-run |
-| "the services belong to an earlier lab" | `./scripts/ecashmesh-lab-services.sh start` |
+| "start the services for this lab first" | `./scripts/ecashmesh-lab-services.sh start` |
+| The app shows the normal home screen, not the mesh | A web server started without the flag is still running: stop it, then start `demo.sh web` with `EXPO_PUBLIC_ENABLE_INTEROPERABILITY_LAB=true` |
+| "another lab payment is running" | A lab script or another payment holds the lab wallets; wait and retry |
 | `down` reports the supervisor did not exit | Re-run `ecashmesh-lab-down.sh` |

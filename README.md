@@ -109,13 +109,27 @@ Check the result:
 tail -1 .regtest/ecashmesh-lab/route-executor.log   # TOTAL: 56 SUCCEEDED: 56 FAILED: 0
 ```
 
-View the route matrix in the web app (needs the services below):
+Then demo it in the web app:
 
 ```sh
 nix develop -c cargo build -p ecashmesh-fedimint -p ecashmesh-api
 ./scripts/ecashmesh-lab-services.sh start            # restart after every lab-up
 EXPO_PUBLIC_ENABLE_INTEROPERABILITY_LAB=true ./scripts/demo.sh web   # http://localhost:8081
 ```
+
+1. **Home** shows the mesh: the 8 sources with live balances and the 56/56
+   result (expand **All 56 verified routes** for each route).
+2. **Make a payment** → under **Who gets paid?** pick a mint or federation
+   (e.g. Cashu B) → **Generate invoice** → **Check payment options**. The 7
+   other sources are ranked; each card shows its route fee against the
+   routing-fee budget of the gateway or mint that would pay it.
+3. **Review option** → **Pay for real on regtest**. The receipt shows the
+   source's balance going down and the destination's going up, with the
+   destination credit claimed and verified.
+4. Back on **Home**, **Set the gateway fee to 0** (Fedimint A), then pay
+   Cashu B again: Fedimint A is listed under **Not included** with the reason.
+   **Try paying with Fedimint A** shows its gateway refusing the route for
+   real. **Restore the gateway fee** afterwards.
 
 Stop everything:
 

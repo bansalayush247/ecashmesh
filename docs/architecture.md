@@ -102,3 +102,4 @@ used as a liability.
 | `POST /v1/routes/compare` | Fee-only comparison (live demo) |
 | `GET /v1/federations/setup`, `POST /v1/federations/setup/{identify,preview,connect}` | Join a federation explicitly from an invite |
 | `GET /v1/lab/results/latest` | Regtest lab only: the verified 56-route results |
+| `GET /v1/lab/sources`, `/v1/lab/balances`; `POST /v1/lab/invoice`, `/v1/lab/pay`; `GET`/`POST /v1/lab/gateway-fee` | Regtest lab only: lab sources and balances, invoices, real payments with each source's native client, the gateway-fee experiment |

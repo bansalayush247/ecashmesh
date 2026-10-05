@@ -593,7 +593,7 @@ pub(crate) struct LiquidityProbes {
 /// How long one relay probe answers the other gateways behind that relay.
 const RELAY_PROBE_SHARE_SECONDS: u64 = 5;
 
-fn loopback(url: &str, schemes: &[&str]) -> Result<String, String> {
+pub(crate) fn loopback(url: &str, schemes: &[&str]) -> Result<String, String> {
     let parsed = reqwest::Url::parse(url).map_err(|_| format!("invalid probe URL: {url}"))?;
     let host_ok = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
     if !host_ok || !schemes.contains(&parsed.scheme()) {
@@ -667,14 +667,14 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertificate {
 }
 
 /// Decodes the first PEM certificate.
-fn pem_certificate_der(pem: &str) -> Option<Vec<u8>> {
+pub(crate) fn pem_certificate_der(pem: &str) -> Option<Vec<u8>> {
     use rustls::pki_types::{CertificateDer, pem::PemObject};
     CertificateDer::from_pem_slice(pem.as_bytes())
         .ok()
         .map(|der| der.as_ref().to_vec())
 }
 
-fn http_client(pinned_der: Option<Vec<u8>>) -> Result<reqwest::Client, String> {
+pub(crate) fn http_client(pinned_der: Option<Vec<u8>>) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none());

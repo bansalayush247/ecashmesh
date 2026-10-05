@@ -227,6 +227,19 @@ const channelStateSchema = z
     effect: z.string(),
   })
   .passthrough();
+// Whether the measured route fee fits the routing-fee budget of the node that
+// pays it (gateway: send fee minus minimum send fee; Cashu: melt fee reserve).
+const feeBudgetSchema = z
+  .object({
+    budget_kind: z.string(),
+    probe_fee_msat: unsigned.nullable(),
+    probe_fee_bound: z.string().nullable(),
+    fee_budget_msat: unsigned.nullable(),
+    feasible: z.boolean().nullable(),
+    reason: z.string(),
+  })
+  .passthrough();
+export type FeeBudget = z.infer<typeof feeBudgetSchema>;
 const liquidityEvidenceSchema = z
   .object({
     basis: z.enum(["active_probe", "channel_state", "unknown"]),
@@ -238,6 +251,7 @@ const liquidityEvidenceSchema = z
     effect: z.string(),
     probe: probeSchema.nullable(),
     channel_state: channelStateSchema.nullable(),
+    fee_budget: feeBudgetSchema.nullable().optional(),
   })
   .passthrough();
 export type LiquidityEvidence = z.infer<typeof liquidityEvidenceSchema>;
