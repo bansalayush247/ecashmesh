@@ -387,8 +387,8 @@ mod tests {
     use super::*;
     use crate::evidence::{ConfidenceLevel, Evidence, EvidenceSource, EvidenceTimestamp};
     use crate::model::{
-        ConnectorCapabilities, ConnectorType, FeeQuote, LiquidityInfo, ReliabilityInfo,
-        RouteExplanation, RouteHop, RouteQuality,
+        ConnectorCapabilities, ConnectorType, FeeQuote, LiquidityInfo, ReliabilityInfo, RouteHop,
+        RouteQuality,
     };
     use crate::routing::{RouteRanking, RouteSignals};
 
@@ -437,7 +437,6 @@ mod tests {
             risk_penalty: 0,
             score,
             quality,
-            explanation: RouteExplanation::default(),
         }
     }
 

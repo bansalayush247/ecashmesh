@@ -232,10 +232,7 @@ fn sats_to_msats(sats: u64) -> anyhow::Result<u64> {
 
 fn load_regtest_clients() -> anyhow::Result<HashMap<FederationId, RegtestClient>> {
     if env::var("PAYMENT_ENVIRONMENT").ok().as_deref() != Some("regtest")
-        || env::var("ECASHMESH_ENABLE_INTEROPERABILITY_LAB")
-            .ok()
-            .as_deref()
-            != Some("true")
+        || env::var("ECASHMESH_LAB_MODE").ok().as_deref() != Some("true")
     {
         return Ok(HashMap::new());
     }

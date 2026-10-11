@@ -11,8 +11,7 @@ use crate::evidence::{
     EvidenceSource, EvidenceTimestamp, SolvencyStatus,
 };
 use crate::model::{
-    Amount, ConnectorId, FeeQuote, LiquidityInfo, ReliabilityInfo, RouteCandidate,
-    RouteExplanation, RouteQuality,
+    Amount, ConnectorId, FeeQuote, LiquidityInfo, ReliabilityInfo, RouteCandidate, RouteQuality,
 };
 use crate::risk::{EvidenceRiskPolicy, RiskFactor, evaluate_connector_evidence};
 
@@ -235,8 +234,6 @@ pub struct RankedRoute {
     pub score: u16,
     /// Stored route-level facts and risks.
     pub quality: RouteQuality,
-    /// Concise, deterministic explanation of this evaluation.
-    pub explanation: RouteExplanation,
 }
 
 /// A reason a candidate could not be scored for a payment.
@@ -397,16 +394,6 @@ fn evaluate_candidate(
         route_reliability(&candidate, evaluated_at),
         risks,
     );
-    let explanation = RouteExplanation::new(
-        format!("Deterministic route score: {score}/10000"),
-        vec![format!("Weighted evidence score: {base_score}/10000")],
-        quality
-            .risk_factors
-            .iter()
-            .map(|risk| format!("Risk: {}", risk.reason_code()))
-            .collect(),
-    );
-
     RankedRoute {
         candidate,
         signals,
@@ -414,7 +401,6 @@ fn evaluate_candidate(
         risk_penalty,
         score,
         quality,
-        explanation,
     }
 }
 

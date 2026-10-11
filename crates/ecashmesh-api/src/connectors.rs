@@ -253,105 +253,96 @@ impl Provider {
         }
     }
     pub fn from_env() -> Result<Self, String> {
-        let mode = std::env::var("ROUTING_MODE").unwrap_or_else(|_| "live".into());
-        match mode.as_str() {
-            "live" => {
-                let config = std::env::var("ECASHMESH_CASHU_MINTS").unwrap_or_else(|_| "[]".into());
-                let config: Vec<ConfigInput> =
-                    serde_json::from_str(&config).map_err(|error| error.to_string())?;
-                let ttl = std::env::var("ECASHMESH_CASHU_MAX_AGE_SECONDS")
-                    .unwrap_or_else(|_| "300".into())
-                    .parse::<u64>()
-                    .map_err(|error| error.to_string())?;
-                let seeds = config
-                    .into_iter()
-                    .map(|mint| MintHint {
-                        url: mint.url,
-                        alias: mint.id,
-                        source: DiscoverySource::Seed,
-                        observed_at: unix_now(),
-                        stale: false,
-                    })
-                    .collect();
-                let directories = env_urls("ECASHMESH_CASHU_DIRECTORIES")?;
-                let allowed = env_urls("ECASHMESH_CASHU_ALLOWED_MINTS")?;
-                let allow_discovered_sources =
-                    std::env::var("ECASHMESH_CASHU_ALLOW_DISCOVERED_SOURCES")
-                        .unwrap_or_else(|_| "false".into())
-                        .parse::<bool>()
-                        .map_err(
-                            |_| "ECASHMESH_CASHU_ALLOW_DISCOVERED_SOURCES must be true or false",
-                        )?;
-                let federations =
-                    std::env::var("ECASHMESH_FEDIMINT_FEDERATIONS").unwrap_or_else(|_| "[]".into());
-                let mut federations: Vec<FederationConfig> = serde_json::from_str(&federations)
-                    .map_err(|error| format!("ECASHMESH_FEDIMINT_FEDERATIONS: {error}"))?;
-                let bridge_connector = std::env::var("ECASHMESH_FEDIMINT_BRIDGE_URL")
-                    .ok()
-                    .map(|bridge_url| {
-                        let token_path = std::env::var("ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE")
-                            .map_err(|_| "ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE is required with ECASHMESH_FEDIMINT_BRIDGE_URL")?;
-                        let token = fs::read_to_string(token_path)
-                            .map_err(|_| "Cannot read ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE")?
-                            .trim()
-                            .to_owned();
-                        if token.is_empty() {
-                            return Err("ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE is empty".to_owned());
-                        }
-                        Ok::<FederationConfig, String>(FederationConfig {
-                            id: "fedimint:local-bridge".into(),
-                            label: "Local Fedimint bridge".into(),
-                            federation_id: "0".repeat(64),
-                            bridge_url,
-                            token: Some(token),
-                            quote_backend: QuoteBackend::LocalV0121Bridge,
-                        })
-                    })
-                    .transpose()?;
-                if let Some(bridge) = bridge_connector {
-                    federations.retain(|config| config.id != bridge.id);
-                    federations.push(bridge);
+        let config = std::env::var("ECASHMESH_CASHU_MINTS").unwrap_or_else(|_| "[]".into());
+        let config: Vec<ConfigInput> =
+            serde_json::from_str(&config).map_err(|error| error.to_string())?;
+        let ttl = std::env::var("ECASHMESH_CASHU_MAX_AGE_SECONDS")
+            .unwrap_or_else(|_| "300".into())
+            .parse::<u64>()
+            .map_err(|error| error.to_string())?;
+        let seeds = config
+            .into_iter()
+            .map(|mint| MintHint {
+                url: mint.url,
+                alias: mint.id,
+                source: DiscoverySource::Seed,
+                observed_at: unix_now(),
+                stale: false,
+            })
+            .collect();
+        let directories = env_urls("ECASHMESH_CASHU_DIRECTORIES")?;
+        let allowed = env_urls("ECASHMESH_CASHU_ALLOWED_MINTS")?;
+        let allow_discovered_sources = std::env::var("ECASHMESH_CASHU_ALLOW_DISCOVERED_SOURCES")
+            .unwrap_or_else(|_| "false".into())
+            .parse::<bool>()
+            .map_err(|_| "ECASHMESH_CASHU_ALLOW_DISCOVERED_SOURCES must be true or false")?;
+        let federations =
+            std::env::var("ECASHMESH_FEDIMINT_FEDERATIONS").unwrap_or_else(|_| "[]".into());
+        let mut federations: Vec<FederationConfig> = serde_json::from_str(&federations)
+            .map_err(|error| format!("ECASHMESH_FEDIMINT_FEDERATIONS: {error}"))?;
+        let bridge_connector = std::env::var("ECASHMESH_FEDIMINT_BRIDGE_URL")
+            .ok()
+            .map(|bridge_url| {
+                let token_path = std::env::var("ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE")
+                    .map_err(|_| "ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE is required with ECASHMESH_FEDIMINT_BRIDGE_URL")?;
+                let token = fs::read_to_string(token_path)
+                    .map_err(|_| "Cannot read ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE")?
+                    .trim()
+                    .to_owned();
+                if token.is_empty() {
+                    return Err("ECASHMESH_FEDIMINT_BRIDGE_TOKEN_FILE is empty".to_owned());
                 }
-                let request_timeout = std::env::var("ECASHMESH_FEDIMINT_REQUEST_TIMEOUT_SECONDS")
-                    .ok()
-                    .map(|value| value.parse::<u64>())
-                    .transpose()
-                    .map_err(|_| "ECASHMESH_FEDIMINT_REQUEST_TIMEOUT_SECONDS must be an integer")?
-                    .map_or(
-                        ecashmesh_fedimint::DEFAULT_BRIDGE_REQUEST_TIMEOUT,
-                        std::time::Duration::from_secs,
-                    );
-                let fedimint_ttl = std::env::var("ECASHMESH_FEDIMINT_MAX_AGE_SECONDS")
-                    .unwrap_or_else(|_| "300".into())
-                    .parse::<u64>()
-                    .map_err(|_| "ECASHMESH_FEDIMINT_MAX_AGE_SECONDS must be an integer")?;
-                Ok(Self {
-                    cashu: Arc::new(DiscoveryService::new(seeds, directories, allowed, ttl)?),
-                    fedimint: Arc::new(
-                        FedimintService::new(federations, fedimint_ttl)?
-                            .with_request_timeout(request_timeout)?
-                            .with_regtest_lab_loopback_gateways(
-                                std::env::var("PAYMENT_ENVIRONMENT").as_deref() == Ok("regtest")
-                                    && std::env::var("ECASHMESH_LAB_MODE").as_deref() == Ok("true"),
-                            )
-                            .with_catalog_host(
-                                std::env::var("ECASHMESH_FEDIMINT_SETUP_CONNECTOR")
-                                    .ok()
-                                    .or_else(|| {
-                                        std::env::var("ECASHMESH_FEDIMINT_BRIDGE_URL")
-                                            .ok()
-                                            .map(|_| "fedimint:local-bridge".into())
-                                    })
-                                    .as_deref(),
-                            )?,
-                    ),
-                    allow_discovered_sources,
-                    liquidity_probes: crate::probe::LiquidityProbes::from_env()?.map(Arc::new),
-                    lab_history: crate::history::LabHistory::from_env()?.map(Arc::new),
+                Ok::<FederationConfig, String>(FederationConfig {
+                    id: "fedimint:local-bridge".into(),
+                    label: "Local Fedimint bridge".into(),
+                    federation_id: "0".repeat(64),
+                    bridge_url,
+                    token: Some(token),
+                    quote_backend: QuoteBackend::LocalV0121Bridge,
                 })
-            }
-            other => Err(format!("Unsupported ROUTING_MODE: {other}")),
+            })
+            .transpose()?;
+        if let Some(bridge) = bridge_connector {
+            federations.retain(|config| config.id != bridge.id);
+            federations.push(bridge);
         }
+        let request_timeout = std::env::var("ECASHMESH_FEDIMINT_REQUEST_TIMEOUT_SECONDS")
+            .ok()
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .map_err(|_| "ECASHMESH_FEDIMINT_REQUEST_TIMEOUT_SECONDS must be an integer")?
+            .map_or(
+                ecashmesh_fedimint::DEFAULT_BRIDGE_REQUEST_TIMEOUT,
+                std::time::Duration::from_secs,
+            );
+        let fedimint_ttl = std::env::var("ECASHMESH_FEDIMINT_MAX_AGE_SECONDS")
+            .unwrap_or_else(|_| "300".into())
+            .parse::<u64>()
+            .map_err(|_| "ECASHMESH_FEDIMINT_MAX_AGE_SECONDS must be an integer")?;
+        Ok(Self {
+            cashu: Arc::new(DiscoveryService::new(seeds, directories, allowed, ttl)?),
+            fedimint: Arc::new(
+                FedimintService::new(federations, fedimint_ttl)?
+                    .with_request_timeout(request_timeout)?
+                    .with_regtest_lab_loopback_gateways(
+                        std::env::var("PAYMENT_ENVIRONMENT").as_deref() == Ok("regtest")
+                            && std::env::var("ECASHMESH_LAB_MODE").as_deref() == Ok("true"),
+                    )
+                    .with_catalog_host(
+                        std::env::var("ECASHMESH_FEDIMINT_SETUP_CONNECTOR")
+                            .ok()
+                            .or_else(|| {
+                                std::env::var("ECASHMESH_FEDIMINT_BRIDGE_URL")
+                                    .ok()
+                                    .map(|_| "fedimint:local-bridge".into())
+                            })
+                            .as_deref(),
+                    )?,
+            ),
+            allow_discovered_sources,
+            liquidity_probes: crate::probe::LiquidityProbes::from_env()?.map(Arc::new),
+            lab_history: crate::history::LabHistory::from_env()?.map(Arc::new),
+        })
     }
 
     #[must_use]

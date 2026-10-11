@@ -221,12 +221,6 @@ impl ConnectorCapabilities {
             supports_lightning,
         }
     }
-
-    /// Returns whether the connector can participate as a forwarding hop.
-    #[must_use]
-    pub const fn can_forward(self) -> bool {
-        self.can_send && self.can_receive
-    }
 }
 
 /// A connector's reported liquidity for a route amount.
@@ -408,60 +402,6 @@ impl RouteQuality {
     }
 }
 
-/// Human-readable context supplied with a route decision.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RouteExplanation {
-    /// A short, user-facing account of the route.
-    pub summary: String,
-    /// Factual observations that support using the route.
-    pub supporting_evidence: Vec<String>,
-    /// Factual caveats that should be shown to the caller.
-    pub caveats: Vec<String>,
-}
-
-impl RouteExplanation {
-    /// Creates an explanation without implying any scoring semantics.
-    #[must_use]
-    pub fn new(
-        summary: impl Into<String>,
-        supporting_evidence: Vec<String>,
-        caveats: Vec<String>,
-    ) -> Self {
-        Self {
-            summary: summary.into(),
-            supporting_evidence,
-            caveats,
-        }
-    }
-}
-
-/// A route selected by a caller or a future routing layer.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Route {
-    /// The discovered candidate that was selected.
-    pub candidate: RouteCandidate,
-    /// Route-level facts available at selection time.
-    pub quality: RouteQuality,
-    /// User-facing context for the selection.
-    pub explanation: RouteExplanation,
-}
-
-impl Route {
-    /// Combines an already-selected candidate with its facts and explanation.
-    #[must_use]
-    pub fn new(
-        candidate: RouteCandidate,
-        quality: RouteQuality,
-        explanation: RouteExplanation,
-    ) -> Self {
-        Self {
-            candidate,
-            quality,
-            explanation,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,12 +461,6 @@ mod tests {
         assert_eq!(ConnectorType::Cashu.to_string(), "Cashu");
         assert_eq!(ConnectorType::Fedimint.to_string(), "Fedimint");
         assert_eq!(ConnectorType::Lightning.to_string(), "Lightning");
-    }
-
-    #[test]
-    fn capabilities_distinguish_forwarding_from_partial_support() {
-        assert!(!ConnectorCapabilities::new(true, false, true, false).can_forward());
-        assert!(ConnectorCapabilities::new(true, true, false, false).can_forward());
     }
 
     #[test]
@@ -591,32 +525,5 @@ mod tests {
         assert_eq!(candidate.hop_count(), 2);
         assert_eq!(candidate.hops[0].connector_type, ConnectorType::Cashu);
         assert_eq!(candidate.hops[1].connector_type, ConnectorType::Lightning);
-    }
-
-    #[test]
-    fn a_route_keeps_quality_risks_and_explanation_separate() {
-        let candidate =
-            RouteCandidate::new(Amount::from(5_000), vec![hop(ConnectorType::Fedimint)])
-                .expect("route has a hop");
-        let quality = RouteQuality::new(
-            Evidence::stale(LiquidityInfo::new(Amount::from(8_000), None), OBSERVED_AT),
-            Evidence::known(FeeQuote::new(Amount::from(10)), OBSERVED_AT),
-            Evidence::unknown(),
-            vec![RiskFactor::StaleLiquidity, RiskFactor::UnknownReliability],
-        );
-        let explanation = RouteExplanation::new(
-            "Uses a Fedimint connector",
-            vec!["Quoted fee is current".into()],
-            vec!["Liquidity is stale".into()],
-        );
-        let route = Route::new(candidate.clone(), quality.clone(), explanation.clone());
-
-        assert_eq!(route.candidate, candidate);
-        assert_eq!(route.quality, quality);
-        assert_eq!(route.explanation, explanation);
-        assert_eq!(
-            route.quality.risk_factors,
-            vec![RiskFactor::StaleLiquidity, RiskFactor::UnknownReliability]
-        );
     }
 }

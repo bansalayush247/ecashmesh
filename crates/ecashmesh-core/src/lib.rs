@@ -16,8 +16,8 @@ pub mod routing;
 
 pub use connector::ConnectorSnapshot;
 pub use evidence::{
-    ConfidenceLevel, ConnectorEvidence, ConnectorHealth, Evidence, EvidenceAggregate,
-    EvidenceFreshness, EvidenceObservation, EvidenceSource, EvidenceTimestamp, SolvencyStatus,
+    ConfidenceLevel, ConnectorEvidence, ConnectorHealth, Evidence, EvidenceFreshness,
+    EvidenceObservation, EvidenceSource, EvidenceTimestamp, SolvencyStatus,
 };
 pub use explain::{
     AlternativeExplanation, DecisionReason, DecisionReasonCode, ExplainedRoute,
@@ -26,8 +26,8 @@ pub use explain::{
 pub use intent::{LightningInvoice, LightningInvoiceError};
 pub use model::{
     Amount, AmountError, ConnectorCapabilities, ConnectorId, ConnectorIdError, ConnectorType,
-    FeeQuote, LiquidityInfo, ReliabilityInfo, Route, RouteCandidate, RouteCandidateError,
-    RouteExplanation, RouteHop, RouteQuality,
+    FeeQuote, LiquidityInfo, ReliabilityInfo, RouteCandidate, RouteCandidateError, RouteHop,
+    RouteQuality,
 };
 pub use risk::{EvidenceField, EvidenceRiskPolicy, RiskFactor, evaluate_connector_evidence};
 pub use routing::{
