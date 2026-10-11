@@ -7,7 +7,7 @@ import {
 import {
   addFederationProfile,
   pendingFederationProfile,
-} from "../src/nostr/sourceRegistry";
+} from "@ecashmesh/client";
 
 const id = "22".repeat(32);
 const local = {

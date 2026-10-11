@@ -14,8 +14,8 @@ import {
   View,
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { createEcashMeshClient } from "./src/ecashmesh/client";
-import type { RouteDecision } from "./src/ecashmesh/contracts";
+import { createEcashMeshClient } from "@ecashmesh/client";
+import type { RouteDecision } from "@ecashmesh/client";
 import { usePaymentFlow } from "./src/host/usePaymentFlow";
 import { useNostrSourceRegistry } from "./src/host/useNostrSourceRegistry";
 import {

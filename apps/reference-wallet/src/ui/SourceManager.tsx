@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Modal, ScrollView, Text, TextInput, View } from "react-native";
 import { npubEncode } from "nostr-tools/nip19";
 import type { useNostrSourceRegistry } from "../host/useNostrSourceRegistry";
-import type { PaymentSourceProfile } from "../nostr/sourceRegistry";
+import type { PaymentSourceProfile } from "@ecashmesh/client";
 import {
   Button,
   Section,

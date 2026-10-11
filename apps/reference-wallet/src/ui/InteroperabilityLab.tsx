@@ -93,8 +93,12 @@ export function InteroperabilityLab({ baseUrl }: { baseUrl: string }) {
     const routes = result?.routes ?? [];
     const recorded = result?.summary;
     return {
-      pass: recorded?.succeeded ?? routes.filter((route) => route.status === "PASS").length,
-      fail: recorded?.failed ?? routes.filter((route) => route.status === "FAIL").length,
+      pass:
+        recorded?.succeeded ??
+        routes.filter((route) => route.status === "PASS").length,
+      fail:
+        recorded?.failed ??
+        routes.filter((route) => route.status === "FAIL").length,
       notRun: routes.filter((route) => route.status === "NOT_RUN").length,
     };
   }, [result]);

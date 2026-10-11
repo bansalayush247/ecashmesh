@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import type { EcashMeshClient } from "../ecashmesh/client";
+import type { EcashMeshClient } from "@ecashmesh/client";
 import type {
   PaymentInput,
   PaymentSource,
   RouteDecision,
   RouteComparison,
   ComparisonOption,
-} from "../ecashmesh/contracts";
-import { EcashMeshError } from "../ecashmesh/transport";
+} from "@ecashmesh/client";
+import { EcashMeshError } from "@ecashmesh/client";
 import { collectPayment } from "./payment";
-import type { PaymentSourceProfile } from "../nostr/sourceRegistry";
+import type { PaymentSourceProfile } from "@ecashmesh/client";
 import type { LabPayment } from "./useRegtestLab";
 
 type FlowOptions = {

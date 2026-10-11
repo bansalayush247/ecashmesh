@@ -3,7 +3,7 @@ import {
   addFederationProfile,
   isPendingFederationProfile,
   type PaymentSourceProfile,
-} from "../nostr/sourceRegistry";
+} from "@ecashmesh/client";
 
 const federationId = z.string().regex(/^[0-9a-f]{64}$/);
 const connection = z.object({

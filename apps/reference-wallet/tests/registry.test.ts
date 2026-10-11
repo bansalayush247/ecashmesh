@@ -14,21 +14,21 @@ import {
   serializeRegistry,
   signRegistry,
   type RegistrySigner,
-} from "../src/nostr/registrySync";
-import { parseAnnouncements } from "../src/nostr/discovery";
+} from "@ecashmesh/client";
+import { parseAnnouncements } from "@ecashmesh/client";
 import {
   manualCashuProfile,
   addFederationProfile,
   mergeProfiles,
   pendingFederationProfile,
   type PaymentSourceProfile,
-} from "../src/nostr/sourceRegistry";
-import { parseNip60WalletMetadata } from "../src/nostr/nip60";
+} from "@ecashmesh/client";
+import { parseNip60WalletMetadata } from "@ecashmesh/client";
 import { collectPayment } from "../src/host/payment";
-import { paymentToWire } from "../src/ecashmesh/contracts";
-import { createEcashMeshClient } from "../src/ecashmesh/client";
-import { EcashMeshError } from "../src/ecashmesh/transport";
-import { readEvents } from "../src/nostr/client";
+import { paymentToWire } from "@ecashmesh/client";
+import { createEcashMeshClient } from "@ecashmesh/client";
+import { EcashMeshError } from "@ecashmesh/client";
+import { readEvents } from "@ecashmesh/client";
 
 test("metadata network boundary refuses proof subscriptions before connecting", async () => {
   await assert.rejects(

@@ -1,5 +1,5 @@
 import { Text, View } from "react-native";
-import type { RouteComparison } from "../ecashmesh/contracts";
+import type { RouteComparison } from "@ecashmesh/client";
 import {
   Disclosure,
   Section,

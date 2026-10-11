@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { RouteDecision } from "../ecashmesh/contracts";
+import type { RouteDecision } from "@ecashmesh/client";
 import {
   manualCashuProfile,
   type PaymentSourceProfile,
-} from "../nostr/sourceRegistry";
+} from "@ecashmesh/client";
 
 /**
  * The regtest interoperability lab, through the API's lab-only endpoints

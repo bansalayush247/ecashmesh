@@ -1,11 +1,11 @@
-import type { PaymentInput } from "../ecashmesh/contracts";
-import { EcashMeshError } from "../ecashmesh/transport";
+import type { PaymentInput } from "@ecashmesh/client";
+import { EcashMeshError } from "@ecashmesh/client";
 import {
   enabledCashuMintUrls,
   enabledFederationConnectorIds,
   isPendingFederationProfile,
   type PaymentSourceProfile,
-} from "../nostr/sourceRegistry";
+} from "@ecashmesh/client";
 
 export function collectPayment(
   amountText: string,

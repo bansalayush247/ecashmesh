@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createEcashMeshClient } from "../src/ecashmesh/client";
-import { EcashMeshError } from "../src/ecashmesh/transport";
+import { createEcashMeshClient } from "@ecashmesh/client";
+import { EcashMeshError } from "@ecashmesh/client";
 import { collectPayment } from "../src/host/payment";
 import { feeRate, feeReasonableness } from "../src/ui/fees";
 
