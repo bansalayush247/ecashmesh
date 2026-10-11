@@ -284,6 +284,7 @@ const reliabilityEvidenceSchema = z
 export type ReliabilityEvidence = z.infer<typeof reliabilityEvidenceSchema>;
 const cashuMetricsSchema = z
   .object({
+    mint_url: z.string(),
     mint_health: z.string().nullable(),
     endpoints_reachable: z.boolean().nullable(),
     quote_available: z.boolean(),
@@ -300,6 +301,9 @@ const cashuMetricsSchema = z
       .nullable(),
     solvency_status: z.string(),
     solvency_limitation: z.string(),
+    /** Present when the wallet reported its balance at this mint. */
+    wallet_balance_sats: unsigned.nullable().optional(),
+    funding_feasible: z.boolean().nullable().optional(),
   })
   .passthrough();
 export type CashuMetrics = z.infer<typeof cashuMetricsSchema>;
@@ -510,6 +514,12 @@ export type PaymentInput = {
   sourceConnector?: string;
   sourceMintUrl?: string;
   walletMintUrls?: string[];
+  /**
+   * Spendable sats at each of the wallet's mints, by mint URL. EcashMesh then
+   * excludes a mint whose balance cannot cover the amount plus its fee
+   * reserve, instead of the wallet filtering mints itself.
+   */
+  walletMintBalances?: Record<string, number>;
   /** Existing local API Fedimint connector IDs selected by the user. */
   federationConnectorIds?: string[];
   federationIdentities?: Record<string, string>;
@@ -531,6 +541,10 @@ export function paymentToWire(payment: PaymentInput) {
       : {}),
     ...(payment.walletMintUrls?.length
       ? { wallet_mint_urls: payment.walletMintUrls }
+      : {}),
+    ...(payment.walletMintBalances &&
+    Object.keys(payment.walletMintBalances).length
+      ? { wallet_mint_balances: { ...payment.walletMintBalances } }
       : {}),
     ...(payment.federationConnectorIds !== undefined
       ? { federation_connector_ids: payment.federationConnectorIds }
