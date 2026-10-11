@@ -36,6 +36,22 @@ export type LabPayment = LabBalanceChange & {
   destination?: LabBalanceChange & { claimed: boolean; error: string | null };
 };
 
+/** One mint's share of a split payment, as executed. */
+export type LabSplitPart = LabBalanceChange & {
+  amount_sats: number;
+  outcome: "succeeded" | "failed";
+  error?: string;
+};
+
+/** A split payment: every part settles, or none does. */
+export type LabSplitPayment = {
+  outcome: "succeeded" | "failed";
+  amount_sats: number;
+  latency_ms: number;
+  parts: LabSplitPart[];
+  destination?: LabBalanceChange & { claimed: boolean; error: string | null };
+};
+
 export type GatewayFee = {
   source: string;
   lightning_fee_base_msat: number | null;
@@ -192,6 +208,44 @@ export function useRegtestLab(enabled: boolean, baseUrl: string) {
     [baseUrl, refreshBalances],
   );
 
+  const paySplit = useCallback(
+    async (
+      invoice: string,
+      parts: Array<{ source: string; amount_sats: number }>,
+    ) => {
+      const result = await request<LabSplitPayment>(
+        `${baseUrl}/v1/lab/pay-split`,
+        { invoice, parts },
+      );
+      void refreshBalances();
+      return result;
+    },
+    [baseUrl, refreshBalances],
+  );
+
+  /** Lab source behind a mint URL (the SDK reports parts by mint URL). */
+  const sourceForMint = useCallback(
+    (mintUrl: string) => {
+      const bare = (url: string) => url.replace(/\/+$/, "");
+      return sources.find(
+        (source) =>
+          source.kind === "cashu" && bare(source.endpoint) === bare(mintUrl),
+      );
+    },
+    [sources],
+  );
+
+  /** Spendable sats per Cashu mint URL, as a split plan needs them. */
+  const cashuBalances = useMemo(
+    () =>
+      Object.fromEntries(
+        sources
+          .filter((source) => source.kind === "cashu")
+          .map((source) => [source.endpoint, balances[source.id] ?? 0]),
+      ),
+    [sources, balances],
+  );
+
   const setGatewayFee = useCallback(
     async (mode: "zero" | "restore") => {
       if (!experimentSource) return;
@@ -260,6 +314,9 @@ export function useRegtestLab(enabled: boolean, baseUrl: string) {
     refreshBalances,
     createInvoice,
     pay,
+    paySplit,
+    sourceForMint,
+    cashuBalances,
     setGatewayFee,
     label,
     relabel,

@@ -48,6 +48,8 @@ import {
   InvoiceGenerator,
   LabReceipt,
   MeshStatus,
+  MoveFunds,
+  SplitPayment,
 } from "./src/ui/RegtestLab";
 
 const baseUrl =
@@ -429,6 +431,7 @@ function ReferenceWallet() {
                 </Heading>
                 <Button onPress={flow.edit}>Make a payment</Button>
                 <MeshStatus lab={lab} baseUrl={baseUrl} />
+                <MoveFunds lab={lab} client={ecashmesh} />
                 <GatewayBudgetExperiment lab={lab} />
               </>
             )}
@@ -651,6 +654,15 @@ function ReferenceWallet() {
                         onTry={(source) => void flow.payInLab(source)}
                       />
                     )}
+                    {lab.enabled &&
+                      flow.payment?.destination.type === "lightning" && (
+                        <SplitPayment
+                          lab={lab}
+                          client={ecashmesh}
+                          amount={flow.payment.amount}
+                          invoice={flow.payment.destination.value}
+                        />
+                      )}
                     <Button onPress={() => void flow.evaluate()}>
                       Retry evaluation
                     </Button>
@@ -685,6 +697,15 @@ function ReferenceWallet() {
                         onTry={(source) => void flow.payInLab(source)}
                       />
                     )}
+                    {lab.enabled &&
+                      flow.payment?.destination.type === "lightning" && (
+                        <SplitPayment
+                          lab={lab}
+                          client={ecashmesh}
+                          amount={flow.payment.amount}
+                          invoice={flow.payment.destination.value}
+                        />
+                      )}
                   </>
                 )}
                 {flow.comparison && (
