@@ -59,6 +59,7 @@ fedimint-mint-client = { git = "https://github.com/fedimint/fedimint.git", tag =
 fedimint-rocksdb = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
 fedimint-wallet-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
 futures = "0.3"
+lightning-invoice = "0.33"
 hex = { version = "0.4", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rand = { version = "0.8", optional = true }
@@ -68,3 +69,7 @@ sha2 = "0.10"
 # Not used directly: enables socket2 "all", which the Fedimint stack's netwatch needs.
 socket2 = { version = "0.5.10", features = ["all"], optional = true }
 tokio = { version = "1", features = ["macros", "process", "time"] }
+
+[dev-dependencies]
+bitcoin = "0.32"
+tokio = { version = "1", features = ["macros", "rt"] }

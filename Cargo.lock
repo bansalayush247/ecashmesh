@@ -1610,6 +1610,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bitcoin",
  "ecashmesh-core",
  "fedimint-api-client",
  "fedimint-bip39",
@@ -1626,6 +1627,7 @@ dependencies = [
  "fedimint-wallet-client",
  "futures",
  "hex",
+ "lightning-invoice",
  "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",

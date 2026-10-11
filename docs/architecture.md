@@ -18,9 +18,18 @@ its native protocol.
 | `apps/reference-wallet` | Source list, payment form, results and explanations |
 | `ecashmesh-core` | Evidence model, deterministic ranking, risk penalties, explanations |
 | `ecashmesh-cashu` | Cashu mint discovery, metadata (NUT-06), keysets, melt/mint quotes |
-| `ecashmesh-fedimint` | `fedimint-bridge`: one process hosting native Fedimint v0.12.1 clients; fee quotes, gateway info, guardian audits |
+| `ecashmesh-fedimint` | Fedimint evidence from either `fedimint-bridge` (one process hosting native Fedimint v0.12.1 clients; fee quotes, gateway info, guardian audits) or the wallet's own Fedimint client through the `WalletClient` trait |
 
 The bridge has no payment endpoint. The browser never receives a credential.
+
+A wallet that already runs Fedimint clients needs no bridge: it implements
+`WalletClient` (balance and network, the `LNv2` gateways' send fees for an
+invoice, and the federation's non-committing `send_fee_quote`), registers its
+federations with `FederationConfig::wallet_client` and passes the client to
+`FedimintService::with_wallet_client`. The adapter picks the gateway, does the
+fee and funding arithmetic and validates the result exactly as it validates a
+bridge quote. Guardian audits and the gateway registry list stay
+bridge-only.
 
 ## Request flow (`POST /v1/routes/evaluate`)
 

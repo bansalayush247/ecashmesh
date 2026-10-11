@@ -288,7 +288,9 @@ Design decisions and trade-offs: [docs/design.md](docs/design.md).
   (`cargo run -p ecashmesh-ffi --bin uniffi-bindgen -- generate --library <lib> --language swift|kotlin`;
   React Native through `uniffi-bindgen-react-native`). `EcashMeshClient.evaluate(requestJson)`
   returns the decision JSON.
-- **Rust:** depend on `ecashmesh-sdk` directly.
+- **Rust:** depend on `ecashmesh-sdk` directly. A wallet with its own
+  Fedimint clients implements `ecashmesh_fedimint::WalletClient` instead of
+  running `fedimint-bridge`.
 - **Web, against a hosted server:** `@ecashmesh/client`.
 
 Requests and results use one JSON contract everywhere: the

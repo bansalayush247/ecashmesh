@@ -93,6 +93,12 @@ struct GatewayEstimateEvidence {
     expires_at_unix_seconds: u64,
 }
 
+/// The bridge's pinned Fedimint, or evidence the adapter built itself from
+/// a wallet's own client.
+fn known_version(version: &str) -> bool {
+    version == "0.12.1" || version == crate::wallet::WALLET_EVIDENCE_VERSION
+}
+
 fn ceil_sats(msat: u64) -> Amount {
     Amount::from_sats(msat.div_ceil(1000))
 }
@@ -106,7 +112,7 @@ pub(super) fn parse(
 ) -> Result<FedimintQuote, String> {
     let q: QuoteEvidence = serde_json::from_value(value.clone())
         .map_err(|_| "Incomplete read-only Fedimint evidence")?;
-    if q.schema != "ecashmesh-fedimint-quote-v2" || q.fedimint_version != "0.12.1" {
+    if q.schema != "ecashmesh-fedimint-quote-v2" || !known_version(&q.fedimint_version) {
         return Err("Unsupported Fedimint quote bridge version".into());
     }
     if q.federation_id != federation
@@ -256,7 +262,7 @@ pub(super) fn parse_gateway_estimate(
 ) -> Result<FedimintGatewayEstimate, String> {
     let q: GatewayEstimateEvidence = serde_json::from_value(value.clone())
         .map_err(|_| "Incomplete Fedimint gateway estimate evidence")?;
-    if q.schema != "ecashmesh-fedimint-gateway-estimate-v1" || q.fedimint_version != "0.12.1" {
+    if q.schema != "ecashmesh-fedimint-gateway-estimate-v1" || !known_version(&q.fedimint_version) {
         return Err("Unsupported Fedimint gateway estimate bridge version".into());
     }
     if q.federation_id != federation

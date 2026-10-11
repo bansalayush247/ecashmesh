@@ -11,3 +11,6 @@ test-results/
 dist/
 *.log
 /.regtest
+
+# Third-party wallet checkouts for the integration demos (patches live in demos/)
+demos/*/

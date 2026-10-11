@@ -5,6 +5,9 @@
 //! the local Fedimint v0.12.1 bridge.
 
 mod bridge;
+mod wallet;
+
+pub use wallet::{WalletClient, WalletGateway, WalletState};
 
 use std::{
     sync::{Arc, RwLock},
@@ -34,6 +37,9 @@ pub enum QuoteBackend {
     Disabled,
     /// Local, authenticated, loopback-only bridge backed by Fedimint 0.12.1.
     LocalV0121Bridge,
+    /// The wallet's own Fedimint client, through
+    /// [`FedimintService::with_wallet_client`]; `bridge_url` is unused.
+    WalletClient,
 }
 
 /// One independently configured Fedimint federation source.
@@ -70,8 +76,25 @@ impl FederationConfig {
         if self.label.trim().is_empty() || self.federation_id.trim().is_empty() {
             return Err("Fedimint label and federation_id must not be empty".into());
         }
-        validate_url(&self.bridge_url, "bridge_url")?;
+        if self.quote_backend != QuoteBackend::WalletClient {
+            validate_url(&self.bridge_url, "bridge_url")?;
+        }
         Ok(())
+    }
+
+    /// A federation the wallet's own client has joined, observed and quoted
+    /// through [`FedimintService::with_wallet_client`].
+    #[must_use]
+    pub fn wallet_client(federation_id: &str, label: &str) -> Self {
+        let federation_id = federation_id.to_lowercase();
+        Self {
+            id: format!("fedimint:{federation_id}"),
+            label: label.to_owned(),
+            federation_id,
+            bridge_url: String::new(),
+            token: None,
+            quote_backend: QuoteBackend::WalletClient,
+        }
     }
 }
 
@@ -340,6 +363,8 @@ pub struct FedimintService {
     /// Accept loopback HTTP gateways in regtest estimates (gated lab only).
     lab_loopback_gateways: bool,
     request_timeout: Duration,
+    /// The wallet's own Fedimint client, for `WalletClient` federations.
+    wallet: Option<Arc<dyn WalletClient>>,
 }
 
 /// Default deadline for one bridge request.
@@ -353,6 +378,17 @@ fn bridge_client(timeout: Duration) -> Result<Client, String> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| error.to_string())
+}
+
+/// What one transport observed about a federation.
+struct Observed {
+    health: Evidence<ConnectorHealth>,
+    gateways: Evidence<Vec<GatewayObservation>>,
+    balance_sats: Evidence<Amount>,
+    network: Evidence<String>,
+    balance_source: Option<String>,
+    reserve: FedimintReserveMetrics,
+    federation_config: Option<Value>,
 }
 
 impl FedimintService {
@@ -377,7 +413,22 @@ impl FedimintService {
             lab_loopback_gateways: false,
             request_timeout: DEFAULT_BRIDGE_REQUEST_TIMEOUT,
             max_age_seconds,
+            wallet: None,
         })
+    }
+
+    /// Observes and quotes `WalletClient` federations through the wallet's own
+    /// Fedimint client instead of a bridge.
+    #[must_use]
+    pub fn with_wallet_client(mut self, client: Arc<dyn WalletClient>) -> Self {
+        self.wallet = Some(client);
+        self
+    }
+
+    fn wallet(&self) -> Result<&dyn WalletClient, String> {
+        self.wallet
+            .as_deref()
+            .ok_or_else(|| "No wallet Fedimint client is configured".to_owned())
     }
 
     #[must_use]
@@ -542,83 +593,19 @@ impl FedimintService {
     async fn observe(&self, config: FederationConfig, now: u64) -> FederationObservation {
         let timestamp = EvidenceTimestamp::from_unix_seconds(now);
         let mut issues = Vec::new();
-        let health_url = join_url(&config.bridge_url, "/health");
-        let (health_response, gateway_response, info) = tokio::join!(
-            self.client.get(health_url).send(),
-            self.post_bridge(
-                &config,
-                "/v2/ln/list-gateways",
-                json!({"federationId": config.federation_id}),
-            ),
-            self.get_bridge(&config, "/v2/admin/info"),
-        );
-        let health = match health_response {
-            Ok(response) if response.status().is_success() => Evidence::reported(
-                ConnectorHealth::Healthy,
-                EvidenceSource::Observer,
-                timestamp,
-                ConfidenceLevel::Low,
-            ),
-            Ok(response) => {
-                issues.push(format!("bridge health returned {}", response.status()));
-                Evidence::reported(
-                    ConnectorHealth::Unavailable,
-                    EvidenceSource::Observer,
-                    timestamp,
-                    ConfidenceLevel::Low,
-                )
-            }
-            Err(error) => {
-                issues.push(format!("bridge health failed: {}", error.without_url()));
-                Evidence::reported(
-                    ConnectorHealth::Unavailable,
-                    EvidenceSource::Observer,
-                    timestamp,
-                    ConfidenceLevel::Low,
-                )
-            }
-        };
-        let gateways = match gateway_response {
-            Ok(value) => Evidence::reported(
-                parse_gateways(&value),
-                EvidenceSource::Connector,
-                timestamp,
-                ConfidenceLevel::Medium,
-            ),
-            Err(error) => {
-                issues.push(format!("gateway cache unavailable: {error}"));
-                Evidence::Unknown
-            }
-        };
-        let (balance_sats, network, balance_source, reserve, federation_config) = match info {
-            Ok(value) => {
-                let entry = value.get(&config.federation_id).unwrap_or(&value);
-                let (balance, network) =
-                    parse_wallet_info(&value, &config.federation_id, timestamp);
-                (
-                    balance,
-                    network,
-                    entry
-                        .get("balance_source")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned),
-                    entry
-                        .get("reserve")
-                        .map(|reserve| parse_reserve(reserve, now))
-                        .unwrap_or_default(),
-                    entry.get("config").cloned(),
-                )
-            }
-            Err(error) => {
-                issues.push(format!("wallet info unavailable: {error}"));
-                (
-                    Evidence::Unknown,
-                    Evidence::Unknown,
-                    None,
-                    FedimintReserveMetrics::default(),
-                    None,
-                )
-            }
+        let Observed {
+            health,
+            gateways,
+            balance_sats,
+            network,
+            balance_source,
+            reserve,
+            federation_config,
+        } = if config.quote_backend == QuoteBackend::WalletClient {
+            self.observe_wallet(&config, timestamp, &mut issues).await
+        } else {
+            self.observe_bridge(&config, now, timestamp, &mut issues)
+                .await
         };
         let federation_health = federation_health(
             health.value() == Some(&ConnectorHealth::Healthy),
@@ -719,6 +706,162 @@ impl FedimintService {
         }
     }
 
+    /// Health, gateway registry and wallet info from the HTTP bridge.
+    async fn observe_bridge(
+        &self,
+        config: &FederationConfig,
+        now: u64,
+        timestamp: EvidenceTimestamp,
+        issues: &mut Vec<String>,
+    ) -> Observed {
+        let health_url = join_url(&config.bridge_url, "/health");
+        let (health_response, gateway_response, info) = tokio::join!(
+            self.client.get(health_url).send(),
+            self.post_bridge(
+                config,
+                "/v2/ln/list-gateways",
+                json!({"federationId": config.federation_id}),
+            ),
+            self.get_bridge(config, "/v2/admin/info"),
+        );
+        let health = match health_response {
+            Ok(response) if response.status().is_success() => Evidence::reported(
+                ConnectorHealth::Healthy,
+                EvidenceSource::Observer,
+                timestamp,
+                ConfidenceLevel::Low,
+            ),
+            Ok(response) => {
+                issues.push(format!("bridge health returned {}", response.status()));
+                Evidence::reported(
+                    ConnectorHealth::Unavailable,
+                    EvidenceSource::Observer,
+                    timestamp,
+                    ConfidenceLevel::Low,
+                )
+            }
+            Err(error) => {
+                issues.push(format!("bridge health failed: {}", error.without_url()));
+                Evidence::reported(
+                    ConnectorHealth::Unavailable,
+                    EvidenceSource::Observer,
+                    timestamp,
+                    ConfidenceLevel::Low,
+                )
+            }
+        };
+        let gateways = match gateway_response {
+            Ok(value) => Evidence::reported(
+                parse_gateways(&value),
+                EvidenceSource::Connector,
+                timestamp,
+                ConfidenceLevel::Medium,
+            ),
+            Err(error) => {
+                issues.push(format!("gateway cache unavailable: {error}"));
+                Evidence::Unknown
+            }
+        };
+        let (balance_sats, network, balance_source, reserve, federation_config) = match info {
+            Ok(value) => {
+                let entry = value.get(&config.federation_id).unwrap_or(&value);
+                let (balance, network) =
+                    parse_wallet_info(&value, &config.federation_id, timestamp);
+                (
+                    balance,
+                    network,
+                    entry
+                        .get("balance_source")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    entry
+                        .get("reserve")
+                        .map(|reserve| parse_reserve(reserve, now))
+                        .unwrap_or_default(),
+                    entry.get("config").cloned(),
+                )
+            }
+            Err(error) => {
+                issues.push(format!("wallet info unavailable: {error}"));
+                (
+                    Evidence::Unknown,
+                    Evidence::Unknown,
+                    None,
+                    FedimintReserveMetrics::default(),
+                    None,
+                )
+            }
+        };
+        Observed {
+            health,
+            gateways,
+            balance_sats,
+            network,
+            balance_source,
+            reserve,
+            federation_config,
+        }
+    }
+
+    /// Balance and network from the wallet's own client. The registry and
+    /// guardian evidence the bridge reads are not part of the wallet interface
+    /// and stay unknown.
+    async fn observe_wallet(
+        &self,
+        config: &FederationConfig,
+        timestamp: EvidenceTimestamp,
+        issues: &mut Vec<String>,
+    ) -> Observed {
+        let state = match self.wallet() {
+            Ok(wallet) => wallet.state(&config.federation_id).await,
+            Err(error) => Err(error),
+        };
+        let (health, balance_sats, network) = match state {
+            Ok(state) => (
+                Evidence::reported(
+                    ConnectorHealth::Healthy,
+                    EvidenceSource::Observer,
+                    timestamp,
+                    ConfidenceLevel::Low,
+                ),
+                Evidence::reported(
+                    Amount::from_sats(state.balance_msat / 1_000),
+                    EvidenceSource::Connector,
+                    timestamp,
+                    ConfidenceLevel::Medium,
+                ),
+                Evidence::reported(
+                    state.network,
+                    EvidenceSource::Connector,
+                    timestamp,
+                    ConfidenceLevel::Medium,
+                ),
+            ),
+            Err(error) => {
+                issues.push(format!("wallet client unavailable: {error}"));
+                (
+                    Evidence::reported(
+                        ConnectorHealth::Unavailable,
+                        EvidenceSource::Observer,
+                        timestamp,
+                        ConfidenceLevel::Low,
+                    ),
+                    Evidence::Unknown,
+                    Evidence::Unknown,
+                )
+            }
+        };
+        Observed {
+            health,
+            gateways: Evidence::Unknown,
+            balance_sats,
+            network,
+            balance_source: Some("wallet_client".into()),
+            reserve: FedimintReserveMetrics::default(),
+            federation_config: None,
+        }
+    }
+
     /// Requests a quote from the explicit read-only bridge; this method has no
     /// fallback to `/v2/ln/pay` and cannot instruct the bridge to spend.
     ///
@@ -734,18 +877,30 @@ impl FedimintService {
         now: u64,
     ) -> Result<FedimintQuote, String> {
         let config = &observation.config;
-        let url = match config.quote_backend {
+        let value = match config.quote_backend {
             QuoteBackend::Disabled => {
                 return Err("No read-only Fedimint quote bridge is configured".into());
             }
             QuoteBackend::LocalV0121Bridge => {
-                join_url(&config.bridge_url, "/v2/ln/ecashmesh-quote")
+                let request = json!({"federation_id": config.federation_id, "invoice": invoice, "amount_sats": amount.sats()});
+                self.post_url(
+                    &join_url(&config.bridge_url, "/v2/ln/ecashmesh-quote"),
+                    config.token.as_deref(),
+                    request,
+                )
+                .await?
+            }
+            QuoteBackend::WalletClient => {
+                wallet::quote(
+                    self.wallet()?,
+                    &config.federation_id,
+                    invoice,
+                    amount.sats(),
+                    now,
+                )
+                .await?
             }
         };
-        let request = json!({"federation_id": observation.config.federation_id, "invoice": invoice, "amount_sats": amount.sats()});
-        let value = self
-            .post_url(&url, observation.config.token.as_deref(), request)
-            .await?;
         bridge::parse(&value, &config.federation_id, invoice, amount, now)
     }
 
@@ -763,19 +918,30 @@ impl FedimintService {
         amount: Amount,
         now: u64,
     ) -> Result<FedimintGatewayEstimate, String> {
-        if observation.config.quote_backend != QuoteBackend::LocalV0121Bridge {
-            return Err("No read-only Fedimint quote bridge is configured".into());
-        }
-        let value = self
-            .post_url(
-                &join_url(
-                    &observation.config.bridge_url,
-                    "/v2/ln/ecashmesh-gateway-estimate",
-                ),
-                observation.config.token.as_deref(),
-                json!({"federation_id": observation.config.federation_id, "invoice": invoice, "amount_sats": amount.sats()}),
-            )
-            .await?;
+        let config = &observation.config;
+        let value = match config.quote_backend {
+            QuoteBackend::Disabled => {
+                return Err("No read-only Fedimint quote bridge is configured".into());
+            }
+            QuoteBackend::LocalV0121Bridge => {
+                self.post_url(
+                    &join_url(&config.bridge_url, "/v2/ln/ecashmesh-gateway-estimate"),
+                    config.token.as_deref(),
+                    json!({"federation_id": config.federation_id, "invoice": invoice, "amount_sats": amount.sats()}),
+                )
+                .await?
+            }
+            QuoteBackend::WalletClient => {
+                wallet::gateway_estimate(
+                    self.wallet()?,
+                    &config.federation_id,
+                    invoice,
+                    amount.sats(),
+                    now,
+                )
+                .await?
+            }
+        };
         bridge::parse_gateway_estimate(
             &value,
             &observation.config.federation_id,
