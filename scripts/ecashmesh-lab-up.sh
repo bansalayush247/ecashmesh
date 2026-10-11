@@ -213,7 +213,9 @@ nohup env \
 echo $! >"$pid_file"
 /bin/ps -p "$(<"$pid_file")" -o lstart= >"$state/lab.start"
 
-for _ in $(seq 1 120); do
+# The runner compiles on first start (minutes after a toolchain rebuild); the
+# loop still fails at once if the process stops.
+for _ in $(seq 1 900); do
   [[ -f "$runtime_env" ]] && break
   kill -0 "$(<"$pid_file")" 2>/dev/null || {
     tail -80 "$state/fedimint.log" >&2 || true
