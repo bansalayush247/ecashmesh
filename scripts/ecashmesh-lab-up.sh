@@ -163,7 +163,7 @@ git -C "$fedimint_dir" checkout --detach --force 41b1fc122c2373c5782822bb9db3bc3
 runtime_runner="$fedimint_dir/ecashmesh-lab-runner"
 rm -rf "$runtime_runner"
 mkdir -p "$runtime_runner/src"
-cp "$root/crates/ecashmesh-lab-runner/src/main.rs" "$runtime_runner/src/main.rs"
+cp "$root/lab/fedimint-runner/main.rs" "$runtime_runner/src/main.rs"
 cat >"$runtime_runner/Cargo.toml" <<'EOF'
 [package]
 name = "ecashmesh-lab-runtime-runner"
@@ -1185,7 +1185,7 @@ cdk_target="$state/cdk-target/debug/cdk-mintd"
 cashu_smoke_dir="$cdk_dir/crates/ecashmesh-cashu-smoke-runner"
 rm -rf "$cashu_smoke_dir"
 mkdir -p "$cashu_smoke_dir/src"
-cp "$root/crates/ecashmesh-cashu-smoke-runner/src/main.rs" "$cashu_smoke_dir/src/main.rs"
+cp "$root/lab/cashu-runner/main.rs" "$cashu_smoke_dir/src/main.rs"
 cat >"$cashu_smoke_dir/Cargo.toml" <<'EOF'
 [package]
 name = "ecashmesh-cashu-smoke-runner"

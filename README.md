@@ -262,8 +262,8 @@ Design decisions and trade-offs: [docs/design.md](docs/design.md).
 |---|---|
 | `crates/ecashmesh-cashu` | Cashu integration: mint discovery, metadata, quotes |
 | `crates/ecashmesh-fedimint` | Fedimint integration: bridge with native v0.12.1 clients, quote validation, guardian audits |
-| `crates/ecashmesh-lab-runner` | Regtest mesh supervisor: bitcoind, federations, gateways |
-| `crates/ecashmesh-cashu-smoke-runner` | Native Cashu wallet runner used for mesh payments |
+| `lab/fedimint-runner` | Regtest mesh supervisor: bitcoind, federations, gateways (built inside the pinned Fedimint checkout) |
+| `lab/cashu-runner` | Native Cashu wallet runner used for mesh payments (built inside the pinned CDK checkout) |
 | `scripts/ecashmesh-lab-*` | Regtest mesh: bring-up, 56-route executor, validation, experiments |
 | `crates/ecashmesh-api` | HTTP API: source evidence, Lightning probing, feasibility (selection layer) |
 | `crates/ecashmesh-core` | Evidence model, deterministic ranking, explanations (selection layer) |

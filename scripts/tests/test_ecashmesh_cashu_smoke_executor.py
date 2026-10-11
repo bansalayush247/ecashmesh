@@ -6,7 +6,7 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-EXECUTOR = ROOT / "crates" / "ecashmesh-cashu-smoke-runner" / "src" / "main.rs"
+EXECUTOR = ROOT / "lab" / "cashu-runner" / "main.rs"
 LAUNCHER = ROOT / "scripts" / "ecashmesh-lab-up.sh"
 
 
