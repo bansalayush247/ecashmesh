@@ -235,17 +235,6 @@ export function useRegtestLab(enabled: boolean, baseUrl: string) {
     [sources],
   );
 
-  /** Spendable sats per Cashu mint URL, as a split plan needs them. */
-  const cashuBalances = useMemo(
-    () =>
-      Object.fromEntries(
-        sources
-          .filter((source) => source.kind === "cashu")
-          .map((source) => [source.endpoint, balances[source.id] ?? 0]),
-      ),
-    [sources, balances],
-  );
-
   const setGatewayFee = useCallback(
     async (mode: "zero" | "restore") => {
       if (!experimentSource) return;
@@ -316,7 +305,6 @@ export function useRegtestLab(enabled: boolean, baseUrl: string) {
     pay,
     paySplit,
     sourceForMint,
-    cashuBalances,
     setGatewayFee,
     label,
     relabel,
