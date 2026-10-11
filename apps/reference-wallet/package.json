@@ -11,11 +11,12 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --write App.tsx index.ts src tests package.json app.json tsconfig.json playwright.config.ts README.md",
     "format:check": "prettier --check App.tsx index.ts src tests package.json app.json tsconfig.json playwright.config.ts README.md",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "NODE_OPTIONS=--preserve-symlinks NODE_PATH=node_modules tsx --test tests/*.test.ts ../../packages/client/tests/*.test.ts",
     "test:e2e": "playwright test",
     "export:web": "expo export --platform web"
   },
   "dependencies": {
+    "@ecashmesh/client": "file:../../packages/client",
     "expo": "~57.0.22",
     "nostr-tools": "^2.25.2",
     "react": "19.2.3",

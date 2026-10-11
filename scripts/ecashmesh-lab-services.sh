@@ -71,13 +71,11 @@ set -a
 source "$lab/lab-credentials.env"
 PAYMENT_ENVIRONMENT=regtest
 ECASHMESH_LAB_MODE=true
-ECASHMESH_ENABLE_INTEROPERABILITY_LAB=true
 ECASHMESH_FEDIMINT_REGTEST_CLIENT_ROOT="$(field fedimint_client_root)"
 ECASHMESH_FEDIMINT_REGTEST_CLIENT_MAP="$(field fedimint_client_map)"
 ECASHMESH_LAB_FEDIMINT_CLI="$(field fedimint_cli)"
 ECASHMESH_LAB_LIQUIDITY_PROBES="$(field liquidity_probes)"
 ECASHMESH_LAB_HISTORY_DIR="$(field history_dir)"
-ROUTING_MODE=live
 ECASHMESH_CASHU_MAX_AGE_SECONDS="${ECASHMESH_CASHU_MAX_AGE_SECONDS:-300}"
 ECASHMESH_FEDIMINT_MAX_AGE_SECONDS="${ECASHMESH_FEDIMINT_MAX_AGE_SECONDS:-300}"
 # The lab runs 16 debug guardians, 5 LNDs and 3 LDK nodes on one machine.

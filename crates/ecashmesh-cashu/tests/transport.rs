@@ -140,7 +140,8 @@ fn invalid_configuration_is_rejected_before_network_access() {
     );
 }
 
-async fn quote_adapter(body: &'static str, status: u16) -> (CashuAdapter, JoinHandle<()>) {
+/// A mint answering one melt-quote request; the task returns the request body.
+async fn quote_adapter(body: &'static str, status: u16) -> (CashuAdapter, JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -166,7 +167,8 @@ async fn quote_adapter(body: &'static str, status: u16) -> (CashuAdapter, JoinHa
             .unwrap();
         let mut sent = vec![0_u8; length];
         stream.read_exact(&mut sent).await.unwrap();
-        assert!(String::from_utf8(sent).unwrap().contains("lnbc1000u"));
+        let sent = String::from_utf8(sent).unwrap();
+        assert!(sent.contains("lnbc1000u"));
         stream
             .write_all(
                 format!(
@@ -177,6 +179,7 @@ async fn quote_adapter(body: &'static str, status: u16) -> (CashuAdapter, JoinHa
             )
             .await
             .unwrap();
+        sent
     });
     let config = MintConfig::new(ConnectorId::new("cashu:quote-test").unwrap(), &url, 300).unwrap();
     (CashuAdapter::new(config).unwrap(), server)
@@ -207,5 +210,35 @@ async fn unpaid_melt_quotes_are_normalized_or_explicitly_unknown() {
         .await;
     assert!(malformed.evidence.is_unknown());
     assert_eq!(malformed.issue.unwrap().code, "MALFORMED_DATA");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn partial_melt_quotes_request_a_nut15_part_in_millisats() {
+    let invoice = LightningInvoice::parse("lnbc1000u1qqqqqqq9kvtew").unwrap();
+    let (adapter, server) = quote_adapter(
+        r#"{"quote":"part-a","amount":60000,"fee_reserve":120}"#,
+        200,
+    )
+    .await;
+    let observed = adapter
+        .partial_melt_quote(&invoice, Amount::from_sats(60_000))
+        .await;
+    let quote = observed.evidence.value().unwrap();
+    assert_eq!(quote.quote_id, "part-a");
+    assert_eq!(quote.fee_reserve_sats.sats(), 120);
+    let sent: serde_json::Value = serde_json::from_str(&server.await.unwrap()).unwrap();
+    assert_eq!(sent["options"]["mpp"]["amount"], 60_000_000);
+
+    // A mint that quotes a different amount than the part is not trusted.
+    let (adapter, server) = quote_adapter(
+        r#"{"quote":"whole","amount":100000,"fee_reserve":200}"#,
+        200,
+    )
+    .await;
+    let mismatched = adapter
+        .partial_melt_quote(&invoice, Amount::from_sats(60_000))
+        .await;
+    assert!(mismatched.evidence.is_unknown());
     server.await.unwrap();
 }

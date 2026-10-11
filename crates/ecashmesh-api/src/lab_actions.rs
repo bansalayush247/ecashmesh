@@ -30,7 +30,7 @@ use tokio::{process::Command, sync::Mutex};
 
 use crate::{
     AppState,
-    probe::{http_client, loopback, pem_certificate_der},
+    lab_probes::{http_client, loopback, pem_certificate_der},
 };
 
 type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -356,6 +356,94 @@ impl LabActions {
         Ok(result)
     }
 
+    /// Pays one invoice in parts from several Cashu sources (NUT-15). Every
+    /// part is in flight at once: the receiver settles only when all parts
+    /// arrived, so Lightning settles all of them or none. Then claims at a
+    /// mesh destination, as for a single payment.
+    async fn pay_split(&self, invoice: &str, parts: &[SplitPart]) -> Result<Value, String> {
+        let total = invoice
+            .parse::<lightning_invoice::Bolt11Invoice>()
+            .ok()
+            .filter(|_| invoice.starts_with("lnbcrt"))
+            .and_then(|invoice| invoice.amount_milli_satoshis())
+            .ok_or("invoice must be a regtest (lnbcrt) invoice with an amount")?
+            / 1000;
+        if parts.iter().map(|part| part.amount_sats).sum::<u64>() != total {
+            return Err(format!(
+                "the parts must add up to the invoice amount, {total} sats"
+            ));
+        }
+        let destination = self
+            .receives
+            .lock()
+            .await
+            .get(invoice)
+            .map(|receive| receive.destination.clone());
+        for (index, part) in parts.iter().enumerate() {
+            if !matches!(self.source(&part.source)?.kind, Kind::Cashu { .. }) {
+                return Err(format!("{} cannot pay part of an invoice", part.source));
+            }
+            if parts[..index]
+                .iter()
+                .any(|other| other.source == part.source)
+            {
+                return Err(format!("{} appears twice", part.source));
+            }
+            if destination.as_ref() == Some(&part.source) {
+                return Err("a source cannot pay its own invoice".into());
+            }
+        }
+        let _turn = self.busy.lock().await;
+        let _lock = self.executor_lock()?;
+        let started = Instant::now();
+        let befores =
+            futures::future::join_all(parts.iter().map(|part| self.balance_sats(&part.source)))
+                .await;
+        let melts = futures::future::join_all(parts.iter().map(|part| {
+            let amount = part.amount_sats.to_string();
+            async move {
+                self.cashu("melt-part", &part.source, &[invoice, &amount])
+                    .await
+            }
+        }))
+        .await;
+        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut results = Vec::new();
+        for ((part, before), melt) in parts.iter().zip(befores).zip(melts) {
+            let mut result = json!({
+                "source": part.source,
+                "source_label": self.sources.get(&part.source).map(|source| source.label.clone()),
+                "amount_sats": part.amount_sats,
+                "latency_ms": latency_ms,
+                "balance_before_sats": before,
+                "balance_after_sats": self.balance_sats(&part.source).await,
+            });
+            match melt {
+                Ok(melt) => {
+                    result["outcome"] = json!("succeeded");
+                    result["evidence"] =
+                        json!({"evidence": melt["melt_quote_id"], "fee_sats": melt["fee_sat"]});
+                }
+                Err(error) => {
+                    result["outcome"] = json!("failed");
+                    result["error"] = json!(error);
+                }
+            }
+            results.push(result);
+        }
+        let succeeded = results.iter().all(|part| part["outcome"] == "succeeded");
+        let mut outcome = json!({
+            "outcome": if succeeded { "succeeded" } else { "failed" },
+            "amount_sats": total,
+            "latency_ms": latency_ms,
+            "parts": results,
+        });
+        if succeeded && let Some(receive) = self.receives.lock().await.remove(invoice) {
+            outcome["destination"] = self.claim(receive).await;
+        }
+        Ok(outcome)
+    }
+
     async fn fedimint_send(&self, id: &str, invoice: &str, gateway: &str) -> Result<Value, String> {
         let sent = self
             .fedimint(
@@ -613,12 +701,42 @@ pub(super) struct PayRequest {
     invoice: String,
 }
 
+#[derive(Deserialize)]
+pub(super) struct SplitPart {
+    source: String,
+    amount_sats: u64,
+}
+
+#[derive(Deserialize)]
+pub(super) struct PaySplitRequest {
+    invoice: String,
+    parts: Vec<SplitPart>,
+}
+
+pub(super) async fn pay_split(
+    State(state): State<AppState>,
+    Json(request): Json<PaySplitRequest>,
+) -> Reply {
+    let result = actions(&state)?
+        .pay_split(&request.invoice, &request.parts)
+        .await;
+    // Each part is a real payment through its source.
+    if let (Ok(outcome), Some(history)) = (&result, state.lab_history.as_deref()) {
+        for part in outcome["parts"].as_array().into_iter().flatten() {
+            history
+                .record_payment(&payment_record(part, &request.invoice))
+                .await;
+        }
+    }
+    reply(result)
+}
+
 pub(super) async fn pay(State(state): State<AppState>, Json(request): Json<PayRequest>) -> Reply {
     let result = actions(&state)?
         .pay(&request.source, &request.invoice)
         .await;
     // A real payment outcome is reliability evidence, as for the lab executor.
-    if let (Ok(outcome), Some(history)) = (&result, state.provider.lab_history()) {
+    if let (Ok(outcome), Some(history)) = (&result, state.lab_history.as_deref()) {
         history
             .record_payment(&payment_record(outcome, &request.invoice))
             .await;
@@ -640,11 +758,12 @@ fn payment_record(outcome: &Value, invoice: &str) -> Value {
         "source_id": outcome["source"],
         "source_label": outcome["source_label"],
         "destination": outcome["destination"]["source"].as_str().unwrap_or("lightning invoice"),
-        "amount_sats": invoice
+        // A split part paid only its own share of the invoice.
+        "amount_sats": outcome["amount_sats"].as_u64().or_else(|| invoice
             .parse::<lightning_invoice::Bolt11Invoice>()
             .ok()
             .and_then(|invoice| invoice.amount_milli_satoshis())
-            .map(|msat| msat / 1000),
+            .map(|msat| msat / 1000)),
         "executor": "ecashmesh-api lab pay (web app)",
         "outcome": if succeeded { "succeeded" } else { "failed" },
         "timestamp": now,
@@ -738,7 +857,8 @@ mod tests {
         assert_eq!(record["source_id"], "cashu:mint-a");
         assert_eq!(record["destination"], "fedimint:x");
         assert_eq!(record["settlement_evidence"], "quote-1");
-        let parsed: crate::history::PaymentRecord = serde_json::from_value(record).unwrap();
+        let parsed: ecashmesh_sdk::reliability::PaymentRecord =
+            serde_json::from_value(record).unwrap();
         assert_eq!(
             (parsed.outcome.as_str(), parsed.failure_class),
             ("succeeded", None)

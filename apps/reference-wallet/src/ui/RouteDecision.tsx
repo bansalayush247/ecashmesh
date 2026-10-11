@@ -17,7 +17,7 @@ import type {
   ReliabilityEvidence,
   RouteDecision,
   ScoreContributions,
-} from "../ecashmesh/contracts";
+} from "@ecashmesh/client";
 import {
   Button,
   colors,

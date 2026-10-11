@@ -1,10 +1,16 @@
 import { useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import type {
+  EcashMeshClient,
+  SplitPlan,
+  TransferPlan,
+} from "@ecashmesh/client";
 
 import {
   EXTERNAL_PAYEE,
   type LabBalanceChange,
   type LabPayment,
+  type LabSplitPayment,
   type RegtestLab,
 } from "../host/useRegtestLab";
 import {
@@ -346,7 +352,307 @@ export function LabReceipt({
   );
 }
 
+const message = (reason: unknown) =>
+  reason instanceof Error ? reason.message : String(reason);
+
+/**
+ * Home: move funds between two lab sources, as an action the user confirms.
+ * EcashMesh plans it (invoice, quotes, fee); the lab then pays with the
+ * source's native client and claims the funds at the destination.
+ */
+export function MoveFunds({
+  lab,
+  client,
+}: {
+  lab: RegtestLab;
+  client: EcashMeshClient;
+}) {
+  const [from, setFrom] = useState<string | null>(null);
+  const [to, setTo] = useState<string | null>(null);
+  const [amount, setAmount] = useState("1000");
+  const [plan, setPlan] = useState<TransferPlan | null>(null);
+  const [receipt, setReceipt] = useState<LabPayment | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const value = Number(amount);
+  const source = lab.sources.find((candidate) => candidate.id === from);
+  const reset = () => {
+    setPlan(null);
+    setReceipt(null);
+    setError(null);
+  };
+  const review = async () => {
+    if (!source || !to) return;
+    reset();
+    setBusy("Planning the transfer…");
+    try {
+      // A lab invoice is tracked by the lab, which claims it once paid.
+      const invoice = await lab.createInvoice(value, to);
+      setPlan(
+        await client.planTransfer({
+          amount: value,
+          from:
+            source.kind === "cashu"
+              ? { type: "cashu_mint", url: source.endpoint }
+              : { type: "federation", connector_id: source.id },
+          to: { type: "invoice", invoice },
+        }),
+      );
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const execute = async () => {
+    if (!plan || !from) return;
+    setBusy("Moving funds on regtest…");
+    try {
+      setReceipt(await lab.pay(from, plan.invoice));
+      setPlan(null);
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const picker = (
+    selected: string | null,
+    choose: (id: string) => void,
+    other: string | null,
+  ) => (
+    <View style={local.grid}>
+      {lab.sources.map((candidate) => (
+        <Chip
+          key={candidate.id}
+          label={`${kindMark(candidate.kind)} ${candidate.label}`}
+          hint={`${lab.balances[candidate.id] ?? "?"} sats`}
+          selected={selected === candidate.id}
+          disabled={candidate.id === other}
+          onPress={() => {
+            choose(candidate.id);
+            reset();
+          }}
+        />
+      ))}
+    </View>
+  );
+  return (
+    <Surface>
+      <Text style={local.title}>Move funds between sources</Text>
+      <Text style={styles.small}>
+        Move your own ecash from one mint or federation to another. You see the
+        fee before anything moves.
+      </Text>
+      <Text style={local.label}>From</Text>
+      {picker(from, setFrom, to)}
+      <Text style={local.label}>To</Text>
+      {picker(to, setTo, from)}
+      <Text style={local.label}>Amount (sats)</Text>
+      <TextInput
+        accessibilityLabel="Amount to move in sats"
+        style={local.input}
+        keyboardType="number-pad"
+        value={amount}
+        onChangeText={(text) => {
+          setAmount(text.replace(/[^0-9]/g, ""));
+          reset();
+        }}
+      />
+      <Button
+        disabled={
+          Boolean(busy) ||
+          !from ||
+          !to ||
+          !Number.isSafeInteger(value) ||
+          value <= 0
+        }
+        onPress={() => void review()}
+      >
+        {busy ?? "Review transfer"}
+      </Button>
+      {plan && (
+        <>
+          <Row label="From" value={lab.label(from ?? "")} />
+          <Row label="To" value={lab.label(to ?? "")} />
+          <Row label="Arrives" value={sats(plan.amount_sats)} />
+          <Row
+            label={
+              plan.fee_kind === "reserve_estimate"
+                ? "Fee (at most)"
+                : "Fee (quoted)"
+            }
+            value={sats(plan.estimated_fee_sats)}
+          />
+          {plan.fee_kind === "reserve_estimate" && (
+            <Text style={styles.small}>
+              Cashu reserves this for Lightning fees; what is not used comes
+              back as change.
+            </Text>
+          )}
+          <Button disabled={Boolean(busy)} onPress={() => void execute()}>
+            {busy ?? `Move ${sats(plan.amount_sats)} for real`}
+          </Button>
+        </>
+      )}
+      {receipt && <LabReceipt receipt={receipt} lab={lab} />}
+      {error && <Text style={local.error}>{error}</Text>}
+    </Surface>
+  );
+}
+
+/**
+ * Results: pay one invoice from several Cashu mints when no single source
+ * can (NUT-15). Lightning settles every part or none.
+ */
+export function SplitPayment({
+  lab,
+  client,
+  amount,
+  invoice,
+}: {
+  lab: RegtestLab;
+  client: EcashMeshClient;
+  amount: number;
+  invoice: string;
+}) {
+  const [plan, setPlan] = useState<SplitPlan | null>(null);
+  const [receipt, setReceipt] = useState<LabSplitPayment | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const mintLabel = (url: string) => lab.sourceForMint(url)?.label ?? url;
+  const review = async () => {
+    setError(null);
+    setReceipt(null);
+    setBusy("Planning the split…");
+    try {
+      setPlan(
+        await client.planSplit({
+          amount,
+          destination: { type: "lightning", value: invoice },
+          balances: lab.cashuBalances,
+        }),
+      );
+    } catch (reason) {
+      setPlan(null);
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const execute = async () => {
+    if (!plan) return;
+    const parts = plan.parts.map((part) => ({
+      source: lab.sourceForMint(part.mint_url)?.id ?? part.source_id,
+      amount_sats: part.amount_sats,
+    }));
+    setBusy(`Paying in ${parts.length} parts on regtest…`);
+    try {
+      setReceipt(await lab.paySplit(invoice, parts));
+      setPlan(null);
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <Surface>
+      <Text style={local.title}>Split across Cashu mints</Text>
+      <Text style={styles.small}>
+        When no single source holds enough, several mints can each pay a part of
+        this invoice. Every part settles, or none does.
+      </Text>
+      <Button secondary disabled={Boolean(busy)} onPress={() => void review()}>
+        {busy ?? "Plan a split payment"}
+      </Button>
+      {plan && (
+        <>
+          {plan.parts.map((part) => (
+            <Row
+              key={part.melt_quote_id}
+              label={mintLabel(part.mint_url)}
+              value={`${sats(part.amount_sats)} + up to ${sats(part.fee_reserve_sats)} fee`}
+            />
+          ))}
+          <Row label="Total" value={sats(plan.amount_sats)} />
+          <Row label="Fee reserve" value={sats(plan.total_fee_reserve_sats)} />
+          {plan.skipped.map((skip) => (
+            <Text key={skip.mint_url} style={styles.small}>
+              {`${mintLabel(skip.mint_url)} not used: ${skip.reason}`}
+            </Text>
+          ))}
+          <Button disabled={Boolean(busy)} onPress={() => void execute()}>
+            {busy ?? `Pay in ${plan.parts.length} parts for real`}
+          </Button>
+        </>
+      )}
+      {receipt && <SplitReceipt receipt={receipt} lab={lab} />}
+      {error && <Text style={local.error}>{error}</Text>}
+    </Surface>
+  );
+}
+
+function SplitReceipt({
+  receipt,
+  lab,
+}: {
+  receipt: LabSplitPayment;
+  lab: RegtestLab;
+}) {
+  const ok = receipt.outcome === "succeeded";
+  return (
+    <>
+      <Text style={[local.title, { color: ok ? colors.green : colors.red }]}>
+        {ok
+          ? `✓ Paid ${sats(receipt.amount_sats)} in ${receipt.parts.length} parts`
+          : "✗ Split payment did not settle"}
+      </Text>
+      {receipt.parts.map((part) => (
+        <View key={part.source}>
+          <Change
+            title={`${lab.label(part.source)} (${sats(part.amount_sats)})`}
+            change={part}
+          />
+          {part.error && <Text style={local.error}>{part.error}</Text>}
+        </View>
+      ))}
+      {receipt.destination && (
+        <>
+          <Change
+            title={`${lab.label(receipt.destination.source)} received`}
+            change={receipt.destination}
+          />
+          <Row
+            label="Destination credit"
+            value={
+              receipt.destination.claimed
+                ? "Claimed and verified"
+                : `Not claimed: ${receipt.destination.error ?? "unknown"}`
+            }
+          />
+        </>
+      )}
+      <Row label="Time" value={`${(receipt.latency_ms / 1000).toFixed(1)} s`} />
+      {!ok && (
+        <Text style={styles.small}>
+          Lightning settled no part, so every mint keeps its ecash.
+        </Text>
+      )}
+    </>
+  );
+}
+
 const local = StyleSheet.create({
+  label: { color: colors.muted, fontSize: 12, fontWeight: "700" },
+  input: {
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 10,
+    padding: 10,
+    color: colors.ink,
+    backgroundColor: colors.surface,
+  },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   wallet: {
     flexBasis: "47%",

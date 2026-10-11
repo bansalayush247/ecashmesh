@@ -11,7 +11,7 @@ use bip39::Mnemonic;
 use cashu::Bolt11Invoice;
 use cdk::{
     amount::{Amount, SplitTarget},
-    nuts::{CurrencyUnit, MeltQuoteState, MintQuoteState, PaymentMethod},
+    nuts::{CurrencyUnit, MeltOptions, MeltQuoteState, MintQuoteState, PaymentMethod},
     wallet::Wallet,
 };
 use cdk_integration_tests::ln_regtest::{
@@ -306,15 +306,20 @@ async fn claim_quote(
     )
 }
 
+/// Pays `invoice`, or with `part_sat` only that part of it (NUT-15): the
+/// receiver settles once every part from every mint has arrived, so the
+/// other parts must be in flight at the same time.
 async fn melt_invoice(
     index: &str,
     mint_url: &str,
     wallet_path: PathBuf,
     invoice: &str,
+    part_sat: Option<u64>,
 ) -> Result<Value> {
     let wallet = wallet(mint_url, wallet_path).await?;
+    let options = part_sat.map(|sat| MeltOptions::new_mpp(sat * 1_000));
     let quote = wallet
-        .melt_quote(PaymentMethod::BOLT11, invoice.to_owned(), None, None)
+        .melt_quote(PaymentMethod::BOLT11, invoice.to_owned(), options, None)
         .await?;
     let prepared = wallet.prepare_melt(&quote.id, HashMap::new()).await?;
     let fee = prepared.total_fee().to_string();
@@ -384,7 +389,19 @@ async fn main() -> Result<()> {
             let url = args.next().context("mint URL is required")?;
             let wallet_path = PathBuf::from(args.next().context("wallet path is required")?);
             let invoice = args.next().context("invoice is required")?;
-            melt_invoice(&index, &url, wallet_path, &invoice).await?
+            melt_invoice(&index, &url, wallet_path, &invoice, None).await?
+        }
+        "melt-part" => {
+            let index = args.next().context("mint index is required")?;
+            let url = args.next().context("mint URL is required")?;
+            let wallet_path = PathBuf::from(args.next().context("wallet path is required")?);
+            let invoice = args.next().context("invoice is required")?;
+            let part = args
+                .next()
+                .context("part amount is required")?
+                .parse::<u64>()
+                .context("part amount must be whole sats")?;
+            melt_invoice(&index, &url, wallet_path, &invoice, Some(part)).await?
         }
         _ => anyhow::bail!("unknown command: {command}"),
     };

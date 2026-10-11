@@ -342,10 +342,12 @@ fn live_cashu_source_selection_returns_two_independent_sources() {
         json!(["cashu_lightning"])
     );
     assert_eq!(
-        response["live"]["graph"]["search"]["candidates_generated"],
+        response["live"]["graph"]["sources"]
+            .as_array()
+            .unwrap()
+            .len(),
         2
     );
-    assert_eq!(response["live"]["graph"]["edge_count"], 2);
 
     let recommended = response["recommended_source"]["source_id"]
         .as_str()
@@ -423,10 +425,12 @@ fn unavailable_source_is_excluded_without_fabricating_a_mint_bridge() {
             .is_empty()
     );
     assert_eq!(
-        response["live"]["graph"]["search"]["candidates_generated"],
+        response["live"]["graph"]["sources"]
+            .as_array()
+            .unwrap()
+            .len(),
         1
     );
-    assert_eq!(response["live"]["graph"]["edge_count"], 1);
     assert!(
         response["live"]["quote_observations"]
             .as_array()

@@ -1,0 +1,31 @@
+[package]
+name = "ecashmesh-ffi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Swift, Kotlin and React Native bindings for the EcashMesh SDK (UniFFI)"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[dependencies]
+ecashmesh-cashu = { path = "../ecashmesh-cashu" }
+ecashmesh-fedimint = { path = "../ecashmesh-fedimint", default-features = false }
+ecashmesh-sdk = { path = "../ecashmesh-sdk" }
+serde = "1"
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+uniffi = { version = "0.32", features = ["cli", "tokio"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

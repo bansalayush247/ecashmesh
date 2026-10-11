@@ -24,7 +24,6 @@ impl ApiServer {
 
         let child = Command::new(env!("CARGO_BIN_EXE_ecashmesh-api"))
             .env("ECASHMESH_API_ADDRESS", &address)
-            .env("ROUTING_MODE", "live")
             .env("ECASHMESH_CASHU_MINTS", "[]")
             .stdout(Stdio::null())
             .stderr(Stdio::null())

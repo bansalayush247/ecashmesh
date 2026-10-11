@@ -39,8 +39,17 @@ export type Nip60Discovery = {
   walletEventCreatedAt: number;
 };
 
-export function configuredRelays(): string[] {
-  const configured = process.env.EXPO_PUBLIC_NOSTR_RELAYS;
+/** Host settings: the relays to use and how the app names itself to signers. */
+export type NostrClientOptions = {
+  relays: readonly string[];
+  app: { name: string; url: string };
+};
+
+/**
+ * Parses a relay list from configuration: a JSON array or a comma-separated
+ * string. Invalid entries are dropped; nothing valid yields the defaults.
+ */
+export function parseRelays(configured?: string): string[] {
   if (!configured) return DEFAULT_RELAYS;
   try {
     const parsed: unknown = JSON.parse(configured);
@@ -148,7 +157,8 @@ export async function connectBrowserSigner(): Promise<NostrSignerSession> {
   };
 }
 
-export async function connectNip46Signer(
+async function connectNip46Signer(
+  app: NostrClientOptions["app"],
   bunkerUri: string,
   onAuthUrl: (url: string) => void,
   signal?: AbortSignal,
@@ -178,7 +188,7 @@ export async function connectNip46Signer(
         pointer.pubkey,
         pointer.secret ?? "",
         "get_public_key,nip44_decrypt,nip44_encrypt,sign_event:30078",
-        JSON.stringify({ name: "EcashMesh", url: "http://localhost:8081" }),
+        JSON.stringify({ name: app.name, url: app.url }),
       ]);
       return signer.getPublicKey();
     };
@@ -226,13 +236,14 @@ export async function connectNip46Signer(
  * Queries only metadata events. In particular, it never subscribes to kind
  * 7375 Cashu proof events or sends any decrypted NIP-60 data to the API.
  */
-export async function discoverNip60Wallet(
+async function discoverNip60Wallet(
+  relays: readonly string[],
   signer: NostrSignerSession,
   relayOverride?: readonly string[],
   signal?: AbortSignal,
 ): Promise<Nip60Discovery> {
   const bootstrapRelays = unique(
-    relayOverride?.length ? relayOverride : configuredRelays(),
+    relayOverride?.length ? relayOverride : relays,
   );
   const discoveryEvents = await readEvents(
     bootstrapRelays,
@@ -276,7 +287,7 @@ export async function discoverNip60Wallet(
 
 /** Short-lived read subscription; never subscribes to Cashu token/proof kinds. */
 export async function readEvents(
-  relays: string[],
+  relays: readonly string[],
   filter: {
     kinds: number[];
     authors?: string[];
@@ -318,23 +329,23 @@ export async function readEvents(
   }
 }
 
-export async function discoverPublicSources(signal?: AbortSignal) {
+async function discoverPublicSources(
+  relays: readonly string[],
+  signal?: AbortSignal,
+) {
   return parseAnnouncements(
-    await readEvents(
-      configuredRelays(),
-      { kinds: [38172, 38173], limit: 200 },
-      signal,
-    ),
+    await readEvents(relays, { kinds: [38172, 38173], limit: 200 }, signal),
   );
 }
 
-export async function restoreNostrRegistry(
+async function restoreNostrRegistry(
+  relays: readonly string[],
   signer: NostrSignerSession,
   signal?: AbortSignal,
 ) {
   return loadRegistryEvents(
     await readEvents(
-      configuredRelays(),
+      relays,
       { kinds: [30078], authors: [signer.pubkey], "#d": [REGISTRY_D] },
       signal,
     ),
@@ -342,7 +353,8 @@ export async function restoreNostrRegistry(
   );
 }
 
-export async function saveNostrRegistry(
+async function saveNostrRegistry(
+  relays: readonly string[],
   profiles: readonly PaymentSourceProfile[],
   signer: NostrSignerSession,
   signal?: AbortSignal,
@@ -354,7 +366,7 @@ export async function saveNostrRegistry(
   signal?.addEventListener("abort", abort, { once: true });
   try {
     await Promise.any(
-      pool.publish(configuredRelays(), event, { maxWait: 8000, abort: signal }),
+      pool.publish([...relays], event, { maxWait: 8000, abort: signal }),
     );
     return event.created_at;
   } catch {
@@ -366,3 +378,32 @@ export async function saveNostrRegistry(
     pool.destroy();
   }
 }
+
+/** Relay-bound Nostr operations for one host wallet. */
+export function createNostrClient(options: NostrClientOptions) {
+  const relays = unique(options.relays);
+  return {
+    relays,
+    connectNip46Signer: (
+      bunkerUri: string,
+      onAuthUrl: (url: string) => void,
+      signal?: AbortSignal,
+    ) => connectNip46Signer(options.app, bunkerUri, onAuthUrl, signal),
+    discoverNip60Wallet: (
+      signer: NostrSignerSession,
+      relayOverride?: readonly string[],
+      signal?: AbortSignal,
+    ) => discoverNip60Wallet(relays, signer, relayOverride, signal),
+    discoverPublicSources: (signal?: AbortSignal) =>
+      discoverPublicSources(relays, signal),
+    restoreNostrRegistry: (signer: NostrSignerSession, signal?: AbortSignal) =>
+      restoreNostrRegistry(relays, signer, signal),
+    saveNostrRegistry: (
+      profiles: readonly PaymentSourceProfile[],
+      signer: NostrSignerSession,
+      signal?: AbortSignal,
+    ) => saveNostrRegistry(relays, profiles, signer, signal),
+  };
+}
+
+export type NostrClient = ReturnType<typeof createNostrClient>;

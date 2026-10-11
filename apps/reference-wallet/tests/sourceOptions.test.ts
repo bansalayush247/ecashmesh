@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { gatewayOptions, namedSource } from "../src/ui/sourceOptions";
-import type { RouteDecision, PaymentSource } from "../src/ecashmesh/contracts";
+import type { RouteDecision, PaymentSource } from "@ecashmesh/client";
 
 test("all unfunded gateway options retain identity without becoming executable", () => {
   const estimates = Array.from({ length: 12 }, (_, i) => ({

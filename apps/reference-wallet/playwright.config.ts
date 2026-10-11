@@ -19,7 +19,6 @@ export default defineConfig({
       env: {
         ECASHMESH_API_ADDRESS: "127.0.0.1:15000",
         ECASHMESH_WEB_ORIGIN: "http://localhost:18081",
-        ROUTING_MODE: "live",
         ECASHMESH_CASHU_MINTS: "[]",
         ECASHMESH_CASHU_DIRECTORIES: "[]",
         ECASHMESH_FEDIMINT_FEDERATIONS: "[]",

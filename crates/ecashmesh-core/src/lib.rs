@@ -13,12 +13,11 @@ pub mod intent;
 mod model;
 pub mod risk;
 pub mod routing;
-pub mod scalable;
 
 pub use connector::ConnectorSnapshot;
 pub use evidence::{
-    ConfidenceLevel, ConnectorEvidence, ConnectorHealth, Evidence, EvidenceAggregate,
-    EvidenceFreshness, EvidenceObservation, EvidenceSource, EvidenceTimestamp, SolvencyStatus,
+    ConfidenceLevel, ConnectorEvidence, ConnectorHealth, Evidence, EvidenceFreshness,
+    EvidenceObservation, EvidenceSource, EvidenceTimestamp, SolvencyStatus,
 };
 pub use explain::{
     AlternativeExplanation, DecisionReason, DecisionReasonCode, ExplainedRoute,
@@ -27,22 +26,11 @@ pub use explain::{
 pub use intent::{LightningInvoice, LightningInvoiceError};
 pub use model::{
     Amount, AmountError, ConnectorCapabilities, ConnectorId, ConnectorIdError, ConnectorType,
-    FeeQuote, LiquidityInfo, ReliabilityInfo, Route, RouteCandidate, RouteCandidateError,
-    RouteExplanation, RouteHop, RouteQuality,
+    FeeQuote, LiquidityInfo, ReliabilityInfo, RouteCandidate, RouteCandidateError, RouteHop,
+    RouteQuality,
 };
 pub use risk::{EvidenceField, EvidenceRiskPolicy, RiskFactor, evaluate_connector_evidence};
 pub use routing::{
     PaymentRequest, RankedRoute, RejectedRoute, RiskPenaltyPolicy, RouteRanking,
     RouteRankingConfig, RouteRejectionReason, RouteSignalWeights, RouteSignals, rank_routes,
-};
-pub use scalable::{
-    AmountAwareEvidence, BenchmarkError, BenchmarkReport, BenchmarkScale, Capability,
-    CompactConnectorId, ConnectorRegistry, ConnectorRegistrySnapshot, DiscoveredConnector,
-    DiscoveryCoordinator, DiscoveryQueue, DiscoveryQueueError, DiscoveryWorkerError, EdgeId,
-    EdgeOverlay, EvidenceState, ExecutableEdge, GraphBuildError, GraphBuilder, GraphNode,
-    GraphOverlay, GraphSnapshot, GraphSnapshotCompiler, GraphSnapshotPublisher, HealthObservation,
-    HealthState, LargeGraphGenerator, RegisteredConnector, RegistryError, RegistryUpdateReport,
-    RouteCache, RouteSearchConfig, RouteSearchError, RouteSearchMetrics, RouteSearchRequest,
-    RouteSearchResult, ScalableRouter, SearchEndpoint, SearchObservability,
-    SearchObservabilityReport, TransferMechanism,
 };

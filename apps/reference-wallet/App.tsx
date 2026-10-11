@@ -14,8 +14,8 @@ import {
   View,
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { createEcashMeshClient } from "./src/ecashmesh/client";
-import type { RouteDecision } from "./src/ecashmesh/contracts";
+import { createEcashMeshClient } from "@ecashmesh/client";
+import type { RouteDecision } from "@ecashmesh/client";
 import { usePaymentFlow } from "./src/host/usePaymentFlow";
 import { useNostrSourceRegistry } from "./src/host/useNostrSourceRegistry";
 import {
@@ -48,6 +48,8 @@ import {
   InvoiceGenerator,
   LabReceipt,
   MeshStatus,
+  MoveFunds,
+  SplitPayment,
 } from "./src/ui/RegtestLab";
 
 const baseUrl =
@@ -429,6 +431,7 @@ function ReferenceWallet() {
                 </Heading>
                 <Button onPress={flow.edit}>Make a payment</Button>
                 <MeshStatus lab={lab} baseUrl={baseUrl} />
+                <MoveFunds lab={lab} client={ecashmesh} />
                 <GatewayBudgetExperiment lab={lab} />
               </>
             )}
@@ -651,6 +654,15 @@ function ReferenceWallet() {
                         onTry={(source) => void flow.payInLab(source)}
                       />
                     )}
+                    {lab.enabled &&
+                      flow.payment?.destination.type === "lightning" && (
+                        <SplitPayment
+                          lab={lab}
+                          client={ecashmesh}
+                          amount={flow.payment.amount}
+                          invoice={flow.payment.destination.value}
+                        />
+                      )}
                     <Button onPress={() => void flow.evaluate()}>
                       Retry evaluation
                     </Button>
@@ -685,6 +697,15 @@ function ReferenceWallet() {
                         onTry={(source) => void flow.payInLab(source)}
                       />
                     )}
+                    {lab.enabled &&
+                      flow.payment?.destination.type === "lightning" && (
+                        <SplitPayment
+                          lab={lab}
+                          client={ecashmesh}
+                          amount={flow.payment.amount}
+                          invoice={flow.payment.destination.value}
+                        />
+                      )}
                   </>
                 )}
                 {flow.comparison && (

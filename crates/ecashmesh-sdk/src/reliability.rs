@@ -1,53 +1,36 @@
-//! Regtest-lab observation history: real payment outcomes and liquidity
-//! observations, persisted as JSON lines under `ECASHMESH_LAB_HISTORY_DIR`.
+//! Payment reliability from real payment outcomes.
 //!
-//! `payments.jsonl` is appended by the lab payment executor
-//! (`scripts/ecashmesh-lab-route-executor.py reliability`) and by real
-//! payments made from the web app (`/v1/lab/pay`): one line per real regtest
-//! payment attempted through a source. It is the only input to payment
-//! reliability. Probes, channel state, gateway discovery and fee
-//! quotes are never payment outcomes.
-//!
-//! `observations.jsonl` is appended by this API: one line per source per
-//! evaluation with the liquidity and gateway state it saw. It is history for
-//! inspection and for the connector's first-observed time; it never counts as
-//! reliability.
-
-use std::{
-    collections::BTreeMap,
-    env,
-    fs::{self, OpenOptions},
-    io::Write as _,
-    path::PathBuf,
-};
+//! Only recorded payment attempts count: probes, channel state, gateway
+//! discovery and fee quotes are never payment outcomes. A
+//! [`crate::PaymentHistory`] supplies the records; this module derives the
+//! per-source statistics and the evidence the ranker sees.
 
 use ecashmesh_core::{
     ConfidenceLevel, Evidence, EvidenceSource, EvidenceTimestamp, ReliabilityInfo,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tokio::sync::Mutex;
 
 /// Only outcomes in this trailing window count towards reliability.
-pub(crate) const RELIABILITY_WINDOW_SECONDS: u64 = 86_400;
+pub const RELIABILITY_WINDOW_SECONDS: u64 = 86_400;
 /// Reliability is current if the latest counted outcome is this recent; older
 /// outcomes inside the window are stale evidence.
-pub(crate) const RELIABILITY_FRESH_SECONDS: u64 = 3_600;
+pub const RELIABILITY_FRESH_SECONDS: u64 = 3_600;
 /// Outcomes used for the recent success rate.
 const RECENT_OUTCOMES: usize = 10;
 /// Confidence thresholds, by counted outcomes in the window.
 const MEDIUM_CONFIDENCE_OUTCOMES: u64 = 5;
 const HIGH_CONFIDENCE_OUTCOMES: u64 = 20;
-/// Bounded reads: only the newest lines of each file are considered.
-const MAX_LINES: usize = 20_000;
-/// The observation log is rotated once it exceeds this size.
-const MAX_OBSERVATION_BYTES: u64 = 8 * 1024 * 1024;
 
-/// One real payment attempt written by the lab executor.
-#[derive(Clone, Debug, Deserialize)]
-pub(crate) struct PaymentRecord {
+/// One real payment attempt through a source, recorded by the wallet (or the
+/// lab executor) after it ran.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PaymentRecord {
     pub source_id: String,
     pub timestamp: u64,
+    /// Amount paid through the source. Successes with an amount are also
+    /// liquidity evidence; records without one count only for reliability.
+    #[serde(default)]
+    pub amount_sats: Option<u64>,
     /// `succeeded` or `failed`.
     pub outcome: String,
     /// For failures: `liquidity` (no route / insufficient channel liquidity),
@@ -59,7 +42,7 @@ pub(crate) struct PaymentRecord {
 
 /// Derived payment reliability for one source. `None` means unknown.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct ReliabilityStats {
+pub struct ReliabilityStats {
     pub source_id: String,
     pub window_seconds: u64,
     /// Every recorded attempt in the window, including payer-side funding
@@ -91,7 +74,8 @@ pub(crate) struct ReliabilityStats {
 }
 
 /// Per-source reliability from real payment outcomes.
-pub(crate) fn stats(
+#[must_use]
+pub fn stats(
     source_id: &str,
     payments: &[PaymentRecord],
     first_observed_at: Option<u64>,
@@ -192,7 +176,8 @@ pub(crate) fn stats(
 }
 
 /// The ranker's reliability evidence. Unknown until a real outcome exists.
-pub(crate) fn evidence(stats: &ReliabilityStats) -> Evidence<ReliabilityInfo> {
+#[must_use]
+pub fn evidence(stats: &ReliabilityStats) -> Evidence<ReliabilityInfo> {
     let (Some(rate), Some(observed_at)) = (
         stats.success_rate_basis_points,
         stats.observed_at_unix_seconds,
@@ -215,118 +200,6 @@ pub(crate) fn evidence(stats: &ReliabilityStats) -> Evidence<ReliabilityInfo> {
     }
 }
 
-/// The persistent lab history. Exists only in the gated regtest lab.
-pub(crate) struct LabHistory {
-    dir: PathBuf,
-    write: Mutex<()>,
-}
-
-impl LabHistory {
-    /// Loads `ECASHMESH_LAB_HISTORY_DIR`. Absent means disabled; present
-    /// outside the gated regtest lab is a startup error.
-    pub(crate) fn from_env() -> Result<Option<Self>, String> {
-        let Ok(dir) = env::var("ECASHMESH_LAB_HISTORY_DIR") else {
-            return Ok(None);
-        };
-        if env::var("PAYMENT_ENVIRONMENT").as_deref() != Ok("regtest")
-            || env::var("ECASHMESH_LAB_MODE").as_deref() != Ok("true")
-        {
-            return Err(
-                "ECASHMESH_LAB_HISTORY_DIR requires PAYMENT_ENVIRONMENT=regtest and ECASHMESH_LAB_MODE=true"
-                    .into(),
-            );
-        }
-        let dir = PathBuf::from(dir);
-        fs::create_dir_all(&dir).map_err(|error| format!("ECASHMESH_LAB_HISTORY_DIR: {error}"))?;
-        Ok(Some(Self {
-            dir,
-            write: Mutex::new(()),
-        }))
-    }
-
-    fn lines(&self, name: &str) -> Vec<Value> {
-        let Ok(text) = fs::read_to_string(self.dir.join(name)) else {
-            return Vec::new();
-        };
-        let lines = text.lines().collect::<Vec<_>>();
-        lines[lines.len().saturating_sub(MAX_LINES)..]
-            .iter()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect()
-    }
-
-    /// Reliability for every source with any recorded history.
-    pub(crate) fn reliability(
-        &self,
-        sources: &[&str],
-        now: u64,
-    ) -> BTreeMap<String, ReliabilityStats> {
-        let payments = self
-            .lines("payments.jsonl")
-            .into_iter()
-            .filter_map(|line| serde_json::from_value::<PaymentRecord>(line).ok())
-            .collect::<Vec<_>>();
-        let observations = self.lines("observations.jsonl");
-        sources
-            .iter()
-            .map(|source| {
-                let first = payments
-                    .iter()
-                    .filter(|record| record.source_id == *source)
-                    .map(|record| record.timestamp)
-                    .chain(observations.iter().filter_map(|line| {
-                        (line["source_id"] == *source)
-                            .then(|| line["timestamp"].as_u64())
-                            .flatten()
-                    }))
-                    .min();
-                ((*source).to_owned(), stats(source, &payments, first, now))
-            })
-            .collect()
-    }
-
-    /// Appends one real payment outcome, in the lab executor's record format.
-    pub(crate) async fn record_payment(&self, record: &Value) {
-        let _guard = self.write.lock().await;
-        let result = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.dir.join("payments.jsonl"))
-            .and_then(|mut file| file.write_all(format!("{record}\n").as_bytes()));
-        if let Err(error) = result {
-            eprintln!("EcashMesh lab history: cannot append a payment: {error}");
-        }
-    }
-
-    /// Appends one observation per source. Failures to persist are reported,
-    /// never fatal to an evaluation.
-    pub(crate) async fn record(&self, records: &[Value]) {
-        if records.is_empty() {
-            return;
-        }
-        let _guard = self.write.lock().await;
-        let path = self.dir.join("observations.jsonl");
-        if fs::metadata(&path).is_ok_and(|meta| meta.len() > MAX_OBSERVATION_BYTES) {
-            let _ = fs::rename(&path, self.dir.join("observations.jsonl.1"));
-        }
-        let result = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .and_then(|mut file| {
-                let mut text = String::new();
-                for record in records {
-                    text.push_str(&record.to_string());
-                    text.push('\n');
-                }
-                file.write_all(text.as_bytes())
-            });
-        if let Err(error) = result {
-            eprintln!("EcashMesh lab history: cannot append observations: {error}");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,6 +210,7 @@ mod tests {
         PaymentRecord {
             source_id: source.into(),
             timestamp: at,
+            amount_sats: None,
             outcome: outcome.into(),
             failure_class: class.map(Into::into),
             failure_reason: class.map(|class| format!("{class} failure")),

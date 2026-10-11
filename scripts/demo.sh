@@ -17,7 +17,7 @@ case "${1:-help}" in
       echo 'Start ./scripts/demo.sh bridge first so it can create its local token.' >&2
       exit 1
     fi
-    export ROUTING_MODE=live ECASHMESH_ENABLE_REAL_PAYMENTS=false
+    export ECASHMESH_ENABLE_REAL_PAYMENTS=false
     exec ./target/release/ecashmesh-api
     ;;
   web)

@@ -6,7 +6,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { EcashMeshError } from "../ecashmesh/transport";
+import { EcashMeshError } from "@ecashmesh/client";
 
 export { feeEstimateLabel, feeRate, feeReasonableness } from "./fees";
 

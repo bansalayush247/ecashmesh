@@ -9,29 +9,62 @@ description = "Read-only Fedimint evidence and Lightning quote adapter for Ecash
 [lints]
 workspace = true
 
+[features]
+default = ["bridge"]
+# The fedimint-bridge binary: native Fedimint clients. The library itself is
+# only an HTTP client of the bridge and needs none of this.
+bridge = [
+  "dep:anyhow",
+  "dep:axum",
+  "dep:fedimint-bip39",
+  "dep:fedimint-api-client",
+  "dep:fedimint-client",
+  "dep:fedimint-connectors",
+  "dep:fedimint-core",
+  "dep:fedimint-ln-client",
+  "dep:fedimint-ln-common",
+  "dep:fedimint-lnv2-client",
+  "dep:fedimint-lnv2-common",
+  "dep:fedimint-meta-client",
+  "dep:fedimint-mint-client",
+  "dep:fedimint-rocksdb",
+  "dep:fedimint-wallet-client",
+  "dep:hex",
+  "dep:rand",
+  "dep:socket2",
+  "tokio/rt-multi-thread",
+  "tokio/net",
+  "tokio/signal",
+]
+
+[[bin]]
+name = "fedimint-bridge"
+required-features = ["bridge"]
+
 [dependencies]
-anyhow = "1"
-axum = "0.8"
+anyhow = { version = "1", optional = true }
+axum = { version = "0.8", optional = true }
 ecashmesh-core = { path = "../ecashmesh-core" }
-fedimint-bip39 = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
-fedimint-api-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
-fedimint-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
-fedimint-connectors = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
-fedimint-core = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
-fedimint-ln-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
-fedimint-ln-common = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
-fedimint-lnv2-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
-fedimint-lnv2-common = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
-fedimint-meta-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
-fedimint-mint-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
-fedimint-rocksdb = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
-fedimint-wallet-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1" }
+fedimint-bip39 = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
+fedimint-api-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
+fedimint-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
+fedimint-connectors = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
+fedimint-core = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
+fedimint-ln-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
+fedimint-ln-common = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
+fedimint-lnv2-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
+fedimint-lnv2-common = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
+fedimint-meta-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
+fedimint-mint-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
+fedimint-rocksdb = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
+fedimint-wallet-client = { git = "https://github.com/fedimint/fedimint.git", tag = "v0.12.1", optional = true }
 futures = "0.3"
-hex = "0.4"
+hex = { version = "0.4", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-rand = "0.8"
+rand = { version = "0.8", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-socket2 = { version = "0.5.10", features = ["all"] }
-tokio = { version = "1", features = ["process", "time"] }
+# Not used directly: enables socket2 "all", which the Fedimint stack's netwatch needs.
+socket2 = { version = "0.5.10", features = ["all"], optional = true }
+tokio = { version = "1", features = ["macros", "process", "time"] }

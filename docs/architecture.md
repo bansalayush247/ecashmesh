@@ -12,8 +12,10 @@ its native protocol.
 
 | Component | Responsibility |
 |---|---|
+| `ecashmesh-sdk` | Validates requests, collects evidence concurrently with deadlines, decides feasibility, returns ranked results. Optional evidence comes from the host through two traits: `LiquidityOracle` (Lightning probes, channel state) and `PaymentHistory` (real payment outcomes) |
+| `ecashmesh-ffi` | UniFFI bindings over the SDK for Swift, Kotlin and React Native |
+| `ecashmesh-api` | HTTP host over the SDK. In the regtest lab it also implements both traits (LND/gateway probes, a JSON-lines payment history) and makes real lab payments |
 | `apps/reference-wallet` | Source list, payment form, results and explanations |
-| `ecashmesh-api` | Validates requests, collects evidence concurrently with deadlines, decides feasibility, returns ranked results |
 | `ecashmesh-core` | Evidence model, deterministic ranking, risk penalties, explanations |
 | `ecashmesh-cashu` | Cashu mint discovery, metadata (NUT-06), keysets, melt/mint quotes |
 | `ecashmesh-fedimint` | `fedimint-bridge`: one process hosting native Fedimint v0.12.1 clients; fee quotes, gateway info, guardian audits |
@@ -42,6 +44,10 @@ The bridge has no payment endpoint. The browser never receives a credential.
    - Fedimint: a native, non-committing fee quote (federation fee + gateway
      fee), wallet balance, selected gateway and its routing-fee budget,
      federation reserve.
+   - On live networks: the wallet's own recorded payments (`OutcomeLog`). A
+     success through a source in the last hour that covers the amount is
+     medium-confidence liquidity (it reached another payee); every outcome
+     counts towards reliability. A failure never excludes a source on its own.
    - Regtest lab only: Lightning probes and channel state from each source's
      own node, guardian solvency audits, and real recorded payment outcomes.
 3. **Feasibility** — a source is excluded, with a reason, when:
@@ -68,7 +74,7 @@ Every signal is in basis points, 0–10000.
 
 | Signal | Weight | Input |
 |---|---|---|
-| Liquidity confidence | 25% | Probe/channel evidence that this source's node can route this amount: High 10000, Medium 6000, Low 2500, unknown 0 |
+| Liquidity confidence | 25% | Probe/channel evidence, or a recent recorded payment, that this source's node can route this amount: High 10000, Medium 6000, Low 2500, unknown 0 |
 | Reliability | 20% | Success rate of real recorded payments, capped by health |
 | Fee reasonableness | 15% | Total fee as a share of the amount; 1% or more scores 0 |
 | Freshness | 15% | Share of the evidence that is fresh (stale counts a quarter) |
@@ -93,6 +99,27 @@ deterministic. Stale evidence also halves its signal.
 reachable service is not proof of reliability, and a wallet balance is never
 used as a liability.
 
+## Planning: split payments and transfers
+
+Both only plan; the wallet executes, so the SDK still never moves funds.
+
+**Split (`plan_split`, `POST /v1/payments/split`).** When no single source
+holds enough, one invoice is paid from several Cashu mints: each pays a part
+with a NUT-15 partial melt quote. The receiver settles only when every part
+arrives, so Lightning makes it atomic. Mints are used largest balance first
+(fewest parts), each part sized so part + quoted fee reserve fits that mint's
+balance. Refused when the invoice lacks the `basic_mpp` feature. Fedimint
+LNv2 sends always pay the whole invoice, so federations take no part.
+
+**Transfer (`plan_transfer`, `POST /v1/transfers/plan`).** Moves the wallet's
+own funds from one source to another as an action the user confirms. The
+destination mint issues a mint quote (a federation destination passes an
+invoice from the wallet's own Fedimint client); only the chosen source is
+quoted against that exact invoice. The plan carries the invoice, the source's
+melt quote, the mint quote to claim with, and the fee. This is the safe form
+of routing value through another ecash system: no custodian is hidden inside
+a payment.
+
 ## Other endpoints
 
 | Endpoint | Use |
@@ -100,6 +127,8 @@ used as a liability.
 | `GET /health` | Readiness |
 | `GET /v1/connectors` | Current source observations |
 | `POST /v1/routes/compare` | Fee-only comparison (live demo) |
+| `POST /v1/payments/split` | Split-payment plan (above) |
+| `POST /v1/transfers/plan` | Transfer plan (above) |
 | `GET /v1/federations/setup`, `POST /v1/federations/setup/{identify,preview,connect}` | Join a federation explicitly from an invite |
 | `GET /v1/lab/results/latest` | Regtest lab only: the verified 56-route results |
 | `GET /v1/lab/sources`, `/v1/lab/balances`; `POST /v1/lab/invoice`, `/v1/lab/pay`; `GET`/`POST /v1/lab/gateway-fee` | Regtest lab only: lab sources and balances, invoices, real payments with each source's native client, the gateway-fee experiment |

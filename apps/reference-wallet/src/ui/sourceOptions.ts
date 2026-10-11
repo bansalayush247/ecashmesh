@@ -2,7 +2,7 @@ import type {
   PaymentSource,
   RouteComparison,
   RouteDecision,
-} from "../ecashmesh/contracts";
+} from "@ecashmesh/client";
 
 export type ComparisonOption = RouteComparison["candidates"][number];
 

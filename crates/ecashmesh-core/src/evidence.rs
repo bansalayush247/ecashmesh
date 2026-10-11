@@ -255,75 +255,6 @@ impl<T> Evidence<T> {
     }
 }
 
-/// The deterministic result of combining multiple observations for one fact.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum EvidenceAggregate<T> {
-    /// Agreeing current observations, represented by the strongest/latest one.
-    Known(EvidenceObservation<T>),
-    /// No usable observations were supplied.
-    Unknown,
-    /// Agreeing but stale observations, represented by the strongest/latest one.
-    Stale(EvidenceObservation<T>),
-    /// Usable observations disagree about the underlying value.
-    Conflicting {
-        /// All conflicting observations, retained for inspection.
-        observations: Vec<EvidenceObservation<T>>,
-    },
-}
-
-impl<T: Clone + Eq> Evidence<T> {
-    /// Aggregates observations deterministically.
-    ///
-    /// Unknown inputs do not add a value. Any disagreement among usable values
-    /// is preserved as [`EvidenceAggregate::Conflicting`]. Otherwise, the
-    /// newest observation wins; confidence and source provide deterministic
-    /// tie-breakers. A current observation wins over a stale one.
-    #[must_use]
-    pub fn aggregate(inputs: impl IntoIterator<Item = Self>) -> EvidenceAggregate<T> {
-        let mut current = Vec::new();
-        let mut stale = Vec::new();
-
-        for evidence in inputs {
-            match evidence {
-                Self::Known(observation) => current.push(observation),
-                Self::Stale(observation) => stale.push(observation),
-                Self::Unknown => {}
-            }
-        }
-
-        let all_observations = current.iter().chain(&stale).collect::<Vec<_>>();
-        let Some(first) = all_observations.first() else {
-            return EvidenceAggregate::Unknown;
-        };
-        if all_observations
-            .iter()
-            .any(|observation| observation.value != first.value)
-        {
-            return EvidenceAggregate::Conflicting {
-                observations: current.into_iter().chain(stale).collect(),
-            };
-        }
-
-        if let Some(best) = select_best(current) {
-            EvidenceAggregate::Known(best)
-        } else if let Some(best) = select_best(stale) {
-            EvidenceAggregate::Stale(best)
-        } else {
-            EvidenceAggregate::Unknown
-        }
-    }
-}
-
-fn select_best<T>(mut observations: Vec<EvidenceObservation<T>>) -> Option<EvidenceObservation<T>> {
-    observations.sort_unstable_by(|left, right| {
-        left.observed_at
-            .cmp(&right.observed_at)
-            .then(left.confidence.cmp(&right.confidence))
-            .then(left.source.cmp(&right.source))
-    });
-    observations.pop()
-}
-
 /// The observed operational state of a connector.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectorHealth {
@@ -397,7 +328,6 @@ impl ConnectorEvidence {
 mod tests {
     use super::*;
 
-    const OLD: EvidenceTimestamp = EvidenceTimestamp::from_unix_seconds(100);
     const NEW: EvidenceTimestamp = EvidenceTimestamp::from_unix_seconds(200);
 
     #[test]
@@ -414,70 +344,5 @@ mod tests {
         assert_eq!(unknown.value(), None);
         assert_eq!(unavailable.freshness(), EvidenceFreshness::Fresh);
         assert_eq!(unavailable.value(), Some(&ConnectorHealth::Unavailable));
-    }
-
-    #[test]
-    fn aggregate_prefers_the_latest_agreeing_fresh_observation() {
-        let aggregate = Evidence::aggregate([
-            Evidence::reported(7_u8, EvidenceSource::Connector, OLD, ConfidenceLevel::High),
-            Evidence::reported(7_u8, EvidenceSource::Observer, NEW, ConfidenceLevel::Low),
-        ]);
-
-        assert_eq!(
-            aggregate,
-            EvidenceAggregate::Known(EvidenceObservation::new(
-                7,
-                EvidenceSource::Observer,
-                NEW,
-                ConfidenceLevel::Low,
-            ))
-        );
-    }
-
-    #[test]
-    fn aggregate_retains_stale_and_missing_states() {
-        let stale = Evidence::aggregate([Evidence::reported_stale(
-            7_u8,
-            EvidenceSource::Historical,
-            OLD,
-            ConfidenceLevel::Medium,
-        )]);
-        let missing = Evidence::<u8>::aggregate([Evidence::unknown(), Evidence::unknown()]);
-
-        assert!(matches!(stale, EvidenceAggregate::Stale(_)));
-        assert_eq!(missing, EvidenceAggregate::Unknown);
-    }
-
-    #[test]
-    fn aggregate_preserves_conflicting_observations_for_inspection() {
-        let aggregate = Evidence::aggregate([
-            Evidence::reported(7_u8, EvidenceSource::Connector, OLD, ConfidenceLevel::High),
-            Evidence::reported(
-                8_u8,
-                EvidenceSource::Independent,
-                NEW,
-                ConfidenceLevel::High,
-            ),
-        ]);
-
-        assert_eq!(
-            aggregate,
-            EvidenceAggregate::Conflicting {
-                observations: vec![
-                    EvidenceObservation::new(
-                        7,
-                        EvidenceSource::Connector,
-                        OLD,
-                        ConfidenceLevel::High
-                    ),
-                    EvidenceObservation::new(
-                        8,
-                        EvidenceSource::Independent,
-                        NEW,
-                        ConfidenceLevel::High
-                    ),
-                ],
-            }
-        );
     }
 }

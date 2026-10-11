@@ -2,13 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   browserSignerAvailable,
   connectBrowserSigner,
-  connectNip46Signer,
-  discoverNip60Wallet,
-  discoverPublicSources,
-  restoreNostrRegistry,
-  saveNostrRegistry,
+  createNostrClient,
+  parseRelays,
   type NostrSignerSession,
-} from "../nostr/client";
+} from "@ecashmesh/client";
 import {
   addFederationProfile,
   cashuProfilesFromNip60,
@@ -18,15 +15,20 @@ import {
   pendingFederationProfile,
   setProfileEnabled,
   type PaymentSourceProfile,
-} from "../nostr/sourceRegistry";
-import { restoreRegistry, serializeRegistry } from "../nostr/registrySync";
-import type { Announcement } from "../nostr/discovery";
+} from "@ecashmesh/client";
+import { restoreRegistry, serializeRegistry } from "@ecashmesh/client";
+import type { Announcement } from "@ecashmesh/client";
 import {
   bindLocalFederation,
   createFederationSetupClient,
   type LocalConnection,
   type SetupCatalog,
 } from "./federationSetup";
+
+const nostr = createNostrClient({
+  relays: parseRelays(process.env.EXPO_PUBLIC_NOSTR_RELAYS),
+  app: { name: "EcashMesh", url: "http://localhost:8081" },
+});
 
 export function useNostrSourceRegistry(baseUrl: string) {
   const federationSetup = useMemo(
@@ -108,7 +110,7 @@ export function useNostrSourceRegistry(baseUrl: string) {
         const next =
           kind === "browser"
             ? await connectBrowserSigner()
-            : await connectNip46Signer(
+            : await nostr.connectNip46Signer(
                 uri ?? "",
                 () => {
                   if (epoch === generation.current)
@@ -135,10 +137,9 @@ export function useNostrSourceRegistry(baseUrl: string) {
         } catch {}
         identityRef.current = next.pubkey;
         setProfiles(local);
-        const restored = await restoreNostrRegistry(
-          next,
-          controller.current.signal,
-        ).catch(() => undefined);
+        const restored = await nostr
+          .restoreNostrRegistry(next, controller.current.signal)
+          .catch(() => undefined);
         if (epoch !== generation.current) return;
         if (restored !== undefined && restored !== null) {
           setProfiles(restored);
@@ -151,7 +152,7 @@ export function useNostrSourceRegistry(baseUrl: string) {
         }
         // A saved registry is authoritative: removed NIP-60 sources stay removed.
         try {
-          const wallet = await discoverNip60Wallet(
+          const wallet = await nostr.discoverNip60Wallet(
             next,
             undefined,
             controller.current.signal,
@@ -389,7 +390,9 @@ export function useNostrSourceRegistry(baseUrl: string) {
     setBusy(true);
     setError(null);
     try {
-      const found = await discoverPublicSources(controller.current.signal);
+      const found = await nostr.discoverPublicSources(
+        controller.current.signal,
+      );
       if (epoch === generation.current) setAnnouncements(found);
     } catch {
       if (epoch === generation.current)
@@ -410,7 +413,7 @@ export function useNostrSourceRegistry(baseUrl: string) {
     setBusy(true);
     setError(null);
     try {
-      const at = await saveNostrRegistry(
+      const at = await nostr.saveNostrRegistry(
         snapshot,
         signer,
         controller.current.signal,
@@ -455,7 +458,7 @@ export function useNostrSourceRegistry(baseUrl: string) {
     const epoch = generation.current;
     setBusy(true);
     try {
-      const wallet = await discoverNip60Wallet(
+      const wallet = await nostr.discoverNip60Wallet(
         signer,
         undefined,
         controller.current.signal,

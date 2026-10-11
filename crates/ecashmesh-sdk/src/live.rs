@@ -4,29 +4,29 @@
 //! and normalization remain in `ecashmesh-cashu`; bounded route generation and
 //! ranking remain in `ecashmesh-core`. It never creates a mint-to-mint edge.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use ecashmesh_cashu::{
     CashuObservation, CashuPaymentRequest, KeysetFee, MintQuote, QuoteObservation,
     discovery::DiscoveryService,
 };
 use ecashmesh_core::{
-    Amount, AmountAwareEvidence, ConfidenceLevel, ConnectorCapabilities, ConnectorEvidence,
-    ConnectorHealth, ConnectorId, ConnectorRegistry, ConnectorSnapshot, ConnectorType,
-    DiscoveredConnector, Evidence, EvidenceSource, EvidenceState, EvidenceTimestamp,
-    ExecutableEdge, GraphBuilder, GraphNode, GraphSnapshotPublisher, HealthObservation,
-    HealthState, LightningInvoice, RouteRanking, RouteSearchConfig, RouteSearchRequest,
-    ScalableRouter, SearchEndpoint, TransferMechanism,
+    Amount, ConfidenceLevel, ConnectorHealth, ConnectorId, ConnectorSnapshot, ConnectorType,
+    Evidence, EvidenceSource, EvidenceTimestamp, LightningInvoice, PaymentRequest, RouteRanking,
+    RouteRankingConfig, rank_routes,
 };
 use ecashmesh_fedimint::{FederationObservation, FedimintQuote, FedimintService};
 use serde_json::{Value, json};
 
-use crate::connectors::{ConnectorBatch, unix_now};
 use crate::fee_budget::{self, FeeBudgetCheck, RouteFee};
-use crate::history::LabHistory;
-use crate::probe::{
-    ChannelState, LiquidityBasis, LiquidityEvidence, LiquidityProbes, ProbeEffect, SourceLiquidity,
+use crate::liquidity::{
+    ChannelState, LiquidityBasis, LiquidityEvidence, ProbeEffect, SourceLiquidity,
 };
+use crate::sources::{ConnectorBatch, unix_now};
+use crate::{LiquidityOracle, PaymentHistory};
 
 /// A destination normalized by backend code before discovery or quote requests.
 #[derive(Clone, Debug)]
@@ -63,7 +63,7 @@ impl LiveDestination {
     }
 }
 
-/// A successful, quote-backed graph search plus data for API inspection.
+/// A successful, quote-backed ranking plus data for API inspection.
 pub(super) struct LiveEvaluation {
     pub ranking: RouteRanking,
     pub connectors: Vec<ConnectorSnapshot>,
@@ -102,14 +102,14 @@ pub(super) struct LiveNoRoute {
 }
 
 /// Builds only declared Cashu-to-Lightning edges for the normalized destination
-/// and evaluates the resulting immutable graph through the Phase 9 router.
+/// and ranks one candidate per feasible source.
 #[allow(clippy::too_many_lines)] // Keeps the full live feasibility chain and its exact no-route diagnostics together.
-#[allow(clippy::too_many_arguments)] // Each optional lab evidence source is an explicit input.
+#[allow(clippy::too_many_arguments)] // Each optional evidence source is an explicit input.
 pub(super) async fn evaluate(
     service: &Arc<DiscoveryService>,
     fedimint: &Arc<FedimintService>,
-    probes: Option<&LiquidityProbes>,
-    history: Option<&LabHistory>,
+    probes: Option<&dyn LiquidityOracle>,
+    history: Option<&dyn PaymentHistory>,
     batch: &ConnectorBatch,
     sources: Vec<ConnectorSnapshot>,
     destination: LiveDestination,
@@ -117,148 +117,19 @@ pub(super) async fn evaluate(
 ) -> Result<LiveEvaluation, LiveNoRoute> {
     let mut quote_observations = Vec::new();
     let destination_type = destination.type_code();
-    let (invoice, destination_context, destination_expiry) = match destination {
-        LiveDestination::Lightning(invoice) => {
-            if invoice.amount() != Some(amount) {
-                return Err(LiveNoRoute {
-                    details: vec![
-                        "unsupported destination: Lightning invoice amount must exactly match the requested amount"
-                            .into(),
-                    ],
-                    quote_observations,
-                });
-            }
-            (
-                invoice,
-                json!({
-                    "type": "lightning",
-                    "normalization": "checksummed_bolt11",
-                    "invoice_amount_sats": amount.sats(),
-                }),
-                None,
-            )
-        }
-        LiveDestination::Cashu(request) => {
-            if !request.supported_methods.is_empty()
-                && !request
-                    .supported_methods
-                    .iter()
-                    .any(|method| method.method == "bolt11")
-            {
-                return Err(LiveNoRoute {
-                    details: vec![
-                        "route constraints: NUT-18 request does not permit a bolt11 payment leg"
-                            .into(),
-                    ],
-                    quote_observations,
-                });
-            }
-            if request.amount.is_some_and(|claimed| claimed != amount) {
-                return Err(LiveNoRoute {
-                    details: vec![
-                        "route constraints: Cashu payment request amount does not match requested amount"
-                            .into(),
-                    ],
-                    quote_observations,
-                });
-            }
-            let targets = request
-                .mint_urls
-                .iter()
-                .filter_map(|mint_url| {
-                    batch
-                        .live_observations
-                        .iter()
-                        .find(|observation| &observation.mint_url == mint_url)
-                })
-                .collect::<Vec<_>>();
-            if targets.is_empty() {
-                return Err(LiveNoRoute {
-                    details: vec![
-                        "destination mint was not discovered or has no inspectable observation"
-                            .into(),
-                    ],
-                    quote_observations,
-                });
-            }
-            let embedded_invoice = request.invoice.clone();
-            let (target, invoice, expiry) = if let Some(invoice) = embedded_invoice {
-                let target = targets[0];
-                quote_observations.push(json!({
-                    "kind": "destination_invoice",
-                    "state": "known",
-                    "origin": "cashu_payment_request",
-                    "mint_url": target.mint_url,
-                }));
-                if invoice.amount() != Some(amount) {
-                    return Err(LiveNoRoute {
-                        details: vec![
-                            "route constraints: Cashu payment request invoice amount does not match requested amount"
-                                .into(),
-                        ],
-                        quote_observations,
-                    });
-                }
-                (target, invoice, None)
-            } else {
-                let mut failures = Vec::new();
-                let mut usable = None;
-                for target in targets {
-                    match service
-                        .mint_quote(target.id.clone(), &target.mint_url, amount)
-                        .await
-                    {
-                        Ok(quote) => {
-                            quote_observations.push(mint_quote_json(target, &quote));
-                            if let Some(observed) = quote.evidence.observation() {
-                                usable = Some((
-                                    target,
-                                    observed.value.invoice.clone(),
-                                    observed.value.expires_at_unix_seconds,
-                                ));
-                                break;
-                            }
-                            let detail = quote.issue.map_or_else(
-                                || "destination mint did not return a usable mint quote".into(),
-                                |issue| format!("{}: {}", issue.code, issue.message),
-                            );
-                            failures.push(format!("{}: {detail}", target.mint_url));
-                        }
-                        Err(error) => failures.push(format!("{}: {error}", target.mint_url)),
-                    }
-                }
-                let Some(usable) = usable else {
-                    return Err(LiveNoRoute {
-                        details: failures
-                            .into_iter()
-                            .map(|failure| format!("missing quote: {failure}"))
-                            .collect(),
-                        quote_observations,
-                    });
-                };
-                usable
-            };
-            (
-                invoice,
-                json!({
-                    "type": "cashu",
-                    "mint_url": target.mint_url,
-                    "mint_urls": request.mint_urls,
-                    "mints_are_preferred": request.mints_are_preferred,
-                    "unit": request.unit,
-                    "transports": request.transports.iter().map(|transport| json!({
-                        "type": transport.kind,
-                        "target": transport.target,
-                    })).collect::<Vec<_>>(),
-                    "supported_methods": request.supported_methods.iter().map(|method| json!({
-                        "method": method.method,
-                        "receiver_fee_sats": method.fee.map(Amount::sats),
-                    })).collect::<Vec<_>>(),
-                    "normalization": request.encoding.code(),
-                    "transfer": "cashu_mint_quote_to_lightning_invoice",
-                }),
-                expiry,
-            )
+    let ResolvedDestination {
+        invoice,
+        context: destination_context,
+        expiry: destination_expiry,
+    } = match resolve_destination(service, batch, destination, amount, &mut quote_observations)
+        .await
+    {
+        Ok(resolved) => resolved,
+        Err(details) => {
+            return Err(LiveNoRoute {
+                details,
+                quote_observations,
+            });
         }
     };
 
@@ -269,7 +140,7 @@ pub(super) async fn evaluate(
         .collect::<BTreeMap<_, _>>();
     let mut live_sources = Vec::new();
     let mut live_fee_terms = Vec::new();
-    let mut source_health = BTreeMap::new();
+    let mut unavailable = BTreeSet::new();
     let mut expiries = Vec::new();
     let mut no_route_details = Vec::new();
     let mut fee_checks = BTreeMap::new();
@@ -477,7 +348,9 @@ pub(super) async fn evaluate(
                 quote_observations.push(fee_budget_json(&check));
                 fee_checks.insert(source.id.clone(), check);
             }
-            source_health.insert(source.id.clone(), health_observation(&observation.health));
+            if is_unavailable(&observation.health) {
+                unavailable.insert(source.id.clone());
+            }
             if let Some(expiry) = quote.expires_at_unix_seconds {
                 expiries.push(expiry);
             }
@@ -574,10 +447,9 @@ pub(super) async fn evaluate(
         if let Some(expiry) = quote_evidence.value.expires_at_unix_seconds {
             expiries.push(expiry);
         }
-        source_health.insert(
-            source.id.clone(),
-            health_observation(&source.evidence.health),
-        );
+        if is_unavailable(&source.evidence.health) {
+            unavailable.insert(source.id.clone());
+        }
         live_sources.push(source);
     }
     // Evidence for sources that failed earlier remains inspectable.
@@ -617,10 +489,9 @@ pub(super) async fn evaluate(
     }
     let ranked = match rank_feasible_sources(
         live_sources,
-        &source_health,
+        &unavailable,
         &fee_checks,
         no_route_details,
-        invoice.as_str(),
         amount,
     ) {
         Ok(ranked) => ranked,
@@ -674,11 +545,7 @@ pub(super) async fn evaluate(
         graph_context: json!({
             "destination": destination_context,
             "sources": source_context,
-            "graph_version": ranked.graph["graph_version"],
-            "connector_count": ranked.graph["connector_count"],
-            "edge_count": ranked.graph["edge_count"],
             "mechanisms": mechanisms,
-            "search": ranked.graph["search"],
             "route_shape": route_shape,
             "route_classification": "quote_backed",
             "execution": "No wallet proofs, funds, or payment instruction were supplied to EcashMesh",
@@ -695,46 +562,191 @@ pub(super) async fn evaluate(
     })
 }
 
-/// A ranking over the sources that passed feasibility, with graph facts.
+/// A destination reduced to the Lightning invoice every source pays.
+pub(crate) struct ResolvedDestination {
+    pub invoice: LightningInvoice,
+    pub context: Value,
+    pub expiry: Option<u64>,
+}
+
+/// Turns the destination into one Lightning invoice: a BOLT11 invoice as is,
+/// or a Cashu request's embedded invoice or a fresh mint quote from one of
+/// its mints. Quote observations are appended to `observations`.
+#[allow(clippy::too_many_lines)] // One branch per destination kind, with exact no-route reasons.
+pub(crate) async fn resolve_destination(
+    service: &DiscoveryService,
+    batch: &ConnectorBatch,
+    destination: LiveDestination,
+    amount: Amount,
+    observations: &mut Vec<Value>,
+) -> Result<ResolvedDestination, Vec<String>> {
+    let (invoice, context, expiry) = match destination {
+        LiveDestination::Lightning(invoice) => {
+            if invoice.amount() != Some(amount) {
+                return Err(vec![
+                        "unsupported destination: Lightning invoice amount must exactly match the requested amount"
+                            .into(),
+                    ]);
+            }
+            (
+                invoice,
+                json!({
+                    "type": "lightning",
+                    "normalization": "checksummed_bolt11",
+                    "invoice_amount_sats": amount.sats(),
+                }),
+                None,
+            )
+        }
+        LiveDestination::Cashu(request) => {
+            if !request.supported_methods.is_empty()
+                && !request
+                    .supported_methods
+                    .iter()
+                    .any(|method| method.method == "bolt11")
+            {
+                return Err(vec![
+                    "route constraints: NUT-18 request does not permit a bolt11 payment leg".into(),
+                ]);
+            }
+            if request.amount.is_some_and(|claimed| claimed != amount) {
+                return Err(vec![
+                        "route constraints: Cashu payment request amount does not match requested amount"
+                            .into(),
+                    ]);
+            }
+            let targets = request
+                .mint_urls
+                .iter()
+                .filter_map(|mint_url| {
+                    batch
+                        .live_observations
+                        .iter()
+                        .find(|observation| &observation.mint_url == mint_url)
+                })
+                .collect::<Vec<_>>();
+            if targets.is_empty() {
+                return Err(vec![
+                    "destination mint was not discovered or has no inspectable observation".into(),
+                ]);
+            }
+            let embedded_invoice = request.invoice.clone();
+            let (target, invoice, expiry) = if let Some(invoice) = embedded_invoice {
+                let target = targets[0];
+                observations.push(json!({
+                    "kind": "destination_invoice",
+                    "state": "known",
+                    "origin": "cashu_payment_request",
+                    "mint_url": target.mint_url,
+                }));
+                if invoice.amount() != Some(amount) {
+                    return Err(vec![
+                            "route constraints: Cashu payment request invoice amount does not match requested amount"
+                                .into(),
+                        ]);
+                }
+                (target, invoice, None)
+            } else {
+                let mut failures = Vec::new();
+                let mut usable = None;
+                for target in targets {
+                    match service
+                        .mint_quote(target.id.clone(), &target.mint_url, amount)
+                        .await
+                    {
+                        Ok(quote) => {
+                            observations.push(mint_quote_json(target, &quote));
+                            if let Some(observed) = quote.evidence.observation() {
+                                usable = Some((
+                                    target,
+                                    observed.value.invoice.clone(),
+                                    observed.value.expires_at_unix_seconds,
+                                ));
+                                break;
+                            }
+                            let detail = quote.issue.map_or_else(
+                                || "destination mint did not return a usable mint quote".into(),
+                                |issue| format!("{}: {}", issue.code, issue.message),
+                            );
+                            failures.push(format!("{}: {detail}", target.mint_url));
+                        }
+                        Err(error) => failures.push(format!("{}: {error}", target.mint_url)),
+                    }
+                }
+                let Some(usable) = usable else {
+                    return Err(failures
+                        .into_iter()
+                        .map(|failure| format!("missing quote: {failure}"))
+                        .collect());
+                };
+                usable
+            };
+            (
+                invoice,
+                json!({
+                    "type": "cashu",
+                    "mint_url": target.mint_url,
+                    "mint_urls": request.mint_urls,
+                    "mints_are_preferred": request.mints_are_preferred,
+                    "unit": request.unit,
+                    "transports": request.transports.iter().map(|transport| json!({
+                        "type": transport.kind,
+                        "target": transport.target,
+                    })).collect::<Vec<_>>(),
+                    "supported_methods": request.supported_methods.iter().map(|method| json!({
+                        "method": method.method,
+                        "receiver_fee_sats": method.fee.map(Amount::sats),
+                    })).collect::<Vec<_>>(),
+                    "normalization": request.encoding.code(),
+                    "transfer": "cashu_mint_quote_to_lightning_invoice",
+                }),
+                expiry,
+            )
+        }
+    };
+    Ok(ResolvedDestination {
+        invoice,
+        context,
+        expiry,
+    })
+}
+
+/// A ranking over the sources that passed feasibility.
 struct RankedSources {
     ranking: RouteRanking,
     sources: Vec<ConnectorSnapshot>,
-    graph: Value,
 }
 
-/// Feasibility, then ranking. A source whose measured route fee exceeds its
-/// routing-fee budget is dropped here, before the ranker sees it, so it can
+/// Feasibility, then ranking. A source known to be unavailable, or whose
+/// measured route fee exceeds its routing-fee budget, is dropped here, before the ranker sees it, so it can
 /// neither be recommended nor outrank an executable source. With no source
 /// left this is the usual no-route outcome; it never falls back to an
 /// infeasible source.
 fn rank_feasible_sources(
     live_sources: Vec<ConnectorSnapshot>,
-    source_health: &BTreeMap<ConnectorId, HealthObservation>,
+    unavailable: &BTreeSet<ConnectorId>,
     fee_checks: &BTreeMap<ConnectorId, FeeBudgetCheck>,
     mut no_route_details: Vec<String>,
-    invoice: &str,
     amount: Amount,
 ) -> Result<RankedSources, Vec<String>> {
-    let (live_sources, infeasible): (Vec<_>, Vec<_>) =
-        live_sources.into_iter().partition(|source| {
-            !fee_checks
-                .get(&source.id)
-                .is_some_and(FeeBudgetCheck::infeasible)
-        });
-    for source in &infeasible {
-        no_route_details.push(format!(
-            "{}: {}",
-            source.id,
-            fee_checks[&source.id].message()
-        ));
+    let mut feasible = Vec::with_capacity(live_sources.len());
+    for source in live_sources {
+        if unavailable.contains(&source.id) {
+            no_route_details.push(format!("{}: source is unavailable", source.id));
+        } else if let Some(check) = fee_checks.get(&source.id).filter(|c| c.infeasible()) {
+            no_route_details.push(format!("{}: {}", source.id, check.message()));
+        } else {
+            feasible.push(source);
+        }
     }
+    let live_sources = feasible;
     if live_sources.is_empty() {
         if no_route_details.is_empty() {
             no_route_details.push("No source connectors can quote an executable route".into());
         }
         return Err(no_route_details);
     }
-    let (ranking, graph) = rank_sources(&live_sources, source_health, invoice, amount)?;
+    let ranking = rank_sources(&live_sources, amount);
     if ranking.ranked.is_empty() {
         return Err(no_route_details
             .into_iter()
@@ -747,154 +759,24 @@ fn rank_feasible_sources(
     Ok(RankedSources {
         ranking,
         sources: live_sources,
-        graph,
     })
 }
 
-/// Builds the immutable live graph (one native-settlement edge per source to
-/// the destination) and ranks it through the Phase 9 router.
-#[allow(clippy::too_many_lines)] // Registry, graph and search setup stay in one place.
-fn rank_sources(
-    live_sources: &[ConnectorSnapshot],
-    source_health: &BTreeMap<ConnectorId, HealthObservation>,
-    invoice: &str,
-    amount: Amount,
-) -> Result<(RouteRanking, Value), Vec<String>> {
-    let terminal_id = ConnectorId::new(format!("lightning:{}", stable_destination_id(invoice)))
-        .expect("hashed destination identity is a valid connector ID");
-    let terminal = ConnectorSnapshot {
-        id: terminal_id.clone(),
-        connector_type: ConnectorType::Lightning,
-        capabilities: ConnectorCapabilities::new(false, true, false, false),
-        liquidity: Evidence::Unknown,
-        fee: Evidence::Unknown,
-        reliability: Evidence::Unknown,
-        evidence: ConnectorEvidence::new(
-            terminal_id.clone(),
-            None,
-            Evidence::Unknown,
-            Evidence::Unknown,
-            Evidence::Unknown,
-        ),
-    };
-
-    let mut registry = ConnectorRegistry::default();
-    let mut updates = live_sources
+/// One native-settlement candidate per source, ranked by the core engine.
+fn rank_sources(live_sources: &[ConnectorSnapshot], amount: Amount) -> RouteRanking {
+    let evidence = live_sources
         .iter()
-        .cloned()
-        .map(|snapshot| DiscoveredConnector {
-            health: *source_health
-                .get(&snapshot.id)
-                .expect("every live source has a health observation"),
-            snapshot,
-        })
-        .collect::<Vec<_>>();
-    updates.push(DiscoveredConnector {
-        snapshot: terminal,
-        health: HealthObservation::unknown(),
-    });
-    registry.apply_incremental(updates).map_err(|error| {
-        vec![format!(
-            "live graph registry rejected connector data: {error}"
-        )]
-    })?;
-    let registry = registry.snapshot();
-    let mut graph = GraphBuilder::new(
-        (0..registry.len())
-            .map(|index| {
-                let connector = registry
-                    .get(ecashmesh_core::CompactConnectorId::from_index(
-                        u32::try_from(index).unwrap_or(u32::MAX),
-                    ))
-                    .expect("registry length bounds compact index");
-                GraphNode::new(
-                    connector.connector_type,
-                    connector.capabilities,
-                    connector.health,
-                )
-            })
-            .collect(),
+        .map(|source| (source.id.clone(), source.evidence.clone()))
+        .collect();
+    rank_routes(
+        PaymentRequest::new(amount),
+        live_sources
+            .iter()
+            .filter_map(|source| source.quote(amount).ok()),
+        &evidence,
+        EvidenceTimestamp::from_unix_seconds(unix_now()),
+        RouteRankingConfig::default(),
     )
-    .registry_generation(registry.generation());
-    let terminal_compact = registry
-        .get(ecashmesh_core::CompactConnectorId::from_index(0))
-        .and_then(|_| {
-            // ConnectorRegistry intentionally resolves external IDs only in the
-            // control plane. Rebuild the deterministic ID relationship here.
-            (0..registry.len()).find_map(|index| {
-                let compact =
-                    ecashmesh_core::CompactConnectorId::from_index(u32::try_from(index).ok()?);
-                (registry.get(compact)?.connector_id == terminal_id).then_some(compact)
-            })
-        })
-        .expect("terminal is registered");
-    let mut source_endpoints = Vec::new();
-    for source in live_sources {
-        let source_compact = (0..registry.len())
-            .find_map(|index| {
-                let compact =
-                    ecashmesh_core::CompactConnectorId::from_index(u32::try_from(index).ok()?);
-                (registry.get(compact)?.connector_id == source.id).then_some(compact)
-            })
-            .expect("source is registered");
-        source_endpoints.push(SearchEndpoint::Connector(source_compact));
-        let fee = source
-            .fee
-            .value()
-            .map_or(Amount::ZERO, |quote| quote.amount);
-        graph.add_edge(ExecutableEdge {
-            from: source_compact,
-            to: terminal_compact,
-            mechanism: if source.connector_type == ConnectorType::Fedimint {
-                TransferMechanism::FedimintLightning
-            } else {
-                TransferMechanism::CashuLightning
-            },
-            base_fee: fee,
-            fee_parts_per_million: 0,
-            // A quote proves this exact mechanism was quotable, but not that
-            // the mint has spendable reserves or user-held input proofs.
-            amount_evidence: AmountAwareEvidence::unknown(),
-            execution_evidence: EvidenceState::Known,
-        });
-    }
-    let snapshot = Arc::new(
-        graph
-            .build(1)
-            .map_err(|error| vec![format!("live graph build failed: {error}")])?,
-    );
-    let publisher = Arc::new(GraphSnapshotPublisher::new(Arc::clone(&snapshot)));
-    let router = ScalableRouter::new(publisher, RouteSearchConfig::production_default());
-    let result = router
-        .evaluate_at(
-            &RouteSearchRequest {
-                amount,
-                sources: source_endpoints,
-                destinations: vec![SearchEndpoint::Connector(terminal_compact)],
-                // One independent native-settlement candidate per live source.
-                // Preserve every viable alternative for registry comparison.
-                top_k: live_sources.len().max(1),
-            },
-            &registry,
-            EvidenceTimestamp::from_unix_seconds(unix_now()),
-        )
-        .map_err(|error| vec![format!("route search: {error}")])?;
-    Ok((
-        result.ranking,
-        json!({
-            "graph_version": result.graph_version,
-            "connector_count": snapshot.connector_count(),
-            "edge_count": snapshot.edge_count(),
-            "search": {
-                "candidates_generated": result.metrics.candidates_generated,
-                "nodes_explored": result.metrics.nodes_explored,
-                "edges_explored": result.metrics.edges_explored,
-                "pareto_pruned": result.metrics.pareto_pruned,
-                "feasibility_pruned": result.metrics.feasibility_pruned,
-                "cache_hit": result.metrics.cache_hit,
-            },
-        }),
-    ))
 }
 
 /// Evaluator-vs-execution invariant: no ranked route, least of all the
@@ -969,7 +851,7 @@ fn apply_liquidity(
     };
     let now = unix_now();
     let (effect, basis) =
-        crate::probe::combined_effect(probe.as_ref(), channels.as_ref(), amount, now);
+        crate::liquidity::combined_effect(probe.as_ref(), channels.as_ref(), amount, now);
     let (label, issue, exclusion) = match effect {
         ProbeEffect::Liquidity(liquidity) => {
             source.liquidity = liquidity;
@@ -1054,8 +936,8 @@ fn fee_budget_json(check: &FeeBudgetCheck) -> Value {
 /// reliability (the model keeps the two levels separate; in this single-hop
 /// graph both describe payments through this source). The earliest recorded
 /// observation is the connector's first-observed time.
-fn apply_reliability(source: &mut ConnectorSnapshot, stats: &crate::history::ReliabilityStats) {
-    let evidence = crate::history::evidence(stats);
+fn apply_reliability(source: &mut ConnectorSnapshot, stats: &crate::reliability::ReliabilityStats) {
+    let evidence = crate::reliability::evidence(stats);
     source.reliability = evidence.clone();
     source.evidence.reliability = evidence;
     if let Some(first) = stats.first_observed_at_unix_seconds {
@@ -1135,23 +1017,10 @@ fn payee_pubkey(invoice: &str) -> Option<String> {
         .map(|invoice| invoice.get_payee_pub_key().to_string())
 }
 
-fn health_observation(evidence: &Evidence<ConnectorHealth>) -> HealthObservation {
-    let health = |health| match health {
-        ConnectorHealth::Healthy => HealthState::Healthy,
-        ConnectorHealth::Degraded => HealthState::Degraded,
-        ConnectorHealth::Unavailable => HealthState::Unavailable,
-    };
-    match evidence {
-        Evidence::Known(observation) => {
-            HealthObservation::known(health(observation.value), observation.observed_at)
-        }
-        Evidence::Stale(observation) => HealthObservation {
-            state: EvidenceState::Stale,
-            health: health(observation.value),
-            observed_at: Some(observation.observed_at),
-        },
-        Evidence::Unknown => HealthObservation::unknown(),
-    }
+/// Only a fresh observation of an outage excludes a source; unknown or stale
+/// health is ranked with its penalty instead.
+fn is_unavailable(health: &Evidence<ConnectorHealth>) -> bool {
+    matches!(health, Evidence::Known(observation) if observation.value == ConnectorHealth::Unavailable)
 }
 
 fn mint_quote_json(target: &CashuObservation, quote: &QuoteObservation<MintQuote>) -> Value {
@@ -1164,6 +1033,9 @@ fn mint_quote_json(target: &CashuObservation, quote: &QuoteObservation<MintQuote
             json!({
                 "quote_id": value.quote_id,
                 "expiry": value.expires_at_unix_seconds,
+                // The invoice a source pays; the wallet claims the minted
+                // ecash with `quote_id` once it is paid.
+                "invoice": value.invoice.as_str(),
                 "invoice_amount_sats": value.invoice.amount().map(Amount::sats),
             })
         },
@@ -1271,23 +1143,11 @@ fn quote_json<T>(
     })
 }
 
-fn stable_destination_id(value: &str) -> String {
-    // Identifier only; this is neither an invoice hash nor a payment secret.
-    let mut hash = 1_469_598_103_934_665_603_u64;
-    for byte in value.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(1_099_511_628_211);
-    }
-    format!("{hash:016x}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fee_budget::RouteFeeBasis;
-    use ecashmesh_core::{FeeQuote, LiquidityInfo};
-
-    const INVOICE: &str = "lnbcrt10u1-fee-budget-test";
+    use ecashmesh_core::{ConnectorCapabilities, ConnectorEvidence, FeeQuote, LiquidityInfo};
 
     fn source(id: &str, connector_type: ConnectorType, fee_sats: u64) -> ConnectorSnapshot {
         let id = ConnectorId::new(id).unwrap();
@@ -1325,19 +1185,6 @@ mod tests {
         source(id, ConnectorType::Fedimint, fee_sats)
     }
 
-    fn healthy(sources: &[ConnectorSnapshot]) -> BTreeMap<ConnectorId, HealthObservation> {
-        let now = EvidenceTimestamp::from_unix_seconds(unix_now());
-        sources
-            .iter()
-            .map(|source| {
-                (
-                    source.id.clone(),
-                    HealthObservation::known(HealthState::Healthy, now),
-                )
-            })
-            .collect()
-    }
-
     fn checks(
         verdicts: &[(&str, &'static str, u64, u64)],
     ) -> BTreeMap<ConnectorId, FeeBudgetCheck> {
@@ -1364,13 +1211,11 @@ mod tests {
         sources: Vec<ConnectorSnapshot>,
         fee_checks: &BTreeMap<ConnectorId, FeeBudgetCheck>,
     ) -> Result<RankedSources, Vec<String>> {
-        let health = healthy(&sources);
         rank_feasible_sources(
             sources,
-            &health,
+            &BTreeSet::new(),
             fee_checks,
             Vec::new(),
-            INVOICE,
             Amount::from_sats(1_000),
         )
     }
@@ -1501,14 +1346,7 @@ mod tests {
     #[test]
     fn ranking_an_infeasible_source_violates_the_invariant() {
         let sources = vec![fedimint("fedimint:a", 1)];
-        let ranking = rank_sources(
-            &sources,
-            &healthy(&sources),
-            INVOICE,
-            Amount::from_sats(1_000),
-        )
-        .unwrap()
-        .0;
+        let ranking = rank_sources(&sources, Amount::from_sats(1_000));
         let feasible = checks(&[("fedimint:a", "gateway_routing_fee_budget", 0, 0)]);
         assert_eq!(fee_budget_invariant(&ranking, &feasible), Ok(()));
         let infeasible = checks(&[("fedimint:a", "gateway_routing_fee_budget", 1, 0)]);

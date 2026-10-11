@@ -186,7 +186,9 @@ const scoreContributionsSchema = z
   })
   .passthrough();
 export type ScoreContributions = z.infer<typeof scoreContributionsSchema>;
-// Regtest-lab, amount-specific Lightning liquidity evidence (no credentials).
+// Amount-specific Lightning liquidity evidence (no credentials): a probe from
+// the source's node (lab), or a payment the wallet recorded
+// (`evidence_source: "recorded_payment"`).
 const probeSchema = z
   .object({
     node: z.string(),
@@ -255,7 +257,7 @@ const liquidityEvidenceSchema = z
   })
   .passthrough();
 export type LiquidityEvidence = z.infer<typeof liquidityEvidenceSchema>;
-// Real regtest payment outcomes; probes and quotes never count.
+// Real payment outcomes; probes and quotes never count.
 const reliabilityEvidenceSchema = z
   .object({
     window_seconds: unsigned,
@@ -542,3 +544,69 @@ export function paymentToWire(payment: PaymentInput) {
       : {}),
   };
 }
+
+// Split payment: one invoice paid by several Cashu mints (NUT-15). Lightning
+// settles every part or none. The wallet executes each part's melt quote.
+const splitPartSchema = z
+  .object({
+    source_id: z.string(),
+    mint_url: z.string(),
+    amount_sats: unsigned,
+    melt_quote_id: z.string(),
+    fee_reserve_sats: unsigned,
+    expires_at_unix_seconds: unsigned.nullable(),
+  })
+  .passthrough();
+export const splitPlanSchema = z
+  .object({
+    amount_sats: unsigned,
+    invoice: z.string(),
+    parts: z.array(splitPartSchema).min(1),
+    total_fee_reserve_sats: unsigned,
+    expires_at_unix_seconds: unsigned,
+    atomic: z.literal(true),
+    skipped: z.array(
+      z
+        .object({
+          source_id: z.string().nullable(),
+          mint_url: z.string(),
+          reason: z.string(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+export type SplitPlan = z.infer<typeof splitPlanSchema>;
+export type SplitInput = {
+  amount: number;
+  destination: { type: "lightning" | "cashu"; value: string };
+  /** Spendable sats per Cashu mint URL; only these mints pay. */
+  balances: Record<string, number>;
+};
+
+// Moving the wallet's own funds between two of its sources, confirmed by the
+// user. Nothing moves until the wallet executes the plan.
+export const transferPlanSchema = z
+  .object({
+    amount_sats: unsigned,
+    source_id: z.string(),
+    invoice: z.string(),
+    source_melt_quote_id: z.string().nullable(),
+    destination_mint_quote_id: z.string().nullable(),
+    destination_mint_url: z.string().nullable(),
+    estimated_fee_sats: unsigned.nullable(),
+    fee_kind: z.string(),
+    expires_at_unix_seconds: unsigned,
+    evaluation: decisionSchema,
+  })
+  .passthrough();
+export type TransferPlan = z.infer<typeof transferPlanSchema>;
+export type TransferInput = {
+  amount: number;
+  from:
+    | { type: "cashu_mint"; url: string }
+    | { type: "federation"; connector_id: string };
+  /** A federation receives through an invoice from the wallet's own client. */
+  to:
+    { type: "cashu_mint"; url: string } | { type: "invoice"; invoice: string };
+};
