@@ -198,6 +198,19 @@ impl EcashMeshClient {
         to_json(&self.mesh.plan_split(request).await?)
     }
 
+    /// Plans moving the wallet's own funds between two of its sources, for
+    /// the user to confirm. `request_json` is
+    /// `{"amount", "from": {"type": "cashu_mint", "url"} | {"type": "federation", "connector_id"},
+    /// "to": {"type": "cashu_mint", "url"} | {"type": "invoice", "invoice"}}`.
+    ///
+    /// # Errors
+    /// See [`EcashMeshError`].
+    pub async fn plan_transfer(&self, request_json: String) -> Result<String, EcashMeshError> {
+        let request =
+            serde_json::from_str(&request_json).map_err(|error| invalid("invalid_json", &error))?;
+        to_json(&self.mesh.plan_transfer(request).await?)
+    }
+
     /// Observes the request's sources and discovery hints without quoting.
     ///
     /// # Errors

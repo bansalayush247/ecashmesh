@@ -42,6 +42,7 @@ mod request;
 mod response;
 mod sources;
 pub mod split;
+pub mod transfer;
 
 pub use error::{Error, ErrorKind};
 pub use outcomes::OutcomeLog;
@@ -213,6 +214,28 @@ impl EcashMesh {
                     ErrorKind::Deadline,
                     "EVALUATION_DEADLINE",
                     "Split planning exceeded its deadline. Retry.",
+                )
+            })?
+    }
+
+    /// Plans moving the wallet's own funds from one source to another, for
+    /// the user to confirm: the invoice the source pays, the quotes to
+    /// execute it with, and the fee. Only plans; nothing moves until the
+    /// wallet executes it.
+    ///
+    /// # Errors
+    /// As [`Self::evaluate`] for the chosen source.
+    pub async fn plan_transfer(
+        &self,
+        request: transfer::TransferRequest,
+    ) -> Result<transfer::TransferPlan, Error> {
+        tokio::time::timeout(self.deadline, transfer::plan(&self.sources, request))
+            .await
+            .map_err(|_| {
+                Error::new(
+                    ErrorKind::Deadline,
+                    "EVALUATION_DEADLINE",
+                    "Transfer planning exceeded its deadline. Retry.",
                 )
             })?
     }
