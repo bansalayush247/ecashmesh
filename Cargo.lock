@@ -1653,6 +1653,7 @@ dependencies = [
 name = "ecashmesh-sdk"
 version = "0.1.0"
 dependencies = [
+ "bitcoin",
  "ecashmesh-cashu",
  "ecashmesh-core",
  "ecashmesh-fedimint",

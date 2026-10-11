@@ -22,3 +22,4 @@ tokio = { version = "1", features = ["macros", "time"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
+bitcoin = "0.32"

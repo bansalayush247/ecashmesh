@@ -99,6 +99,7 @@ fn app(mesh: EcashMesh, lab_history: Option<std::sync::Arc<lab_history::LabHisto
         .route("/v1/market/btc-usd", get(btc_usd_price))
         .route("/v1/routes/evaluate", post(evaluate))
         .route("/v1/routes/compare", post(compare))
+        .route("/v1/payments/split", post(plan_split))
         .route("/v1/connectors", get(connector_observations))
         .route("/v1/connectors/discover", post(discover_connectors))
         .route("/v1/federations/setup", get(federation_setup::catalog))
@@ -248,6 +249,15 @@ async fn compare(
     request: Result<Json<EvaluateRequest>, JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(state.mesh.compare(parse(request)?).await?))
+}
+
+async fn plan_split(
+    State(state): State<AppState>,
+    request: Result<Json<ecashmesh_sdk::split::SplitRequest>, JsonRejection>,
+) -> Result<Json<ecashmesh_sdk::split::SplitPlan>, ApiError> {
+    let Json(request) = request
+        .map_err(|error| ApiError::new("invalid_json", format!("invalid request body: {error}")))?;
+    Ok(Json(state.mesh.plan_split(request).await?))
 }
 
 #[derive(Deserialize)]

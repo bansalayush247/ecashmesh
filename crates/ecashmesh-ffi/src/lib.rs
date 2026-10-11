@@ -185,6 +185,19 @@ impl EcashMeshClient {
         to_json(&self.mesh.compare(parse_request(&request_json)?).await?)
     }
 
+    /// Plans paying one invoice from several Cashu mints (NUT-15) when no
+    /// single source can. `request_json` is
+    /// `{"amount", "destination": {"type", "value"}, "balances": {"<mint url>": sats}}`;
+    /// the result lists one melt quote per mint, executed together.
+    ///
+    /// # Errors
+    /// See [`EcashMeshError`].
+    pub async fn plan_split(&self, request_json: String) -> Result<String, EcashMeshError> {
+        let request =
+            serde_json::from_str(&request_json).map_err(|error| invalid("invalid_json", &error))?;
+        to_json(&self.mesh.plan_split(request).await?)
+    }
+
     /// Observes the request's sources and discovery hints without quoting.
     ///
     /// # Errors

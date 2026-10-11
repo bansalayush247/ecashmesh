@@ -31,7 +31,7 @@ pub struct EvaluateRequest {
     pub mint_urls: Vec<String>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct DestinationInput {
     #[serde(rename = "type")]
     pub kind: String,

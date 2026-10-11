@@ -41,6 +41,7 @@ pub mod reliability;
 mod request;
 mod response;
 mod sources;
+pub mod split;
 
 pub use error::{Error, ErrorKind};
 pub use outcomes::OutcomeLog;
@@ -190,6 +191,30 @@ impl EcashMesh {
     /// As [`Self::evaluate`], except that having no viable route is not one.
     pub async fn compare(&self, request: EvaluateRequest) -> Result<Value, Error> {
         comparison::compare(self.evaluate(request).await)
+    }
+
+    /// Plans paying one invoice from several Cashu mints when no single
+    /// source can: one NUT-15 partial melt quote per mint, sized to its
+    /// balance. Lightning settles all parts or none. Only plans; the wallet
+    /// executes every part.
+    ///
+    /// # Errors
+    /// `InvalidRequest` for a bad request; `NoViableRoute` when the invoice
+    /// does not accept multi-path payments or the eligible mints' combined
+    /// balance is short (diagnostics list why each mint was skipped).
+    pub async fn plan_split(
+        &self,
+        request: split::SplitRequest,
+    ) -> Result<split::SplitPlan, Error> {
+        tokio::time::timeout(self.deadline, split::plan(&self.sources, request))
+            .await
+            .map_err(|_| {
+                Error::new(
+                    ErrorKind::Deadline,
+                    "EVALUATION_DEADLINE",
+                    "Split planning exceeded its deadline. Retry.",
+                )
+            })?
     }
 
     /// Observes the request's sources and discovery hints without quoting.
