@@ -30,7 +30,7 @@ use tokio::{process::Command, sync::Mutex};
 
 use crate::{
     AppState,
-    probe::{http_client, loopback, pem_certificate_der},
+    lab_probes::{http_client, loopback, pem_certificate_der},
 };
 
 type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -618,7 +618,7 @@ pub(super) async fn pay(State(state): State<AppState>, Json(request): Json<PayRe
         .pay(&request.source, &request.invoice)
         .await;
     // A real payment outcome is reliability evidence, as for the lab executor.
-    if let (Ok(outcome), Some(history)) = (&result, state.provider.lab_history()) {
+    if let (Ok(outcome), Some(history)) = (&result, state.lab_history.as_deref()) {
         history
             .record_payment(&payment_record(outcome, &request.invoice))
             .await;
@@ -738,7 +738,8 @@ mod tests {
         assert_eq!(record["source_id"], "cashu:mint-a");
         assert_eq!(record["destination"], "fedimint:x");
         assert_eq!(record["settlement_evidence"], "quote-1");
-        let parsed: crate::history::PaymentRecord = serde_json::from_value(record).unwrap();
+        let parsed: ecashmesh_sdk::reliability::PaymentRecord =
+            serde_json::from_value(record).unwrap();
         assert_eq!(
             (parsed.outcome.as_str(), parsed.failure_class),
             ("succeeded", None)

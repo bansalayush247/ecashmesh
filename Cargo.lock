@@ -1756,6 +1756,7 @@ dependencies = [
  "ecashmesh-cashu",
  "ecashmesh-core",
  "ecashmesh-fedimint",
+ "ecashmesh-sdk",
  "futures",
  "lightning-invoice",
  "rand 0.8.8",
@@ -1823,6 +1824,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "devimint",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "ecashmesh-sdk"
+version = "0.1.0"
+dependencies = [
+ "ecashmesh-cashu",
+ "ecashmesh-core",
+ "ecashmesh-fedimint",
+ "futures",
+ "lightning-invoice",
+ "serde",
  "serde_json",
  "tokio",
 ]

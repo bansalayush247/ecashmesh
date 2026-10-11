@@ -21,12 +21,12 @@ use ecashmesh_core::{
 use ecashmesh_fedimint::{FederationObservation, FedimintQuote, FedimintService};
 use serde_json::{Value, json};
 
-use crate::connectors::{ConnectorBatch, unix_now};
 use crate::fee_budget::{self, FeeBudgetCheck, RouteFee};
-use crate::history::LabHistory;
-use crate::probe::{
-    ChannelState, LiquidityBasis, LiquidityEvidence, LiquidityProbes, ProbeEffect, SourceLiquidity,
+use crate::liquidity::{
+    ChannelState, LiquidityBasis, LiquidityEvidence, ProbeEffect, SourceLiquidity,
 };
+use crate::sources::{ConnectorBatch, unix_now};
+use crate::{LiquidityOracle, PaymentHistory};
 
 /// A destination normalized by backend code before discovery or quote requests.
 #[derive(Clone, Debug)]
@@ -104,12 +104,12 @@ pub(super) struct LiveNoRoute {
 /// Builds only declared Cashu-to-Lightning edges for the normalized destination
 /// and ranks one candidate per feasible source.
 #[allow(clippy::too_many_lines)] // Keeps the full live feasibility chain and its exact no-route diagnostics together.
-#[allow(clippy::too_many_arguments)] // Each optional lab evidence source is an explicit input.
+#[allow(clippy::too_many_arguments)] // Each optional evidence source is an explicit input.
 pub(super) async fn evaluate(
     service: &Arc<DiscoveryService>,
     fedimint: &Arc<FedimintService>,
-    probes: Option<&LiquidityProbes>,
-    history: Option<&LabHistory>,
+    probes: Option<&dyn LiquidityOracle>,
+    history: Option<&dyn PaymentHistory>,
     batch: &ConnectorBatch,
     sources: Vec<ConnectorSnapshot>,
     destination: LiveDestination,
@@ -831,7 +831,7 @@ fn apply_liquidity(
     };
     let now = unix_now();
     let (effect, basis) =
-        crate::probe::combined_effect(probe.as_ref(), channels.as_ref(), amount, now);
+        crate::liquidity::combined_effect(probe.as_ref(), channels.as_ref(), amount, now);
     let (label, issue, exclusion) = match effect {
         ProbeEffect::Liquidity(liquidity) => {
             source.liquidity = liquidity;
@@ -916,8 +916,8 @@ fn fee_budget_json(check: &FeeBudgetCheck) -> Value {
 /// reliability (the model keeps the two levels separate; in this single-hop
 /// graph both describe payments through this source). The earliest recorded
 /// observation is the connector's first-observed time.
-fn apply_reliability(source: &mut ConnectorSnapshot, stats: &crate::history::ReliabilityStats) {
-    let evidence = crate::history::evidence(stats);
+fn apply_reliability(source: &mut ConnectorSnapshot, stats: &crate::reliability::ReliabilityStats) {
+    let evidence = crate::reliability::evidence(stats);
     source.reliability = evidence.clone();
     source.evidence.reliability = evidence;
     if let Some(first) = stats.first_observed_at_unix_seconds {

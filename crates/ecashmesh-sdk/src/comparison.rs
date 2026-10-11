@@ -1,32 +1,14 @@
 //! Read-only fee comparison. No payment bindings or executable routes are created.
-use axum::{
-    Json,
-    extract::{State, rejection::JsonRejection},
-};
 use serde_json::{Value, json};
 
-use crate::{ApiError, AppState, EvaluateRequest, connectors::unix_now, evaluate_using};
+use crate::{Error, EvaluateResponse, sources::unix_now};
 
-pub(super) async fn compare(
-    State(state): State<AppState>,
-    request: Result<Json<EvaluateRequest>, JsonRejection>,
-) -> Result<Json<Value>, ApiError> {
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(12),
-        evaluate_using(&state.provider, request),
-    )
-    .await
-    .map_err(|_| {
-        ApiError::new(
-            "EVALUATION_DEADLINE",
-            "Route comparison exceeded its deadline. Try again.",
-        )
-    })?;
-    // Even when normal evaluation has no funded route, verified gateway
-    // estimates remain available in its diagnostics. Validation failures do
-    // not turn into comparisons, and this handler never records a payment.
+/// Fee-only comparison built from an evaluation's evidence. Even when no
+/// source is fundable, verified gateway estimates remain in the no-route
+/// diagnostics; validation failures never become comparisons.
+pub(crate) fn compare(result: Result<EvaluateResponse, Error>) -> Result<Value, Error> {
     let (quotes, observations, excluded) = match result {
-        Ok(Json(response)) => (
+        Ok(response) => (
             response
                 .live
                 .as_ref()
@@ -36,31 +18,23 @@ pub(super) async fn compare(
             response.connector_observations,
             response.excluded_sources,
         ),
-        Err(error) if error.code == "NO_VIABLE_ROUTE" => {
+        Err(error) if error.kind == crate::ErrorKind::NoViableRoute => {
             let diagnostics = error.diagnostics.unwrap_or(Value::Null);
+            let list = |key: &str| diagnostics[key].as_array().cloned().unwrap_or_default();
             (
-                diagnostics["quote_observations"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default(),
-                diagnostics["connector_observations"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default(),
-                diagnostics["excluded_sources"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default(),
+                list("quote_observations"),
+                list("connector_observations"),
+                list("excluded_sources"),
             )
         }
         Err(error) => return Err(error),
     };
-    Ok(Json(rank_comparisons(
+    Ok(rank_comparisons(
         &quotes,
         &observations,
         &excluded,
         unix_now(),
-    )))
+    ))
 }
 
 fn rank_comparisons(

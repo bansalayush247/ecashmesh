@@ -19,7 +19,7 @@
 use ecashmesh_core::Amount;
 use serde::Serialize;
 
-use crate::probe::{ChannelState, LiquidityEvidence, ProbeMethod, ProbeOutcome};
+use crate::liquidity::{ChannelState, LiquidityEvidence, ProbeMethod, ProbeOutcome};
 
 /// Issue code of a source excluded for an unaffordable route.
 pub(crate) const INFEASIBLE_FEE_BUDGET: &str = "INFEASIBLE_FEE_BUDGET";
@@ -194,7 +194,7 @@ pub(crate) fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::probe::ChannelStateMethod;
+    use crate::liquidity::ChannelStateMethod;
 
     const NOW: u64 = 1_000;
     const AMOUNT: u64 = 1_000;

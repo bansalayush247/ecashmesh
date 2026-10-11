@@ -12,8 +12,8 @@ use tokio::sync::Mutex;
 
 use crate::{
     ApiError, AppState, EvaluateRequest, EvaluateResponse,
-    connectors::unix_now,
     payment_mode::{PaymentEnvironment, PaymentSafetyConfig},
+    unix_now,
 };
 
 #[derive(Clone)]
@@ -165,7 +165,7 @@ impl PaymentService {
             .map_err(ApiError::payment_safety)?;
         let now = unix_now();
         let record = PaymentRecord {
-            id: crate::deterministic_id(
+            id: ecashmesh_sdk::deterministic_id(
                 "payment",
                 &[
                     request.quote_id.clone(),

@@ -150,7 +150,7 @@ impl PreviewRequest {
 }
 
 pub(super) async fn catalog(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let service = state.provider.fedimint_service();
+    let service = state.mesh.fedimint();
     service.refresh_joined_catalog().await.map_err(|_| {
         fail(
             "SETUP_UNAVAILABLE",
@@ -169,7 +169,7 @@ pub(super) async fn preview(
     headers: HeaderMap,
     Json(req): Json<PreviewRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let service = state.provider.fedimint_service();
+    let service = state.mesh.fedimint();
     state.setup.authorize(&headers, service)?;
     req.validate()?;
     ensure_capacity(service, &req.federation_id)?;
@@ -217,7 +217,7 @@ pub(super) async fn identify(
     headers: HeaderMap,
     Json(req): Json<IdentifyRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let service = state.provider.fedimint_service();
+    let service = state.mesh.fedimint();
     state.setup.authorize(&headers, service)?;
     req.validate()?;
     let result = state
@@ -268,7 +268,7 @@ pub(super) async fn connect(
     headers: HeaderMap,
     Json(req): Json<ConnectRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let service = state.provider.fedimint_service();
+    let service = state.mesh.fedimint();
     state.setup.authorize(&headers, service)?;
     if !req.confirmed {
         return Err(fail(
@@ -428,7 +428,13 @@ mod tests {
         Arc::get_mut(&mut setup).unwrap().origins = vec!["http://localhost:8081".into()];
         (
             AppState {
-                provider: super::super::connectors::Provider::for_setup_test(service),
+                mesh: ecashmesh_sdk::EcashMesh::builder(
+                    ecashmesh_cashu::discovery::DiscoveryService::new(vec![], vec![], vec![], 300)
+                        .unwrap(),
+                    service,
+                )
+                .build(),
+                lab_history: None,
                 payments: super::super::payment::PaymentService::from_env().unwrap(),
                 setup,
                 lab_results: None,
@@ -505,12 +511,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(mock.joins.load(Ordering::SeqCst), 1);
-        let host = state
-            .provider
-            .fedimint_service()
-            .catalog_host()
-            .unwrap()
-            .clone();
+        let host = state.mesh.fedimint().catalog_host().unwrap().clone();
         let restarted = FedimintService::new(vec![host], 300)
             .unwrap()
             .with_catalog_host(Some("fedimint:host"))
