@@ -130,6 +130,8 @@ pub(crate) fn route_fee(
                 msat: fee,
                 basis: RouteFeeBasis::LightningProbe,
             },
+            // A payment to another payee says nothing about this route's fee.
+            ProbeMethod::RecordedPayment => RouteFee::Unknown,
             ProbeMethod::RelayedProbe => match probe.relay_hop_fee_msat {
                 Some(hop) if probe.reached_destination == Some(true) => RouteFee::Exact {
                     msat: fee.saturating_add(hop),

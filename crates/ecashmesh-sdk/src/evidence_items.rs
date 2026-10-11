@@ -131,6 +131,26 @@ pub(crate) fn for_route(route: &EvaluatedRouteResponse) -> Vec<Value> {
     // Liquidity.
     let liquidity = route.liquidity_evidence.as_ref();
     match liquidity.and_then(|evidence| text(evidence, "basis")) {
+        Some("active_probe")
+            if liquidity.unwrap_or(&null)["probe"]["evidence_source"] == "recorded_payment" =>
+        {
+            let probe = &liquidity.unwrap_or(&null)["probe"];
+            items.push(item(
+                "liquidity",
+                json!(format!(
+                    "{} sats paid successfully through this source",
+                    number(probe, "probed_amount_sats").unwrap_or_default()
+                )),
+                "measured",
+                "a real payment the wallet recorded",
+                number(probe, "observed_at_unix_seconds"),
+                number(probe, "expires_at_unix_seconds"),
+                text(probe, "freshness").unwrap_or("unknown"),
+                text(probe, "confidence"),
+                Some("liquidity_confidence"),
+                Some("shows the source's node could send this much recently, to another payee; not this route"),
+            ));
+        }
         Some("active_probe") => {
             let probe = &liquidity.unwrap_or(&null)["probe"];
             items.push(item(

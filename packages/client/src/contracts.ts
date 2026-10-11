@@ -186,7 +186,9 @@ const scoreContributionsSchema = z
   })
   .passthrough();
 export type ScoreContributions = z.infer<typeof scoreContributionsSchema>;
-// Regtest-lab, amount-specific Lightning liquidity evidence (no credentials).
+// Amount-specific Lightning liquidity evidence (no credentials): a probe from
+// the source's node (lab), or a payment the wallet recorded
+// (`evidence_source: "recorded_payment"`).
 const probeSchema = z
   .object({
     node: z.string(),
@@ -255,7 +257,7 @@ const liquidityEvidenceSchema = z
   })
   .passthrough();
 export type LiquidityEvidence = z.infer<typeof liquidityEvidenceSchema>;
-// Real regtest payment outcomes; probes and quotes never count.
+// Real payment outcomes; probes and quotes never count.
 const reliabilityEvidenceSchema = z
   .object({
     window_seconds: unsigned,

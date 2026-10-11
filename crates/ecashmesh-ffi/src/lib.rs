@@ -9,7 +9,7 @@ use std::{sync::Arc, time::Duration};
 
 use ecashmesh_cashu::discovery::{DiscoveryService, DiscoverySource, MintHint};
 use ecashmesh_fedimint::{FederationConfig, FedimintService, QuoteBackend};
-use ecashmesh_sdk::{EcashMesh, ErrorKind, EvaluateRequest};
+use ecashmesh_sdk::{EcashMesh, ErrorKind, EvaluateRequest, OutcomeLog, PaymentRecord};
 
 uniffi::setup_scaffolding!();
 
@@ -42,6 +42,9 @@ pub struct Config {
     pub max_observation_age_seconds: u64,
     /// End-to-end deadline for one evaluation.
     pub evaluation_deadline_ms: u64,
+    /// The wallet's payment history from a previous
+    /// [`EcashMeshClient::export_payment_history`], if any.
+    pub payment_history_json: Option<String>,
 }
 
 /// Mirrors the SDK error. `diagnostics_json` carries the evidence gathered
@@ -112,6 +115,7 @@ fn parse_request(json: &str) -> Result<EvaluateRequest, EcashMeshError> {
 #[derive(uniffi::Object)]
 pub struct EcashMeshClient {
     mesh: EcashMesh,
+    history: Arc<OutcomeLog>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -152,11 +156,16 @@ impl EcashMeshClient {
             .collect();
         let fedimint = FedimintService::new(federations, config.max_observation_age_seconds)
             .map_err(|error| invalid("INVALID_FEDERATION", &error))?;
+        let history = Arc::new(match config.payment_history_json {
+            Some(json) => OutcomeLog::import_json(&json)?,
+            None => OutcomeLog::new(),
+        });
         let mesh = EcashMesh::builder(cashu, fedimint)
             .allow_discovered_sources(config.allow_discovered_sources)
             .evaluation_deadline(Duration::from_millis(config.evaluation_deadline_ms))
+            .outcome_log(Arc::clone(&history))
             .build();
-        Ok(Arc::new(Self { mesh }))
+        Ok(Arc::new(Self { mesh, history }))
     }
 
     /// Recommends a source for a payment. `request_json` and the result use
@@ -184,6 +193,38 @@ impl EcashMeshClient {
         to_json(&self.mesh.discover(parse_request(&request_json)?).await?)
     }
 
+    /// Records a payment the wallet executed through `source_id` (as returned
+    /// in a decision). Successes become liquidity evidence for later
+    /// payments; every outcome counts towards reliability. `failure_class` is
+    /// `liquidity`, `infrastructure` or `funding` (the wallet lacked ecash).
+    pub fn record_payment(
+        &self,
+        source_id: String,
+        amount_sats: u64,
+        succeeded: bool,
+        failure_class: Option<String>,
+        failure_reason: Option<String>,
+    ) {
+        self.history.record(PaymentRecord {
+            source_id,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            amount_sats: Some(amount_sats),
+            outcome: if succeeded { "succeeded" } else { "failed" }.into(),
+            failure_class: if succeeded { None } else { failure_class },
+            failure_reason: if succeeded { None } else { failure_reason },
+        });
+    }
+
+    /// The payment history as JSON, for the wallet to persist and pass back
+    /// as `Config::payment_history_json`.
+    #[must_use]
+    pub fn export_payment_history(&self) -> String {
+        self.history.export_json()
+    }
+
     /// Every configured source with its current evidence for `amount_sats`.
     ///
     /// # Errors
@@ -204,6 +245,7 @@ mod tests {
             allow_discovered_sources: false,
             max_observation_age_seconds: 300,
             evaluation_deadline_ms: 5_000,
+            payment_history_json: None,
         })
         .unwrap()
     }
@@ -226,5 +268,23 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["evaluated_amount_sats"], 1_000);
         assert_eq!(value["evidence"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn payment_history_survives_export_and_restore() {
+        let first = client();
+        first.record_payment("cashu:a".into(), 2_000, true, None, None);
+        let exported = first.export_payment_history();
+        let restored = EcashMeshClient::new(Config {
+            mints: Vec::new(),
+            federations: Vec::new(),
+            allow_discovered_sources: false,
+            max_observation_age_seconds: 300,
+            evaluation_deadline_ms: 5_000,
+            payment_history_json: Some(exported.clone()),
+        })
+        .unwrap();
+        assert_eq!(restored.export_payment_history(), exported);
+        assert!(exported.contains("\"amount_sats\":2000"));
     }
 }

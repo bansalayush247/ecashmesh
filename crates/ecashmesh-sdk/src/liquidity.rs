@@ -45,7 +45,17 @@ pub enum ProbeMethod {
     /// first leg, and a non-settling probe from the relay proves the rest.
     /// Both legs are measured together; weaker than an end-to-end probe.
     RelayedProbe,
+    /// A real payment through this source settled for at least this amount,
+    /// recorded by the wallet. It shows the source's node could send that
+    /// much recently, to some payee: weaker than a probe toward this one.
+    RecordedPayment,
 }
+
+/// A recorded payment counts as current liquidity evidence for this long;
+/// balances move with every payment, so it is short.
+pub const OUTCOME_FRESH_SECONDS: u64 = 600;
+/// Older recorded payments are stale until this age, then ignored.
+pub const OUTCOME_RETENTION_SECONDS: u64 = 3_600;
 
 /// Where channel-state evidence was read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -252,6 +262,16 @@ impl LiquidityEvidence {
 
     #[must_use]
     pub fn freshness(&self, now: u64) -> &'static str {
+        if self.evidence_source == ProbeMethod::RecordedPayment {
+            let age = now.saturating_sub(self.observed_at_unix_seconds);
+            return if age <= OUTCOME_FRESH_SECONDS {
+                "fresh"
+            } else if age <= OUTCOME_RETENTION_SECONDS {
+                "stale"
+            } else {
+                "expired"
+            };
+        }
         freshness(self.observed_at_unix_seconds, now)
     }
 
@@ -301,6 +321,8 @@ pub fn effect(evidence: &LiquidityEvidence, amount: Amount, now: u64) -> ProbeEf
                     ConfidenceLevel::Medium
                 }
                 (ProbeMethod::RelayedProbe, false) => ConfidenceLevel::Low,
+                // Another payee: the node had the outbound, the path may differ.
+                (ProbeMethod::RecordedPayment, _) => ConfidenceLevel::Medium,
             };
             ProbeEffect::Liquidity(liquidity(
                 evidence.probed_amount_sats,
@@ -311,8 +333,12 @@ pub fn effect(evidence: &LiquidityEvidence, amount: Amount, now: u64) -> ProbeEf
             ))
         }
         // Exclusion needs current evidence; stale "insufficient" may be outdated.
+        // A failed real payment may have failed for its own payee's reasons,
+        // so it never excludes: reliability already counts it.
         ProbeOutcome::InsufficientLiquidity | ProbeOutcome::NoRoute
-            if freshness == "fresh" && evidence.probed_amount_sats <= amount.sats() =>
+            if freshness == "fresh"
+                && evidence.probed_amount_sats <= amount.sats()
+                && evidence.evidence_source != ProbeMethod::RecordedPayment =>
         {
             ProbeEffect::Exclude(exclusion_reason(evidence, amount))
         }

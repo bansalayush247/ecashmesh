@@ -21,11 +21,16 @@ const RECENT_OUTCOMES: usize = 10;
 const MEDIUM_CONFIDENCE_OUTCOMES: u64 = 5;
 const HIGH_CONFIDENCE_OUTCOMES: u64 = 20;
 
-/// One real payment attempt written by the lab executor.
-#[derive(Clone, Debug, Deserialize)]
+/// One real payment attempt through a source, recorded by the wallet (or the
+/// lab executor) after it ran.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PaymentRecord {
     pub source_id: String,
     pub timestamp: u64,
+    /// Amount paid through the source. Successes with an amount are also
+    /// liquidity evidence; records without one count only for reliability.
+    #[serde(default)]
+    pub amount_sats: Option<u64>,
     /// `succeeded` or `failed`.
     pub outcome: String,
     /// For failures: `liquidity` (no route / insufficient channel liquidity),
@@ -205,6 +210,7 @@ mod tests {
         PaymentRecord {
             source_id: source.into(),
             timestamp: at,
+            amount_sats: None,
             outcome: outcome.into(),
             failure_class: class.map(Into::into),
             failure_reason: class.map(|class| format!("{class} failure")),

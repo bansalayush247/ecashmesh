@@ -36,12 +36,15 @@ mod evidence_items;
 mod fee_budget;
 pub mod liquidity;
 mod live;
+pub mod outcomes;
 pub mod reliability;
 mod request;
 mod response;
 mod sources;
 
 pub use error::{Error, ErrorKind};
+pub use outcomes::OutcomeLog;
+pub use reliability::PaymentRecord;
 pub use request::EvaluateRequest;
 pub use response::{EvaluateResponse, EvaluatedRouteResponse, deterministic_id};
 
@@ -109,6 +112,15 @@ impl Builder {
     #[must_use]
     pub fn payment_history(mut self, history: Arc<dyn PaymentHistory>) -> Self {
         self.history = Some(history);
+        self
+    }
+
+    /// Uses the wallet's own payment outcomes as both liquidity and
+    /// reliability evidence: the evidence available on live networks.
+    #[must_use]
+    pub fn outcome_log(mut self, log: Arc<OutcomeLog>) -> Self {
+        self.liquidity = Some(Arc::clone(&log) as Arc<dyn LiquidityOracle>);
+        self.history = Some(log);
         self
     }
 
