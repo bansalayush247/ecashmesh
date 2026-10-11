@@ -260,15 +260,39 @@ Design decisions and trade-offs: [docs/design.md](docs/design.md).
 
 | Path | Contents |
 |---|---|
-| `crates/ecashmesh-cashu` | Cashu integration: mint discovery, metadata, quotes |
-| `crates/ecashmesh-fedimint` | Fedimint integration: bridge with native v0.12.1 clients, quote validation, guardian audits |
-| `lab/fedimint-runner` | Regtest mesh supervisor: bitcoind, federations, gateways (built inside the pinned Fedimint checkout) |
-| `lab/cashu-runner` | Native Cashu wallet runner used for mesh payments (built inside the pinned CDK checkout) |
+**SDK — what a wallet integrates**
+
+| Path | Contents |
+|---|---|
+| `crates/ecashmesh-sdk` | The engine: `EcashMesh::builder(..).build().evaluate(request)`; quotes, feasibility, ranking, explanations. Reads no environment, moves no funds |
+| `crates/ecashmesh-ffi` | Swift, Kotlin and React Native bindings (UniFFI) for on-device use |
+| `packages/client` | `@ecashmesh/client`: TypeScript client for a hosted server, plus the Nostr source registry |
+| `crates/ecashmesh-core` | Evidence model, deterministic ranking, explanations; no dependencies |
+| `crates/ecashmesh-cashu` | Cashu adapter: mint discovery, metadata, quotes, NUT-18 requests |
+| `crates/ecashmesh-fedimint` | Fedimint adapter; with the default `bridge` feature also `fedimint-bridge`, hosting native v0.12.1 clients |
+
+**Hosts and the lab**
+
+| Path | Contents |
+|---|---|
+| `crates/ecashmesh-api` | HTTP server over the SDK; also the regtest lab's probes, payment history and real lab payments |
+| `apps/reference-wallet` | Reference wallet (React Native / Expo, runs on web): sources, comparisons, lab route matrix |
+| `lab/fedimint-runner`, `lab/cashu-runner` | Regtest mesh supervisor and native Cashu runner, built inside the pinned Fedimint and CDK checkouts |
 | `scripts/ecashmesh-lab-*` | Regtest mesh: bring-up, 56-route executor, validation, experiments |
-| `crates/ecashmesh-api` | HTTP API: source evidence, Lightning probing, feasibility (selection layer) |
-| `crates/ecashmesh-core` | Evidence model, deterministic ranking, explanations (selection layer) |
-| `apps/reference-wallet` | Web app (React Native / Expo): sources, comparisons, lab route matrix |
 | `scripts/demo.sh` | Live-mode launcher |
+
+### Integrating EcashMesh in a wallet
+
+- **Native (iOS, Android, React Native):** build `ecashmesh-ffi` and generate
+  bindings with its bundled `uniffi-bindgen`
+  (`cargo run -p ecashmesh-ffi --bin uniffi-bindgen -- generate --library <lib> --language swift|kotlin`;
+  React Native through `uniffi-bindgen-react-native`). `EcashMeshClient.evaluate(requestJson)`
+  returns the decision JSON.
+- **Rust:** depend on `ecashmesh-sdk` directly.
+- **Web, against a hosted server:** `@ecashmesh/client`.
+
+Requests and results use one JSON contract everywhere: the
+`POST /v1/routes/evaluate` format in [docs/architecture.md](docs/architecture.md).
 
 ## Tests
 

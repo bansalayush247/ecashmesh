@@ -12,8 +12,10 @@ its native protocol.
 
 | Component | Responsibility |
 |---|---|
+| `ecashmesh-sdk` | Validates requests, collects evidence concurrently with deadlines, decides feasibility, returns ranked results. Optional evidence comes from the host through two traits: `LiquidityOracle` (Lightning probes, channel state) and `PaymentHistory` (real payment outcomes) |
+| `ecashmesh-ffi` | UniFFI bindings over the SDK for Swift, Kotlin and React Native |
+| `ecashmesh-api` | HTTP host over the SDK. In the regtest lab it also implements both traits (LND/gateway probes, a JSON-lines payment history) and makes real lab payments |
 | `apps/reference-wallet` | Source list, payment form, results and explanations |
-| `ecashmesh-api` | Validates requests, collects evidence concurrently with deadlines, decides feasibility, returns ranked results |
 | `ecashmesh-core` | Evidence model, deterministic ranking, risk penalties, explanations |
 | `ecashmesh-cashu` | Cashu mint discovery, metadata (NUT-06), keysets, melt/mint quotes |
 | `ecashmesh-fedimint` | `fedimint-bridge`: one process hosting native Fedimint v0.12.1 clients; fee quotes, gateway info, guardian audits |
