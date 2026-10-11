@@ -38,6 +38,8 @@ pub(crate) async fn evaluate(
             })?;
     let hints = request.discovery_hints(Some(&live_destination))?;
     let registry_request = request.clone();
+    let wallet_mints = request.wallet_mints().cloned().collect::<Vec<_>>();
+    let balances = request.canonical_balances();
     let EvaluateRequest {
         amount,
         asset: _,
@@ -46,7 +48,6 @@ pub(crate) async fn evaluate(
         candidate_connectors,
         source_connector,
         source_mint_url,
-        wallet_mint_urls,
         federation_connector_ids,
         strict_source_registry,
         ..
@@ -66,7 +67,7 @@ pub(crate) async fn evaluate(
         &selected,
         source_connector,
         source_mint_url,
-        wallet_mint_urls,
+        wallet_mints,
         federation_connector_ids,
         &batch.discovery,
         &destination_mint_urls,
@@ -95,6 +96,7 @@ pub(crate) async fn evaluate(
         sources,
         live_destination,
         amount,
+        &balances,
     )
     .await
     {
@@ -242,6 +244,21 @@ fn liquidity_issue<'a>(quotes: &'a [serde_json::Value], id: &str) -> Option<&'a 
         .find_map(|value| value["issue"]["message"].as_str())
 }
 
+/// Why the wallet's own balance at a mint cannot fund the payment, if it
+/// reported one that falls short.
+fn funding_shortfall(quotes: &[serde_json::Value], id: &str) -> Option<String> {
+    let funding = quotes.iter().find(|value| {
+        value["connector"] == id
+            && value["kind"] == "wallet_funding"
+            && value["value"]["funding_feasible"] == false
+    })?;
+    Some(format!(
+        "The wallet holds {} sats at this mint; paying needs {} (amount plus fee reserve)",
+        funding["value"]["balance_sats"], funding["value"]["required_sats"]
+    ))
+}
+
+#[allow(clippy::too_many_lines)] // One reason per source, checked in priority order.
 fn source_diagnostics(
     request: &EvaluateRequest,
     batch: &ConnectorBatch,
@@ -250,7 +267,7 @@ fn source_diagnostics(
     destinations: &[String],
 ) -> Vec<serde_json::Value> {
     let mut identities = Vec::new();
-    for raw_url in &request.wallet_mint_urls {
+    for raw_url in request.wallet_mints() {
         let url = ecashmesh_cashu::discovery::canonical_mint_url(raw_url)
             .unwrap_or_else(|_| raw_url.clone());
         let id = batch
@@ -311,6 +328,8 @@ fn source_diagnostics(
             } else if observation.is_none() {
                 "Source is not configured locally or its URL was rejected by discovery policy"
                     .to_owned()
+            } else if let Some(message) = funding_shortfall(quotes, &id) {
+                message
             } else if let Some(message) = liquidity_issue {
                 message.to_owned()
             } else if let Some(message) = gateway_comparison_diagnostic(quote, gateway_estimate) {

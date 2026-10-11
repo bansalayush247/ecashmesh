@@ -107,6 +107,7 @@ pub(crate) async fn plan(
             source_connector: None,
             source_mint_url,
             wallet_mint_urls,
+            wallet_mint_balances: std::collections::BTreeMap::new(),
             federation_connector_ids,
             federation_identities: std::collections::BTreeMap::new(),
             // Only the chosen source may pay, never a discovered one.

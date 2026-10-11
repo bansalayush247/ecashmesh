@@ -114,6 +114,7 @@ pub(super) async fn evaluate(
     sources: Vec<ConnectorSnapshot>,
     destination: LiveDestination,
     amount: Amount,
+    balances: &BTreeMap<String, u64>,
 ) -> Result<LiveEvaluation, LiveNoRoute> {
     let mut quote_observations = Vec::new();
     let destination_type = destination.type_code();
@@ -404,6 +405,29 @@ pub(super) async fn evaluate(
             no_route_details.push(format!("{}: missing quote: {detail}", source.id));
             continue;
         };
+        // The wallet funds a melt with the amount plus the fee reserve; a
+        // balance it reported that falls short rules the mint out.
+        if let Some(&balance) =
+            ecashmesh_cashu::discovery::canonical_mint_url(&observation.mint_url)
+                .ok()
+                .and_then(|url| balances.get(&url))
+        {
+            let required = amount
+                .sats()
+                .saturating_add(quote_evidence.value.fee_reserve_sats.sats());
+            quote_observations.push(json!({
+                "kind": "wallet_funding", "connector": source.id.as_str(), "state": "known",
+                "value": {"balance_sats": balance, "required_sats": required,
+                          "funding_feasible": balance >= required, "source": "wallet_reported"},
+            }));
+            if balance < required {
+                no_route_details.push(format!(
+                    "{}: the wallet holds {balance} sats at this mint; paying needs {required} (amount plus fee reserve)",
+                    source.id
+                ));
+                continue;
+            }
+        }
         let mut source = source;
         let evidence = probe_reads.remove(&source.id);
         let applied = apply_liquidity(

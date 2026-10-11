@@ -257,6 +257,9 @@ impl EvaluateResponse {
             let melt = quotes.iter().find(|quote| {
                 quote["kind"] == "source_melt_quote" && quote["connector"] == route.source_id
             });
+            let funding = quotes.iter().find(|quote| {
+                quote["kind"] == "wallet_funding" && quote["connector"] == route.source_id
+            });
             let keysets = observation.public_keysets.value();
             route.cashu_metrics = Some(json!({
                 "mint_url": observation.mint_url,
@@ -268,6 +271,9 @@ impl EvaluateResponse {
                 "melt_quote_id": melt.and_then(|quote| quote["value"]["quote_id"].as_str()),
                 "melt_fee_reserve_sats": melt.and_then(|quote| quote["value"]["fee_reserve_sats"].as_u64()),
                 "melt_quote_expires_at_unix_seconds": melt.and_then(|quote| quote["value"]["expiry"].as_u64()),
+                // Only when the wallet reported its balance at this mint.
+                "wallet_balance_sats": funding.and_then(|quote| quote["value"]["balance_sats"].as_u64()),
+                "funding_feasible": funding.and_then(|quote| quote["value"]["funding_feasible"].as_bool()),
                 "keyset_count": keysets.map(Vec::len),
                 "denomination_count": keysets.map(|keysets| keysets.iter().map(|keyset| keyset.keys.len()).sum::<usize>()),
                 "input_fees_ppk": observation.input_fees.value().map(|fees| fees.iter().map(|fee| json!({"keyset_id": fee.id, "unit": fee.unit, "active": fee.active, "input_fee_ppk": fee.input_fee_ppk.unwrap_or(0)})).collect::<Vec<_>>()),

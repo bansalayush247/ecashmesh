@@ -18,6 +18,11 @@ pub struct EvaluateRequest {
     pub source_mint_url: Option<String>,
     #[serde(default)]
     pub wallet_mint_urls: Vec<String>,
+    /// Spendable sats the wallet holds at each of its mints, by mint URL.
+    /// These mints are wallet mints too. A listed mint whose balance cannot
+    /// cover the amount plus its melt fee reserve is excluded.
+    #[serde(default)]
+    pub wallet_mint_balances: std::collections::BTreeMap<String, u64>,
     /// User-authorized Fedimint connector IDs. These are non-secret labels for
     /// already-configured local adapters; bridge credentials never cross HTTP.
     #[serde(default)]
@@ -40,12 +45,31 @@ pub struct DestinationInput {
 }
 
 impl EvaluateRequest {
+    /// The wallet's mints: `wallet_mint_urls` and every mint with a balance.
+    pub(crate) fn wallet_mints(&self) -> impl Iterator<Item = &String> {
+        self.wallet_mint_urls
+            .iter()
+            .chain(self.wallet_mint_balances.keys())
+    }
+
+    /// Balances by canonical mint URL.
+    pub(crate) fn canonical_balances(&self) -> std::collections::BTreeMap<String, u64> {
+        self.wallet_mint_balances
+            .iter()
+            .filter_map(|(url, sats)| {
+                ecashmesh_cashu::discovery::canonical_mint_url(url)
+                    .ok()
+                    .map(|url| (url, *sats))
+            })
+            .collect()
+    }
+
     pub(crate) fn discovery_hints(
         &self,
         live_destination: Option<&live::LiveDestination>,
     ) -> Result<Vec<ecashmesh_cashu::discovery::MintHint>, Error> {
         use ecashmesh_cashu::discovery::{DiscoverySource, MintHint};
-        if self.wallet_mint_urls.len()
+        if self.wallet_mints().count()
             + self.mint_urls.len()
             + usize::from(self.destination.mint_url.is_some())
             + usize::from(self.source_mint_url.is_some())
@@ -58,8 +82,7 @@ impl EvaluateRequest {
             ));
         }
         let hints = self
-            .wallet_mint_urls
-            .iter()
+            .wallet_mints()
             .map(|url| (url.clone(), DiscoverySource::Wallet))
             .chain(
                 self.mint_urls
@@ -112,6 +135,16 @@ impl EvaluateRequest {
             return Err(Error::validation(
                 "destination must be a non-empty lightning or Cashu target",
                 vec!["destination".into()],
+            ));
+        }
+        if let Some(url) = self
+            .wallet_mint_balances
+            .keys()
+            .find(|url| ecashmesh_cashu::discovery::canonical_mint_url(url).is_err())
+        {
+            return Err(Error::validation(
+                "wallet_mint_balances contains an invalid mint URL",
+                vec![url.clone()],
             ));
         }
         if self.payment_intent != "send" {

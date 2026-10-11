@@ -41,9 +41,14 @@ bridge-only.
   "payment_intent": "send",
   "strict_source_registry": true,
   "wallet_mint_urls": ["https://mint.example"],
+  "wallet_mint_balances": { "https://mint.example": 25000 },
   "federation_connector_ids": ["fedimint:<federation-id>"]
 }
 ```
+
+`wallet_mint_balances` is optional: spendable sats per mint, which also makes
+each listed mint a wallet mint. A Cashu mint cannot see the wallet's ecash,
+so without it EcashMesh cannot tell whether the wallet can fund a melt there.
 
 1. **Sources.** Only the mints and federations the user enabled. An empty list
    stays empty; public directories never add sources.
@@ -60,7 +65,9 @@ bridge-only.
    - Regtest lab only: Lightning probes and channel state from each source's
      own node, guardian solvency audits, and real recorded payment outcomes.
 3. **Feasibility** — a source is excluded, with a reason, when:
-   - its wallet cannot fund amount + fees;
+   - its wallet cannot fund amount + fees (Fedimint: the native quote's
+     funding check; Cashu: the reported `wallet_mint_balances` against
+     amount + melt fee reserve);
    - fresh channel state or a probe shows its node cannot route the amount;
    - the measured route fee exceeds the **routing-fee budget** of the node
      that pays it (`INFEASIBLE_FEE_BUDGET`): for an LNv2 gateway its
