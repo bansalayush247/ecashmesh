@@ -81,7 +81,10 @@ fn now_duration() -> std::time::Duration {
 
 fn service(wallet: Wallet) -> FedimintService {
     FedimintService::new(
-        vec![FederationConfig::wallet_client(FEDERATION, "Wallet federation")],
+        vec![FederationConfig::wallet_client(
+            FEDERATION,
+            "Wallet federation",
+        )],
         300,
     )
     .unwrap()
@@ -99,7 +102,10 @@ async fn a_funded_wallet_quotes_through_the_cheapest_gateway() {
     let observation = service.collect(now).await.remove(0);
     assert_eq!(observation.snapshot.id.as_str(), "fedimint:ab");
     assert_eq!(observation.health.value(), Some(&ConnectorHealth::Healthy));
-    assert_eq!(observation.balance_sats.value(), Some(&Amount::from_sats(20_000)));
+    assert_eq!(
+        observation.balance_sats.value(),
+        Some(&Amount::from_sats(20_000))
+    );
 
     let invoice = invoice(10_000);
     let quote = service
@@ -110,7 +116,10 @@ async fn a_funded_wallet_quotes_through_the_cheapest_gateway() {
     assert_eq!(quote.native_evidence["gateway_fee_msat"], 11_000);
     assert_eq!(quote.native_evidence["total_fee_msat"], 14_000);
     assert_eq!(quote.total_fee(), Amount::from_sats(14));
-    assert_eq!(quote.selected_gateway_id.as_deref(), Some(&*gateway(2, 0, 0).gateway_id));
+    assert_eq!(
+        quote.selected_gateway_id.as_deref(),
+        Some(&*gateway(2, 0, 0).gateway_id)
+    );
     assert_eq!(quote.native_evidence["balance_source"], "wallet_client");
 }
 
@@ -147,7 +156,12 @@ async fn a_quote_is_bound_to_the_invoice_amount() {
     let now = now_duration().as_secs();
     let observation = service.collect(now).await.remove(0);
     let error = service
-        .quote(&observation, &invoice(10_000), Amount::from_sats(9_000), now)
+        .quote(
+            &observation,
+            &invoice(10_000),
+            Amount::from_sats(9_000),
+            now,
+        )
         .await
         .unwrap_err();
     assert!(error.contains("does not match"), "{error}");

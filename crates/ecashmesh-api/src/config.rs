@@ -26,7 +26,12 @@ pub(crate) fn lab_mode() -> bool {
 /// separated, or Expo's local preview. Native clients do not use CORS.
 pub(crate) fn web_origins() -> Vec<String> {
     std::env::var("ECASHMESH_WEB_ORIGIN").map_or_else(
-        |_| vec!["http://localhost:8081".into(), "http://127.0.0.1:8081".into()],
+        |_| {
+            vec![
+                "http://localhost:8081".into(),
+                "http://127.0.0.1:8081".into(),
+            ]
+        },
         |value| {
             value
                 .split(',')
