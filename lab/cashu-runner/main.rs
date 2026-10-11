@@ -147,7 +147,7 @@ async fn smoke(index: &str, mint_url: &str, wallet_path: PathBuf) -> Result<Valu
         .prepare_melt(&melt_quote.id, HashMap::new())
         .await
         .context("preparing Cashu melt")?;
-    let prepared_fee = prepared.total_fee().to_string();
+    let prepared_swap_fee = swap_fee(prepared.total_fee(), prepared.input_fee())?;
     let finalized = prepared.confirm().await.context("confirming Cashu melt")?;
     ensure!(
         finalized.state() == MeltQuoteState::Paid,
@@ -162,7 +162,7 @@ async fn smoke(index: &str, mint_url: &str, wallet_path: PathBuf) -> Result<Valu
         "mint_quote": {"id": mint_quote.id, "amount_sat": MINT_AMOUNT_SAT, "payment_status": "SUCCEEDED", "preimage_present": !mint_preimage.is_empty()},
         "issuance": {"proof_count": proofs.len(), "balance_after_sat": balance_after_issuance.to_string()},
         "melt_quote": {"id": melt_quote.id, "amount_sat": melt_quote.amount.to_string(), "fee_reserve_sat": melt_quote.fee_reserve.to_string()},
-        "melt_payment": {"status": format!("{:?}", finalized.state()), "fee_sat": prepared_fee},
+        "melt_payment": {"status": format!("{:?}", finalized.state()), "fee_sat": melt_fee(prepared_swap_fee, finalized.fee_paid())?},
         "settlement": {"lnd1_invoice_state": "SETTLED", "balance_after_sat": balance_after_melt.to_string()},
         "latency_ms": started.elapsed().as_millis(),
     }))
@@ -206,7 +206,7 @@ async fn cross_mint(
         .prepare_melt(&source_quote.id, HashMap::new())
         .await
         .with_context(|| format!("preparing Cashu {source_index} cross-mint melt"))?;
-    let source_fee = prepared.total_fee().to_string();
+    let source_swap_fee = swap_fee(prepared.total_fee(), prepared.input_fee())?;
     let finalized = prepared
         .confirm()
         .await
@@ -240,7 +240,7 @@ async fn cross_mint(
     Ok(json!({
         "status": "READY", "source": source_index, "destination": destination_index, "amount_sat": MELT_AMOUNT_SAT,
         "source_quote": source_quote.id, "destination_quote": destination_quote.id,
-        "source_fee_sat": source_fee, "destination_fee_sat": "0",
+        "source_fee_sat": melt_fee(source_swap_fee, finalized.fee_paid())?, "destination_fee_sat": "0",
         "lightning_payment_status": format!("{:?}", finalized.state()),
         "source_state_before_sat": source_before.to_string(), "source_state_after_sat": source_after.to_string(),
         "destination_state_before_sat": destination_before.to_string(), "destination_state_after_sat": destination_after.to_string(),
@@ -309,6 +309,24 @@ async fn claim_quote(
 /// Pays `invoice`, or with `part_sat` only that part of it (NUT-15): the
 /// receiver settles once every part from every mint has arrived, so the
 /// other parts must be in flight at the same time.
+/// What a melt cost beyond its amount: the swap that prepared the inputs,
+/// plus what the mint kept (input fee and the Lightning fee it actually paid;
+/// unused reserve came back as change). Known only once the melt is paid.
+fn melt_fee(swap_fee: Amount, fee_paid: Amount) -> Result<String> {
+    Ok(swap_fee
+        .checked_add(fee_paid)
+        .context("melt fee overflows")?
+        .to_string())
+}
+
+/// The swap fee of a prepared melt (its total fee less the input fee, which
+/// the finalized melt's `fee_paid` already includes).
+fn swap_fee(total_fee: Amount, input_fee: Amount) -> Result<Amount> {
+    total_fee
+        .checked_sub(input_fee)
+        .context("melt input fee exceeds its total fee")
+}
+
 async fn melt_invoice(
     index: &str,
     mint_url: &str,
@@ -322,14 +340,14 @@ async fn melt_invoice(
         .melt_quote(PaymentMethod::BOLT11, invoice.to_owned(), options, None)
         .await?;
     let prepared = wallet.prepare_melt(&quote.id, HashMap::new()).await?;
-    let fee = prepared.total_fee().to_string();
+    let prepared_swap_fee = swap_fee(prepared.total_fee(), prepared.input_fee())?;
     let final_state = prepared.confirm().await?;
     ensure!(
         final_state.state() == MeltQuoteState::Paid,
         "source Cashu melt is not paid"
     );
     Ok(
-        json!({"mint":index,"melt_quote_id":quote.id,"status":"PAID","fee_sat":fee,"amount_sat":quote.amount.to_string()}),
+        json!({"mint":index,"melt_quote_id":quote.id,"status":"PAID","fee_sat":melt_fee(prepared_swap_fee, final_state.fee_paid())?,"amount_sat":quote.amount.to_string()}),
     )
 }
 
