@@ -1,0 +1,689 @@
+diff --git a/package-lock.json b/package-lock.json
+index ee669e5..974f8e6 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -14,6 +14,7 @@
+         "@capacitor/haptics": "^6.0.2",
+         "@cashu/cashu-ts": "^4.9.0",
+         "@chenfengyuan/vue-qrcode": "^2.0.0",
++        "@ecashmesh/client": "file:../../packages/client",
+         "@gandlaf21/bc-ur": "^1.1.12",
+         "@nostr-dev-kit/ndk": "^2.8.1",
+         "@quasar/extras": "^1.17.0",
+@@ -35,7 +36,8 @@
+         "underscore": "^1.13.6",
+         "vue": "^3.4.27",
+         "vue-i18n": "^11.1.3",
+-        "vue-router": "^4.3.2"
++        "vue-router": "^4.3.2",
++        "zod": "^4.6.6"
+       },
+       "devDependencies": {
+         "@capacitor/android": "^6.2.0",
+@@ -77,6 +79,20 @@
+         "yarn": ">= 1.21.1"
+       }
+     },
++    "../../packages/client": {
++      "name": "@ecashmesh/client",
++      "version": "0.1.0",
++      "license": "MIT OR Apache-2.0",
++      "peerDependencies": {
++        "nostr-tools": "^2.25.2",
++        "zod": "^4.6.5"
++      },
++      "peerDependenciesMeta": {
++        "nostr-tools": {
++          "optional": true
++        }
++      }
++    },
+     "node_modules/@agicash/qr-scanner": {
+       "version": "0.1.2",
+       "resolved": "https://registry.npmjs.org/@agicash/qr-scanner/-/qr-scanner-0.1.2.tgz",
+@@ -2055,6 +2071,10 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@ecashmesh/client": {
++      "resolved": "../../packages/client",
++      "link": true
++    },
+     "node_modules/@electron/asar": {
+       "version": "3.4.1",
+       "dev": true,
+@@ -20096,6 +20116,15 @@
+         "node": ">= 10"
+       }
+     },
++    "node_modules/zod": {
++      "version": "4.6.6",
++      "resolved": "https://registry.npmjs.org/zod/-/zod-4.6.6.tgz",
++      "integrity": "sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==",
++      "license": "MIT",
++      "funding": {
++        "url": "https://github.com/sponsors/colinhacks"
++      }
++    },
+     "node_modules/zxing-wasm": {
+       "version": "2.2.4",
+       "resolved": "https://registry.npmjs.org/zxing-wasm/-/zxing-wasm-2.2.4.tgz",
+diff --git a/package.json b/package.json
+index 370d6f2..3490a03 100644
+--- a/package.json
++++ b/package.json
+@@ -30,6 +30,7 @@
+     "@capacitor/haptics": "^6.0.2",
+     "@cashu/cashu-ts": "^4.9.0",
+     "@chenfengyuan/vue-qrcode": "^2.0.0",
++    "@ecashmesh/client": "file:../../packages/client",
+     "@gandlaf21/bc-ur": "^1.1.12",
+     "@nostr-dev-kit/ndk": "^2.8.1",
+     "@quasar/extras": "^1.17.0",
+@@ -51,7 +52,8 @@
+     "underscore": "^1.13.6",
+     "vue": "^3.4.27",
+     "vue-i18n": "^11.1.3",
+-    "vue-router": "^4.3.2"
++    "vue-router": "^4.3.2",
++    "zod": "^4.6.6"
+   },
+   "devDependencies": {
+     "@capacitor/android": "^6.2.0",
+diff --git a/quasar.config.js b/quasar.config.js
+index 5ba0d1e..3f135fa 100644
+--- a/quasar.config.js
++++ b/quasar.config.js
+@@ -94,6 +94,10 @@ module.exports = configure(function (/* ctx */) {
+           "@agicash/qr-scanner",
+           "@cashu/cashu-ts",
+         ];
++        // @ecashmesh/client is linked (file:) from the EcashMesh repo; keep
++        // its node_modules path so its peer dependencies resolve from here.
++        viteConf.resolve = viteConf.resolve || {};
++        viteConf.resolve.preserveSymlinks = true;
+       },
+       // viteVuePluginOptions: {},
+ 
+diff --git a/src/components/EcashMeshPanel.vue b/src/components/EcashMeshPanel.vue
+new file mode 100644
+index 0000000..708dad9
+--- /dev/null
++++ b/src/components/EcashMeshPanel.vue
+@@ -0,0 +1,214 @@
++<template>
++  <div class="ecashmesh-panel q-mt-md" data-testid="ecashmesh-panel">
++    <div class="row items-center no-wrap q-mb-sm">
++      <RouteIcon :size="18" class="q-mr-sm text-primary" />
++      <div class="col text-weight-bold">EcashMesh</div>
++      <q-spinner v-if="loading" size="16px" color="grey-6" />
++    </div>
++
++    <!-- One mint can pay: recommend it -->
++    <template v-if="recommendation">
++      <div class="detail-item q-mb-xs">
++        <div class="detail-name">Best mint</div>
++        <div class="detail-value" data-testid="ecashmesh-recommended-mint">
++          {{ mintLabel(recommendation.mintUrl) }}
++        </div>
++      </div>
++      <div class="detail-item q-mb-xs">
++        <div class="detail-name">Fee estimate</div>
++        <div class="detail-value">
++          {{
++            recommendation.feeSats == null
++              ? "unknown"
++              : `up to ${formatSats(recommendation.feeSats)}`
++          }}
++        </div>
++      </div>
++      <div v-if="recommendation.reason" class="text-caption text-grey-6">
++        {{ recommendation.reason }}
++      </div>
++      <q-btn
++        v-if="!sameMint(recommendation.mintUrl, activeMintUrl)"
++        class="full-width q-mt-sm"
++        flat
++        rounded
++        color="primary"
++        data-testid="ecashmesh-use-mint"
++        :label="`Pay from ${mintLabel(recommendation.mintUrl)}`"
++        @click="selectMintUrl(recommendation.mintUrl, 'sat')"
++      />
++    </template>
++
++    <!-- Several mints pay parts of the invoice -->
++    <template v-else-if="splitPlan">
++      <div
++        v-for="part in splitPlan.parts"
++        :key="part.melt_quote_id"
++        class="detail-item q-mb-xs"
++        data-testid="ecashmesh-split-part"
++      >
++        <div class="detail-name row items-center no-wrap">
++          <q-icon
++            :name="partIcon(partStates[part.melt_quote_id])"
++            :color="partColor(partStates[part.melt_quote_id])"
++            size="16px"
++            class="q-mr-xs"
++          />
++          {{ mintLabel(part.mint_url) }}
++        </div>
++        <div class="detail-value">
++          {{ formatSats(part.amount_sats) }}
++          <span class="text-caption text-grey-6">
++            + ≤ {{ formatSats(part.fee_reserve_sats) }} fee
++          </span>
++        </div>
++      </div>
++      <div class="text-caption text-grey-6">
++        Every part settles, or none does.
++      </div>
++      <q-btn
++        v-if="!splitPaid"
++        class="full-width q-mt-sm"
++        unelevated
++        rounded
++        color="primary"
++        data-testid="ecashmesh-pay-split"
++        :loading="splitPaying"
++        :label="`Pay from ${splitPlan.parts.length} mints`"
++        @click="$emit('pay-split')"
++      />
++    </template>
++
++    <!-- No single mint holds enough, together they do -->
++    <template v-else-if="canSplit">
++      <div class="text-caption text-grey-6">
++        No single mint holds enough for this invoice, but your mints do
++        together.
++      </div>
++      <q-btn
++        class="full-width q-mt-sm"
++        flat
++        rounded
++        color="primary"
++        data-testid="ecashmesh-plan-split"
++        label="Split across mints"
++        @click="planSplit"
++      />
++    </template>
++
++    <div
++      v-else-if="!loading && !error"
++      class="text-caption text-grey-6"
++      data-testid="ecashmesh-no-route"
++    >
++      No mint in this wallet can pay this invoice.
++    </div>
++
++    <div v-if="error" class="text-caption text-negative q-mt-xs">
++      {{ error }}
++    </div>
++  </div>
++</template>
++
++<script lang="ts">
++import { defineComponent } from "vue";
++import { mapActions, mapState } from "pinia";
++import { Route as RouteIcon } from "lucide-vue-next";
++import {
++  sameMint,
++  useEcashMeshStore,
++  type SplitPartState,
++} from "src/stores/ecashmesh";
++import { useMintsStore } from "src/stores/mints";
++import { useUiStore } from "src/stores/ui";
++import { getShortUrl } from "src/js/wallet-helpers";
++
++export default defineComponent({
++  name: "EcashMeshPanel",
++  components: { RouteIcon },
++  props: {
++    request: { type: String, required: true },
++    amount: { type: Number, required: true },
++  },
++  emits: ["pay-split"],
++  computed: {
++    ...mapState(useEcashMeshStore, [
++      "loading",
++      "error",
++      "recommendation",
++      "splitPlan",
++      "partStates",
++      "splitPaying",
++      "splitPaid",
++      "canSplit",
++    ]),
++    ...mapState(useMintsStore, ["mints", "activeMintUrl"]),
++  },
++  watch: {
++    request: {
++      handler() {
++        // One evaluation per invoice. The wallet clears the invoice after
++        // paying, so an empty request keeps the result on screen.
++        if (!this.request || this.amount <= 0) return;
++        if (this.request === useEcashMeshStore().request) return;
++        this.recommend(this.request, this.amount);
++      },
++      immediate: true,
++    },
++  },
++  methods: {
++    sameMint,
++    ...mapActions(useEcashMeshStore, ["recommend", "planSplit"]),
++    ...mapActions(useMintsStore, ["selectMintUrl"]),
++    mintLabel(url: string): string {
++      const mint = this.mints.find((m) => sameMint(m.url, url));
++      return mint?.nickname || mint?.info?.name || getShortUrl(url);
++    },
++    formatSats(sats: number): string {
++      return useUiStore().formatCurrency(sats, "sat");
++    },
++    partIcon(state?: SplitPartState): string {
++      return state === "paid"
++        ? "check_circle"
++        : state === "failed"
++        ? "error"
++        : state === "paying"
++        ? "sync"
++        : "radio_button_unchecked";
++    },
++    partColor(state?: SplitPartState): string {
++      return state === "paid"
++        ? "positive"
++        : state === "failed"
++        ? "negative"
++        : "primary";
++    },
++  },
++});
++</script>
++
++<style scoped>
++.ecashmesh-panel {
++  border: 1px solid rgba(128, 128, 128, 0.25);
++  border-radius: 14px;
++  padding: 12px 14px;
++}
++
++.detail-item {
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
++}
++
++.detail-name {
++  font-size: 14px;
++  font-weight: 600;
++  color: var(--q-color-grey-6);
++}
++
++.detail-value {
++  font-size: 15px;
++  font-weight: 600;
++  text-align: right;
++}
++</style>
+diff --git a/src/components/PayInvoiceDialog.vue b/src/components/PayInvoiceDialog.vue
+index 2ad56bd..40096e0 100644
+--- a/src/components/PayInvoiceDialog.vue
++++ b/src/components/PayInvoiceDialog.vue
+@@ -299,6 +299,12 @@
+                     </div>
+                   </transition>
+                 </div>
++                <EcashMeshPanel
++                  v-if="showEcashMesh"
++                  :request="payInvoiceData.invoice.request"
++                  :amount="payInvoiceData.invoice.sat"
++                  @pay-split="handleSplitButton"
++                />
+                 <div
+                   v-if="showBottomMeltQuoteInformation"
+                   class="invoice-details-bottom"
+@@ -782,6 +788,8 @@ import MeltQuoteInformation from "components/MeltQuoteInformation.vue";
+ import NumericKeyboard from "components/NumericKeyboard.vue";
+ import AmountInputComponent from "components/AmountInputComponent.vue";
+ import ParseInputComponent from "components/ParseInputComponent.vue";
++import EcashMeshPanel from "components/EcashMeshPanel.vue";
++import { useEcashMeshStore } from "src/stores/ecashmesh";
+ import { mintsSupportingPaymentMethod } from "src/js/mint-payment-methods";
+ import { PaymentMethod } from "src/stores/walletTypes";
+ 
+@@ -799,6 +807,7 @@ export default defineComponent({
+     NumericKeyboard,
+     AmountInputComponent,
+     ParseInputComponent,
++    EcashMeshPanel,
+   },
+   props: {},
+   data: function () {
+@@ -862,13 +871,15 @@ export default defineComponent({
+     },
+     "payInvoiceData.show": {
+       handler: async function (val, oldVal) {
+-        // Intercept automatic close after successful payment
++        // Intercept automatic close after successful payment (each part of
++        // an EcashMesh split payment closes it once)
+         if (
+           !val &&
+           oldVal &&
+-          this.isPaying &&
++          (this.isPaying || this.splitPaying) &&
+           !this.payInvoiceData.meltQuote.error
+         ) {
++          if (this.autoCloseTimeout) clearTimeout(this.autoCloseTimeout);
+           // Payment just succeeded and store is trying to close dialog
+           // Re-open it to show success state
+           this.isPaying = false;
+@@ -900,6 +911,11 @@ export default defineComponent({
+   computed: {
+     ...mapState(useUiStore, ["tickerShort"]),
+     ...mapState(useSettingsStore, ["multinutEnabled"]),
++    ...mapState(useEcashMeshStore, {
++      ecashMeshEnabled: "enabled",
++      splitPaying: "splitPaying",
++      splitPaid: "splitPaid",
++    }),
+     ...mapWritableState(useCameraStore, ["camera", "hasCamera"]),
+     ...mapWritableState(useUiStore, ["showNumericKeyboard"]),
+     // mints store via direct getters to avoid strict typing issues
+@@ -988,6 +1004,16 @@ export default defineComponent({
+         null
+       );
+     },
++    showEcashMesh: function (): boolean {
++      return (
++        this.ecashMeshEnabled &&
++        this.payPaymentMethod === PaymentMethod.Bolt11 &&
++        this.activeUnit === "sat" &&
++        (this.splitPaying ||
++          this.splitPaid ||
++          (!this.isPaid && !this.paymentInProgress))
++      );
++    },
+     hasMeltQuote: function (): boolean {
+       const quote = this.payInvoiceData?.meltQuote?.response;
+       return Boolean(quote?.quote) && quote.amount > 0;
+@@ -1238,6 +1264,11 @@ export default defineComponent({
+         uiStore.endForegroundPayment();
+       }
+     },
++    handleSplitButton: async function () {
++      await useEcashMeshStore().paySplit();
++      // On success the dialog already shows the paid state.
++      if (!this.splitPaid) this.isPaying = false;
++    },
+     openMultinutDialog: function () {
+       this.payInvoiceData.show = false;
+       (this.$refs as any).multinutDialog.openMultinutDialog();
+diff --git a/src/stores/ecashmesh.ts b/src/stores/ecashmesh.ts
+new file mode 100644
+index 0000000..db20e6b
+--- /dev/null
++++ b/src/stores/ecashmesh.ts
+@@ -0,0 +1,251 @@
++import { defineStore } from "pinia";
++import { MeltQuoteState } from "@cashu/cashu-ts";
++import type {
++  EcashMeshClient,
++  PaymentSource,
++  SplitPlan,
++} from "@ecashmesh/client/http";
++import { MintClass, useMintsStore } from "./mints";
++import { useProofsStore } from "./proofs";
++import { useUiStore } from "./ui";
++import { useWalletStore } from "./wallet";
++import { normalizeMeltQuote } from "./walletMelt";
++
++// EcashMesh advises which of the wallet's mints should pay a Lightning
++// invoice, and plans NUT-15 split payments when no single mint holds enough.
++// It never sees proofs: the wallet pays through its own melt path. Enabled
++// only when VITE_ECASHMESH_API_URL is set at build time.
++const apiUrl: string =
++  (import.meta as ImportMeta & { env: Record<string, string | undefined> }).env
++    .VITE_ECASHMESH_API_URL ?? "";
++// EcashMesh plans Lightning payments in sats.
++const UNIT = "sat";
++
++let client: Promise<EcashMeshClient> | undefined;
++function ecashMesh(): Promise<EcashMeshClient> {
++  // Loaded on first use, so the SDK stays out of wallets that do not enable it.
++  client ??= import("@ecashmesh/client/http").then(
++    ({ createEcashMeshClient }) => createEcashMeshClient({ baseUrl: apiUrl })
++  );
++  return client;
++}
++
++export const sameMint = (a: string, b: string) =>
++  a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
++
++/** The wallet mint a ranked Cashu source refers to, if it is one of ours. */
++function walletMintFor(source: PaymentSource, mintUrls: string[]) {
++  const url = source.cashu_metrics?.mint_url;
++  return typeof url === "string"
++    ? mintUrls.find((mintUrl) => sameMint(mintUrl, url))
++    : undefined;
++}
++
++export type MintRecommendation = {
++  mintUrl: string;
++  /** Upper bound the mint reserves for Lightning fees; unused is returned. */
++  feeSats: number | null;
++  reason: string;
++};
++
++export type SplitPartState = "pending" | "paying" | "paid" | "failed";
++
++export const useEcashMeshStore = defineStore("ecashmesh", {
++  state: () => ({
++    enabled: apiUrl !== "",
++    request: "",
++    amount: 0,
++    loading: false,
++    error: "",
++    recommendation: null as MintRecommendation | null,
++    splitPlan: null as SplitPlan | null,
++    partStates: {} as Record<string, SplitPartState>,
++    splitPaying: false,
++    splitPaid: false,
++  }),
++  getters: {
++    /** Spendable sats per wallet mint: what EcashMesh plans with. */
++    balances(): Record<string, number> {
++      return Object.fromEntries(
++        useMintsStore()
++          .mints.map((mint) => new MintClass(mint))
++          .filter((mint) => mint.units.includes(UNIT))
++          .map((mint) => [mint.mint.url, mint.unitBalance(UNIT)])
++      );
++    },
++    /** No single mint can pay, but the wallet's mints together hold enough. */
++    canSplit(): boolean {
++      const total = Object.values(this.balances).reduce((a, b) => a + b, 0);
++      return (
++        this.amount > 0 &&
++        !this.loading &&
++        this.recommendation == null &&
++        total >= this.amount
++      );
++    },
++  },
++  actions: {
++    reset(request = "", amount = 0) {
++      this.request = request;
++      this.amount = amount;
++      this.loading = false;
++      this.error = "";
++      this.recommendation = null;
++      this.splitPlan = null;
++      this.partStates = {};
++      this.splitPaying = false;
++      this.splitPaid = false;
++    },
++    /** Asks EcashMesh which of the wallet's mints should pay `request`. */
++    async recommend(request: string, amount: number) {
++      this.reset(request, amount);
++      const balances = Object.fromEntries(
++        Object.entries(this.balances).filter(([, sats]) => sats > 0)
++      );
++      if (!Object.keys(balances).length) return;
++      this.loading = true;
++      try {
++        const decision = await (
++          await ecashMesh()
++        ).evaluateRoute({
++          amount,
++          asset: "BTC",
++          destination: { type: "lightning", value: request },
++          paymentIntent: "send",
++          // Only the wallet's mints are ranked; EcashMesh excludes any whose
++          // balance cannot cover the amount plus its fee reserve.
++          strictSourceRegistry: true,
++          walletMintBalances: balances,
++        });
++        if (this.request !== request) return;
++        const source = decision.recommended_source;
++        const mintUrl = source && walletMintFor(source, Object.keys(balances));
++        if (source && mintUrl) {
++          this.recommendation = {
++            mintUrl,
++            feeSats: source.fee.fee_reserve_sats ?? source.fee.amount ?? null,
++            reason: decision.explanation.reasons[0]?.message ?? "",
++          };
++        }
++      } catch (error) {
++        // No single mint can fund it: the panel offers a split instead.
++        const noRoute =
++          (error as { code?: string } | null)?.code === "NO_VIABLE_ROUTE";
++        if (this.request === request && !noRoute)
++          this.error = errorMessage(error);
++      } finally {
++        if (this.request === request) this.loading = false;
++      }
++    },
++    /** One NUT-15 part per mint; Lightning settles every part or none. */
++    async planSplit() {
++      const request = this.request;
++      this.loading = true;
++      this.error = "";
++      try {
++        const plan = await (
++          await ecashMesh()
++        ).planSplit({
++          amount: this.amount,
++          destination: { type: "lightning", value: request },
++          balances: Object.fromEntries(
++            Object.entries(this.balances).filter(([, sats]) => sats > 0)
++          ),
++        });
++        if (this.request !== request) return;
++        // Pay only a plan for exactly this invoice and amount.
++        const planned = plan.parts.reduce((sum, p) => sum + p.amount_sats, 0);
++        if (!sameInvoice(plan.invoice, request) || planned !== this.amount) {
++          throw new Error("EcashMesh returned a plan for another payment");
++        }
++        this.splitPlan = plan;
++        this.partStates = Object.fromEntries(
++          plan.parts.map((part) => [part.melt_quote_id, "pending"])
++        );
++      } catch (error) {
++        if (this.request === request) this.error = errorMessage(error);
++      } finally {
++        if (this.request === request) this.loading = false;
++      }
++    },
++    /** Melts every part concurrently, each with its own mint's proofs. */
++    async paySplit() {
++      const plan = this.splitPlan;
++      if (!plan || this.splitPaying || this.splitPaid) return;
++      const uiStore = useUiStore();
++      this.splitPaying = true;
++      this.error = "";
++      uiStore.beginForegroundPayment();
++      try {
++        const results = await Promise.allSettled(
++          plan.parts.map((part) => this.payPart(part, this.request))
++        );
++        const failures = results.flatMap((result) =>
++          result.status === "rejected" ? [errorMessage(result.reason)] : []
++        );
++        if (failures.length) {
++          this.error = `Split payment failed: ${failures.join("; ")}`;
++          return;
++        }
++        this.splitPaid = true;
++        useWalletStore().payInvoiceData.fee_paid = results.reduce(
++          (sum, result) =>
++            sum + (result.status === "fulfilled" ? result.value : 0),
++          0
++        );
++        uiStore.vibrate();
++      } finally {
++        this.splitPaying = false;
++        uiStore.endForegroundPayment();
++      }
++    },
++    /** Pays one part by its planned melt quote; returns the fee paid. */
++    async payPart(part: SplitPlan["parts"][number], invoice: string) {
++      const walletStore = useWalletStore();
++      const id = part.melt_quote_id;
++      try {
++        const mint = useMintsStore().mints.find((m) =>
++          sameMint(m.url, part.mint_url)
++        );
++        if (!mint) throw new Error(`${part.mint_url} is not in this wallet`);
++        const mintWallet = await walletStore.mintWallet(mint.url, UNIT, true);
++        // The plan only advises: check the quote at the mint before paying.
++        const quote = normalizeMeltQuote(
++          await mintWallet.mint.checkMeltQuoteBolt11(id)
++        );
++        if (
++          !sameInvoice(quote.request ?? "", invoice) ||
++          quote.amount !== part.amount_sats ||
++          quote.unit !== UNIT ||
++          quote.state !== MeltQuoteState.UNPAID
++        ) {
++          throw new Error(`Melt quote ${id} does not match the plan`);
++        }
++        this.partStates[id] = "paying";
++        const result = await walletStore.melt(
++          new MintClass(mint).unitProofs(UNIT),
++          quote,
++          mintWallet,
++          true, // silent: one notification for the whole payment
++          true, // release the mutex so the parts melt concurrently
++          "foreground"
++        );
++        this.partStates[id] = "paid";
++        return (
++          quote.fee_reserve - useProofsStore().sumProofs(result?.change ?? [])
++        );
++      } catch (error) {
++        this.partStates[id] = "failed";
++        throw error;
++      }
++    },
++  },
++});
++
++function sameInvoice(a: string, b: string) {
++  return a.toLowerCase() === b.toLowerCase();
++}
++
++function errorMessage(error: unknown) {
++  return error instanceof Error ? error.message : String(error);
++}
+diff --git a/tsconfig.json b/tsconfig.json
+index 9ad681d..48b415d 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -2,6 +2,7 @@
+   "extends": "@quasar/app-vite/tsconfig-preset",
+   "compilerOptions": {
+     "baseUrl": ".",
++    "preserveSymlinks": true,
+     "target": "ES2020",
+     "typeRoots": ["./types", "./node_modules/@types"],
+     "paths": {
