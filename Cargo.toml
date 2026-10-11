@@ -7,6 +7,8 @@ members = [
   "crates/ecashmesh-ffi",
   "crates/ecashmesh-sdk",
 ]
+# Third-party wallets checked out for the integration demos build on their own.
+exclude = ["demos"]
 resolver = "2"
 
 [workspace.package]
