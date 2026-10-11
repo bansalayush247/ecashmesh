@@ -33,15 +33,7 @@ impl SetupService {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|_| "Cannot initialize setup transport")?,
-            origins: std::env::var("ECASHMESH_WEB_ORIGIN").map_or_else(
-                |_| {
-                    vec![
-                        "http://localhost:8081".into(),
-                        "http://127.0.0.1:8081".into(),
-                    ]
-                },
-                |v| vec![v],
-            ),
+            origins: crate::config::web_origins(),
             plans: Mutex::new(BTreeMap::new()),
             joining: tokio::sync::Mutex::new(()),
         }))

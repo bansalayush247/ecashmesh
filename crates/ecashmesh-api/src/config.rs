@@ -22,6 +22,22 @@ pub(crate) fn lab_mode() -> bool {
         && std::env::var("ECASHMESH_LAB_MODE").as_deref() == Ok("true")
 }
 
+/// Browser origins allowed to call the API: `ECASHMESH_WEB_ORIGIN`, comma
+/// separated, or Expo's local preview. Native clients do not use CORS.
+pub(crate) fn web_origins() -> Vec<String> {
+    std::env::var("ECASHMESH_WEB_ORIGIN").map_or_else(
+        |_| vec!["http://localhost:8081".into(), "http://127.0.0.1:8081".into()],
+        |value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|origin| !origin.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        },
+    )
+}
+
 fn env_urls(name: &str) -> Result<Vec<String>, String> {
     serde_json::from_str(&std::env::var(name).unwrap_or_else(|_| "[]".into()))
         .map_err(|error| format!("{name}: {error}"))

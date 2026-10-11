@@ -77,22 +77,14 @@ fn app(mesh: EcashMesh, lab_history: Option<std::sync::Arc<lab_history::LabHisto
         lab_results,
         lab_actions,
     };
-    // Expo's local browser preview; native clients do not use browser CORS.
-    let origins = std::env::var("ECASHMESH_WEB_ORIGIN").map_or_else(
-        |_| {
-            vec![
-                HeaderValue::from_static("http://localhost:8081"),
-                HeaderValue::from_static("http://127.0.0.1:8081"),
-            ]
-        },
-        |origin| {
-            vec![
-                origin
-                    .parse()
-                    .expect("ECASHMESH_WEB_ORIGIN must be a valid header"),
-            ]
-        },
-    );
+    let origins = config::web_origins()
+        .iter()
+        .map(|origin| {
+            origin
+                .parse::<HeaderValue>()
+                .expect("ECASHMESH_WEB_ORIGIN must hold valid origins")
+        })
+        .collect::<Vec<_>>();
     Router::new()
         .route("/", get(index))
         .route("/health", get(health))
