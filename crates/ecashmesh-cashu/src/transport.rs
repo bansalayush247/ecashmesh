@@ -185,10 +185,35 @@ impl CashuAdapter {
         invoice: &LightningInvoice,
         amount: Amount,
     ) -> QuoteObservation<MeltQuote> {
+        self.melt_quote_for(invoice, amount, false).await
+    }
+
+    /// Requests an unpaid NUT-15 melt quote for paying `part` of `invoice`;
+    /// other sources pay the rest. Lightning settles all parts or none.
+    #[must_use]
+    pub async fn partial_melt_quote(
+        &self,
+        invoice: &LightningInvoice,
+        part: Amount,
+    ) -> QuoteObservation<MeltQuote> {
+        self.melt_quote_for(invoice, part, true).await
+    }
+
+    async fn melt_quote_for(
+        &self,
+        invoice: &LightningInvoice,
+        amount: Amount,
+        partial: bool,
+    ) -> QuoteObservation<MeltQuote> {
         let path = "v1/melt/quote/bolt11";
         let endpoint = self.endpoint(path);
+        let mut body = json!({ "request": invoice.as_str(), "unit": "sat" });
+        if partial {
+            // NUT-15: the partial amount is in millisatoshis.
+            body["options"] = json!({ "mpp": { "amount": amount.sats().saturating_mul(1_000) } });
+        }
         match self
-            .post(path, json!({ "request": invoice.as_str(), "unit": "sat" }))
+            .post(path, body)
             .await
             .and_then(|(body, observed_at)| parse_melt_quote(&body, amount, observed_at))
         {

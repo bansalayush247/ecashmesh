@@ -381,3 +381,18 @@ fn expired_or_inactive_keysets_do_not_advertise_usable_send_capability() {
         );
     }
 }
+
+#[test]
+fn partial_payment_support_comes_only_from_an_advertised_nut15_bolt11_sat_method() {
+    assert!(!normalize(&capture(), NOW).supports_partial_payments());
+    let wrapped = changed_info(|info| {
+        info["nuts"]["15"] = json!({"methods": [{"method": "bolt11", "unit": "sat"}]});
+    });
+    assert!(normalize(&wrapped, NOW).supports_partial_payments());
+    let usd_only = changed_info(|info| {
+        info["nuts"]["15"] = json!({"methods": [{"method": "bolt11", "unit": "usd"}]});
+    });
+    assert!(!normalize(&usd_only, NOW).supports_partial_payments());
+    // Stale metadata is not evidence of support.
+    assert!(!normalize(&wrapped, NOW + 301).supports_partial_payments());
+}

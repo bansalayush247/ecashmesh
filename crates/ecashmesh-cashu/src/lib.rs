@@ -269,6 +269,26 @@ impl MintCapture {
 }
 
 impl CashuObservation {
+    /// Whether the mint advertises NUT-15 partial (multi-path) payments for
+    /// bolt11/sat, so it can pay part of an invoice that other mints pay the
+    /// rest of. Stale or missing metadata counts as unsupported.
+    #[must_use]
+    pub fn supports_partial_payments(&self) -> bool {
+        let Evidence::Known(nuts) = &self.nuts else {
+            return false;
+        };
+        let Some(settings) = nuts.value.get(&15) else {
+            return false;
+        };
+        // NUT settings are objects (the parser rejects anything else), so
+        // the methods are the spec example's `{"methods": [...]}` form.
+        settings["methods"].as_array().is_some_and(|methods| {
+            methods
+                .iter()
+                .any(|method| method["method"] == "bolt11" && method["unit"] == "sat")
+        })
+    }
+
     /// Explains why this adapter cannot advertise a send capability for this amount.
     /// This only checks advertised Cashu support; it does not rank routes or assert liquidity.
     #[must_use]

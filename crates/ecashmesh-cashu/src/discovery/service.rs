@@ -200,6 +200,27 @@ impl DiscoveryService {
             .await)
     }
 
+    /// Requests an unpaid NUT-15 partial melt quote: this mint pays `part`
+    /// of the invoice. This never invokes Cashu melt execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the mint URL cannot be safely normalized or the
+    /// quote adapter cannot be initialized.
+    pub async fn partial_melt_quote(
+        &self,
+        id: ConnectorId,
+        mint_url: &str,
+        invoice: &ecashmesh_core::LightningInvoice,
+        part: ecashmesh_core::Amount,
+    ) -> Result<QuoteObservation<MeltQuote>, String> {
+        Ok(self
+            .quote_adapter(id, mint_url)
+            .await?
+            .partial_melt_quote(invoice, part)
+            .await)
+    }
+
     async fn sources(&self, mut hints: Vec<MintHint>) -> (Vec<MintHint>, Vec<crate::AdapterIssue>) {
         let mut issues = Vec::new();
         let mut cache = self.directories_cache.lock().await;
