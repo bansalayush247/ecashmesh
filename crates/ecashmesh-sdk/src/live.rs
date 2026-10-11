@@ -117,148 +117,19 @@ pub(super) async fn evaluate(
 ) -> Result<LiveEvaluation, LiveNoRoute> {
     let mut quote_observations = Vec::new();
     let destination_type = destination.type_code();
-    let (invoice, destination_context, destination_expiry) = match destination {
-        LiveDestination::Lightning(invoice) => {
-            if invoice.amount() != Some(amount) {
-                return Err(LiveNoRoute {
-                    details: vec![
-                        "unsupported destination: Lightning invoice amount must exactly match the requested amount"
-                            .into(),
-                    ],
-                    quote_observations,
-                });
-            }
-            (
-                invoice,
-                json!({
-                    "type": "lightning",
-                    "normalization": "checksummed_bolt11",
-                    "invoice_amount_sats": amount.sats(),
-                }),
-                None,
-            )
-        }
-        LiveDestination::Cashu(request) => {
-            if !request.supported_methods.is_empty()
-                && !request
-                    .supported_methods
-                    .iter()
-                    .any(|method| method.method == "bolt11")
-            {
-                return Err(LiveNoRoute {
-                    details: vec![
-                        "route constraints: NUT-18 request does not permit a bolt11 payment leg"
-                            .into(),
-                    ],
-                    quote_observations,
-                });
-            }
-            if request.amount.is_some_and(|claimed| claimed != amount) {
-                return Err(LiveNoRoute {
-                    details: vec![
-                        "route constraints: Cashu payment request amount does not match requested amount"
-                            .into(),
-                    ],
-                    quote_observations,
-                });
-            }
-            let targets = request
-                .mint_urls
-                .iter()
-                .filter_map(|mint_url| {
-                    batch
-                        .live_observations
-                        .iter()
-                        .find(|observation| &observation.mint_url == mint_url)
-                })
-                .collect::<Vec<_>>();
-            if targets.is_empty() {
-                return Err(LiveNoRoute {
-                    details: vec![
-                        "destination mint was not discovered or has no inspectable observation"
-                            .into(),
-                    ],
-                    quote_observations,
-                });
-            }
-            let embedded_invoice = request.invoice.clone();
-            let (target, invoice, expiry) = if let Some(invoice) = embedded_invoice {
-                let target = targets[0];
-                quote_observations.push(json!({
-                    "kind": "destination_invoice",
-                    "state": "known",
-                    "origin": "cashu_payment_request",
-                    "mint_url": target.mint_url,
-                }));
-                if invoice.amount() != Some(amount) {
-                    return Err(LiveNoRoute {
-                        details: vec![
-                            "route constraints: Cashu payment request invoice amount does not match requested amount"
-                                .into(),
-                        ],
-                        quote_observations,
-                    });
-                }
-                (target, invoice, None)
-            } else {
-                let mut failures = Vec::new();
-                let mut usable = None;
-                for target in targets {
-                    match service
-                        .mint_quote(target.id.clone(), &target.mint_url, amount)
-                        .await
-                    {
-                        Ok(quote) => {
-                            quote_observations.push(mint_quote_json(target, &quote));
-                            if let Some(observed) = quote.evidence.observation() {
-                                usable = Some((
-                                    target,
-                                    observed.value.invoice.clone(),
-                                    observed.value.expires_at_unix_seconds,
-                                ));
-                                break;
-                            }
-                            let detail = quote.issue.map_or_else(
-                                || "destination mint did not return a usable mint quote".into(),
-                                |issue| format!("{}: {}", issue.code, issue.message),
-                            );
-                            failures.push(format!("{}: {detail}", target.mint_url));
-                        }
-                        Err(error) => failures.push(format!("{}: {error}", target.mint_url)),
-                    }
-                }
-                let Some(usable) = usable else {
-                    return Err(LiveNoRoute {
-                        details: failures
-                            .into_iter()
-                            .map(|failure| format!("missing quote: {failure}"))
-                            .collect(),
-                        quote_observations,
-                    });
-                };
-                usable
-            };
-            (
-                invoice,
-                json!({
-                    "type": "cashu",
-                    "mint_url": target.mint_url,
-                    "mint_urls": request.mint_urls,
-                    "mints_are_preferred": request.mints_are_preferred,
-                    "unit": request.unit,
-                    "transports": request.transports.iter().map(|transport| json!({
-                        "type": transport.kind,
-                        "target": transport.target,
-                    })).collect::<Vec<_>>(),
-                    "supported_methods": request.supported_methods.iter().map(|method| json!({
-                        "method": method.method,
-                        "receiver_fee_sats": method.fee.map(Amount::sats),
-                    })).collect::<Vec<_>>(),
-                    "normalization": request.encoding.code(),
-                    "transfer": "cashu_mint_quote_to_lightning_invoice",
-                }),
-                expiry,
-            )
+    let ResolvedDestination {
+        invoice,
+        context: destination_context,
+        expiry: destination_expiry,
+    } = match resolve_destination(service, batch, destination, amount, &mut quote_observations)
+        .await
+    {
+        Ok(resolved) => resolved,
+        Err(details) => {
+            return Err(LiveNoRoute {
+                details,
+                quote_observations,
+            });
         }
     };
 
@@ -691,6 +562,155 @@ pub(super) async fn evaluate(
     })
 }
 
+/// A destination reduced to the Lightning invoice every source pays.
+pub(crate) struct ResolvedDestination {
+    pub invoice: LightningInvoice,
+    pub context: Value,
+    pub expiry: Option<u64>,
+}
+
+/// Turns the destination into one Lightning invoice: a BOLT11 invoice as is,
+/// or a Cashu request's embedded invoice or a fresh mint quote from one of
+/// its mints. Quote observations are appended to `observations`.
+#[allow(clippy::too_many_lines)] // One branch per destination kind, with exact no-route reasons.
+pub(crate) async fn resolve_destination(
+    service: &DiscoveryService,
+    batch: &ConnectorBatch,
+    destination: LiveDestination,
+    amount: Amount,
+    observations: &mut Vec<Value>,
+) -> Result<ResolvedDestination, Vec<String>> {
+    let (invoice, context, expiry) = match destination {
+        LiveDestination::Lightning(invoice) => {
+            if invoice.amount() != Some(amount) {
+                return Err(vec![
+                        "unsupported destination: Lightning invoice amount must exactly match the requested amount"
+                            .into(),
+                    ]);
+            }
+            (
+                invoice,
+                json!({
+                    "type": "lightning",
+                    "normalization": "checksummed_bolt11",
+                    "invoice_amount_sats": amount.sats(),
+                }),
+                None,
+            )
+        }
+        LiveDestination::Cashu(request) => {
+            if !request.supported_methods.is_empty()
+                && !request
+                    .supported_methods
+                    .iter()
+                    .any(|method| method.method == "bolt11")
+            {
+                return Err(vec![
+                    "route constraints: NUT-18 request does not permit a bolt11 payment leg".into(),
+                ]);
+            }
+            if request.amount.is_some_and(|claimed| claimed != amount) {
+                return Err(vec![
+                        "route constraints: Cashu payment request amount does not match requested amount"
+                            .into(),
+                    ]);
+            }
+            let targets = request
+                .mint_urls
+                .iter()
+                .filter_map(|mint_url| {
+                    batch
+                        .live_observations
+                        .iter()
+                        .find(|observation| &observation.mint_url == mint_url)
+                })
+                .collect::<Vec<_>>();
+            if targets.is_empty() {
+                return Err(vec![
+                    "destination mint was not discovered or has no inspectable observation".into(),
+                ]);
+            }
+            let embedded_invoice = request.invoice.clone();
+            let (target, invoice, expiry) = if let Some(invoice) = embedded_invoice {
+                let target = targets[0];
+                observations.push(json!({
+                    "kind": "destination_invoice",
+                    "state": "known",
+                    "origin": "cashu_payment_request",
+                    "mint_url": target.mint_url,
+                }));
+                if invoice.amount() != Some(amount) {
+                    return Err(vec![
+                            "route constraints: Cashu payment request invoice amount does not match requested amount"
+                                .into(),
+                        ]);
+                }
+                (target, invoice, None)
+            } else {
+                let mut failures = Vec::new();
+                let mut usable = None;
+                for target in targets {
+                    match service
+                        .mint_quote(target.id.clone(), &target.mint_url, amount)
+                        .await
+                    {
+                        Ok(quote) => {
+                            observations.push(mint_quote_json(target, &quote));
+                            if let Some(observed) = quote.evidence.observation() {
+                                usable = Some((
+                                    target,
+                                    observed.value.invoice.clone(),
+                                    observed.value.expires_at_unix_seconds,
+                                ));
+                                break;
+                            }
+                            let detail = quote.issue.map_or_else(
+                                || "destination mint did not return a usable mint quote".into(),
+                                |issue| format!("{}: {}", issue.code, issue.message),
+                            );
+                            failures.push(format!("{}: {detail}", target.mint_url));
+                        }
+                        Err(error) => failures.push(format!("{}: {error}", target.mint_url)),
+                    }
+                }
+                let Some(usable) = usable else {
+                    return Err(failures
+                        .into_iter()
+                        .map(|failure| format!("missing quote: {failure}"))
+                        .collect());
+                };
+                usable
+            };
+            (
+                invoice,
+                json!({
+                    "type": "cashu",
+                    "mint_url": target.mint_url,
+                    "mint_urls": request.mint_urls,
+                    "mints_are_preferred": request.mints_are_preferred,
+                    "unit": request.unit,
+                    "transports": request.transports.iter().map(|transport| json!({
+                        "type": transport.kind,
+                        "target": transport.target,
+                    })).collect::<Vec<_>>(),
+                    "supported_methods": request.supported_methods.iter().map(|method| json!({
+                        "method": method.method,
+                        "receiver_fee_sats": method.fee.map(Amount::sats),
+                    })).collect::<Vec<_>>(),
+                    "normalization": request.encoding.code(),
+                    "transfer": "cashu_mint_quote_to_lightning_invoice",
+                }),
+                expiry,
+            )
+        }
+    };
+    Ok(ResolvedDestination {
+        invoice,
+        context,
+        expiry,
+    })
+}
+
 /// A ranking over the sources that passed feasibility.
 struct RankedSources {
     ranking: RouteRanking,
@@ -1013,6 +1033,9 @@ fn mint_quote_json(target: &CashuObservation, quote: &QuoteObservation<MintQuote
             json!({
                 "quote_id": value.quote_id,
                 "expiry": value.expires_at_unix_seconds,
+                // The invoice a source pays; the wallet claims the minted
+                // ecash with `quote_id` once it is paid.
+                "invoice": value.invoice.as_str(),
                 "invoice_amount_sats": value.invoice.amount().map(Amount::sats),
             })
         },
