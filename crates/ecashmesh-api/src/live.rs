@@ -4,19 +4,19 @@
 //! and normalization remain in `ecashmesh-cashu`; bounded route generation and
 //! ranking remain in `ecashmesh-core`. It never creates a mint-to-mint edge.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use ecashmesh_cashu::{
     CashuObservation, CashuPaymentRequest, KeysetFee, MintQuote, QuoteObservation,
     discovery::DiscoveryService,
 };
 use ecashmesh_core::{
-    Amount, AmountAwareEvidence, ConfidenceLevel, ConnectorCapabilities, ConnectorEvidence,
-    ConnectorHealth, ConnectorId, ConnectorRegistry, ConnectorSnapshot, ConnectorType,
-    DiscoveredConnector, Evidence, EvidenceSource, EvidenceState, EvidenceTimestamp,
-    ExecutableEdge, GraphBuilder, GraphNode, GraphSnapshotPublisher, HealthObservation,
-    HealthState, LightningInvoice, RouteRanking, RouteSearchConfig, RouteSearchRequest,
-    ScalableRouter, SearchEndpoint, TransferMechanism,
+    Amount, ConfidenceLevel, ConnectorHealth, ConnectorId, ConnectorSnapshot, ConnectorType,
+    Evidence, EvidenceSource, EvidenceTimestamp, LightningInvoice, PaymentRequest, RouteRanking,
+    RouteRankingConfig, rank_routes,
 };
 use ecashmesh_fedimint::{FederationObservation, FedimintQuote, FedimintService};
 use serde_json::{Value, json};
@@ -63,7 +63,7 @@ impl LiveDestination {
     }
 }
 
-/// A successful, quote-backed graph search plus data for API inspection.
+/// A successful, quote-backed ranking plus data for API inspection.
 pub(super) struct LiveEvaluation {
     pub ranking: RouteRanking,
     pub connectors: Vec<ConnectorSnapshot>,
@@ -102,7 +102,7 @@ pub(super) struct LiveNoRoute {
 }
 
 /// Builds only declared Cashu-to-Lightning edges for the normalized destination
-/// and evaluates the resulting immutable graph through the Phase 9 router.
+/// and ranks one candidate per feasible source.
 #[allow(clippy::too_many_lines)] // Keeps the full live feasibility chain and its exact no-route diagnostics together.
 #[allow(clippy::too_many_arguments)] // Each optional lab evidence source is an explicit input.
 pub(super) async fn evaluate(
@@ -269,7 +269,7 @@ pub(super) async fn evaluate(
         .collect::<BTreeMap<_, _>>();
     let mut live_sources = Vec::new();
     let mut live_fee_terms = Vec::new();
-    let mut source_health = BTreeMap::new();
+    let mut unavailable = BTreeSet::new();
     let mut expiries = Vec::new();
     let mut no_route_details = Vec::new();
     let mut fee_checks = BTreeMap::new();
@@ -477,7 +477,9 @@ pub(super) async fn evaluate(
                 quote_observations.push(fee_budget_json(&check));
                 fee_checks.insert(source.id.clone(), check);
             }
-            source_health.insert(source.id.clone(), health_observation(&observation.health));
+            if is_unavailable(&observation.health) {
+                unavailable.insert(source.id.clone());
+            }
             if let Some(expiry) = quote.expires_at_unix_seconds {
                 expiries.push(expiry);
             }
@@ -574,10 +576,9 @@ pub(super) async fn evaluate(
         if let Some(expiry) = quote_evidence.value.expires_at_unix_seconds {
             expiries.push(expiry);
         }
-        source_health.insert(
-            source.id.clone(),
-            health_observation(&source.evidence.health),
-        );
+        if is_unavailable(&source.evidence.health) {
+            unavailable.insert(source.id.clone());
+        }
         live_sources.push(source);
     }
     // Evidence for sources that failed earlier remains inspectable.
@@ -617,10 +618,9 @@ pub(super) async fn evaluate(
     }
     let ranked = match rank_feasible_sources(
         live_sources,
-        &source_health,
+        &unavailable,
         &fee_checks,
         no_route_details,
-        invoice.as_str(),
         amount,
     ) {
         Ok(ranked) => ranked,
@@ -674,11 +674,7 @@ pub(super) async fn evaluate(
         graph_context: json!({
             "destination": destination_context,
             "sources": source_context,
-            "graph_version": ranked.graph["graph_version"],
-            "connector_count": ranked.graph["connector_count"],
-            "edge_count": ranked.graph["edge_count"],
             "mechanisms": mechanisms,
-            "search": ranked.graph["search"],
             "route_shape": route_shape,
             "route_classification": "quote_backed",
             "execution": "No wallet proofs, funds, or payment instruction were supplied to EcashMesh",
@@ -695,46 +691,42 @@ pub(super) async fn evaluate(
     })
 }
 
-/// A ranking over the sources that passed feasibility, with graph facts.
+/// A ranking over the sources that passed feasibility.
 struct RankedSources {
     ranking: RouteRanking,
     sources: Vec<ConnectorSnapshot>,
-    graph: Value,
 }
 
-/// Feasibility, then ranking. A source whose measured route fee exceeds its
-/// routing-fee budget is dropped here, before the ranker sees it, so it can
+/// Feasibility, then ranking. A source known to be unavailable, or whose
+/// measured route fee exceeds its routing-fee budget, is dropped here, before the ranker sees it, so it can
 /// neither be recommended nor outrank an executable source. With no source
 /// left this is the usual no-route outcome; it never falls back to an
 /// infeasible source.
 fn rank_feasible_sources(
     live_sources: Vec<ConnectorSnapshot>,
-    source_health: &BTreeMap<ConnectorId, HealthObservation>,
+    unavailable: &BTreeSet<ConnectorId>,
     fee_checks: &BTreeMap<ConnectorId, FeeBudgetCheck>,
     mut no_route_details: Vec<String>,
-    invoice: &str,
     amount: Amount,
 ) -> Result<RankedSources, Vec<String>> {
-    let (live_sources, infeasible): (Vec<_>, Vec<_>) =
-        live_sources.into_iter().partition(|source| {
-            !fee_checks
-                .get(&source.id)
-                .is_some_and(FeeBudgetCheck::infeasible)
-        });
-    for source in &infeasible {
-        no_route_details.push(format!(
-            "{}: {}",
-            source.id,
-            fee_checks[&source.id].message()
-        ));
+    let mut feasible = Vec::with_capacity(live_sources.len());
+    for source in live_sources {
+        if unavailable.contains(&source.id) {
+            no_route_details.push(format!("{}: source is unavailable", source.id));
+        } else if let Some(check) = fee_checks.get(&source.id).filter(|c| c.infeasible()) {
+            no_route_details.push(format!("{}: {}", source.id, check.message()));
+        } else {
+            feasible.push(source);
+        }
     }
+    let live_sources = feasible;
     if live_sources.is_empty() {
         if no_route_details.is_empty() {
             no_route_details.push("No source connectors can quote an executable route".into());
         }
         return Err(no_route_details);
     }
-    let (ranking, graph) = rank_sources(&live_sources, source_health, invoice, amount)?;
+    let ranking = rank_sources(&live_sources, amount);
     if ranking.ranked.is_empty() {
         return Err(no_route_details
             .into_iter()
@@ -747,154 +739,24 @@ fn rank_feasible_sources(
     Ok(RankedSources {
         ranking,
         sources: live_sources,
-        graph,
     })
 }
 
-/// Builds the immutable live graph (one native-settlement edge per source to
-/// the destination) and ranks it through the Phase 9 router.
-#[allow(clippy::too_many_lines)] // Registry, graph and search setup stay in one place.
-fn rank_sources(
-    live_sources: &[ConnectorSnapshot],
-    source_health: &BTreeMap<ConnectorId, HealthObservation>,
-    invoice: &str,
-    amount: Amount,
-) -> Result<(RouteRanking, Value), Vec<String>> {
-    let terminal_id = ConnectorId::new(format!("lightning:{}", stable_destination_id(invoice)))
-        .expect("hashed destination identity is a valid connector ID");
-    let terminal = ConnectorSnapshot {
-        id: terminal_id.clone(),
-        connector_type: ConnectorType::Lightning,
-        capabilities: ConnectorCapabilities::new(false, true, false, false),
-        liquidity: Evidence::Unknown,
-        fee: Evidence::Unknown,
-        reliability: Evidence::Unknown,
-        evidence: ConnectorEvidence::new(
-            terminal_id.clone(),
-            None,
-            Evidence::Unknown,
-            Evidence::Unknown,
-            Evidence::Unknown,
-        ),
-    };
-
-    let mut registry = ConnectorRegistry::default();
-    let mut updates = live_sources
+/// One native-settlement candidate per source, ranked by the core engine.
+fn rank_sources(live_sources: &[ConnectorSnapshot], amount: Amount) -> RouteRanking {
+    let evidence = live_sources
         .iter()
-        .cloned()
-        .map(|snapshot| DiscoveredConnector {
-            health: *source_health
-                .get(&snapshot.id)
-                .expect("every live source has a health observation"),
-            snapshot,
-        })
-        .collect::<Vec<_>>();
-    updates.push(DiscoveredConnector {
-        snapshot: terminal,
-        health: HealthObservation::unknown(),
-    });
-    registry.apply_incremental(updates).map_err(|error| {
-        vec![format!(
-            "live graph registry rejected connector data: {error}"
-        )]
-    })?;
-    let registry = registry.snapshot();
-    let mut graph = GraphBuilder::new(
-        (0..registry.len())
-            .map(|index| {
-                let connector = registry
-                    .get(ecashmesh_core::CompactConnectorId::from_index(
-                        u32::try_from(index).unwrap_or(u32::MAX),
-                    ))
-                    .expect("registry length bounds compact index");
-                GraphNode::new(
-                    connector.connector_type,
-                    connector.capabilities,
-                    connector.health,
-                )
-            })
-            .collect(),
+        .map(|source| (source.id.clone(), source.evidence.clone()))
+        .collect();
+    rank_routes(
+        PaymentRequest::new(amount),
+        live_sources
+            .iter()
+            .filter_map(|source| source.quote(amount).ok()),
+        &evidence,
+        EvidenceTimestamp::from_unix_seconds(unix_now()),
+        RouteRankingConfig::default(),
     )
-    .registry_generation(registry.generation());
-    let terminal_compact = registry
-        .get(ecashmesh_core::CompactConnectorId::from_index(0))
-        .and_then(|_| {
-            // ConnectorRegistry intentionally resolves external IDs only in the
-            // control plane. Rebuild the deterministic ID relationship here.
-            (0..registry.len()).find_map(|index| {
-                let compact =
-                    ecashmesh_core::CompactConnectorId::from_index(u32::try_from(index).ok()?);
-                (registry.get(compact)?.connector_id == terminal_id).then_some(compact)
-            })
-        })
-        .expect("terminal is registered");
-    let mut source_endpoints = Vec::new();
-    for source in live_sources {
-        let source_compact = (0..registry.len())
-            .find_map(|index| {
-                let compact =
-                    ecashmesh_core::CompactConnectorId::from_index(u32::try_from(index).ok()?);
-                (registry.get(compact)?.connector_id == source.id).then_some(compact)
-            })
-            .expect("source is registered");
-        source_endpoints.push(SearchEndpoint::Connector(source_compact));
-        let fee = source
-            .fee
-            .value()
-            .map_or(Amount::ZERO, |quote| quote.amount);
-        graph.add_edge(ExecutableEdge {
-            from: source_compact,
-            to: terminal_compact,
-            mechanism: if source.connector_type == ConnectorType::Fedimint {
-                TransferMechanism::FedimintLightning
-            } else {
-                TransferMechanism::CashuLightning
-            },
-            base_fee: fee,
-            fee_parts_per_million: 0,
-            // A quote proves this exact mechanism was quotable, but not that
-            // the mint has spendable reserves or user-held input proofs.
-            amount_evidence: AmountAwareEvidence::unknown(),
-            execution_evidence: EvidenceState::Known,
-        });
-    }
-    let snapshot = Arc::new(
-        graph
-            .build(1)
-            .map_err(|error| vec![format!("live graph build failed: {error}")])?,
-    );
-    let publisher = Arc::new(GraphSnapshotPublisher::new(Arc::clone(&snapshot)));
-    let router = ScalableRouter::new(publisher, RouteSearchConfig::production_default());
-    let result = router
-        .evaluate_at(
-            &RouteSearchRequest {
-                amount,
-                sources: source_endpoints,
-                destinations: vec![SearchEndpoint::Connector(terminal_compact)],
-                // One independent native-settlement candidate per live source.
-                // Preserve every viable alternative for registry comparison.
-                top_k: live_sources.len().max(1),
-            },
-            &registry,
-            EvidenceTimestamp::from_unix_seconds(unix_now()),
-        )
-        .map_err(|error| vec![format!("route search: {error}")])?;
-    Ok((
-        result.ranking,
-        json!({
-            "graph_version": result.graph_version,
-            "connector_count": snapshot.connector_count(),
-            "edge_count": snapshot.edge_count(),
-            "search": {
-                "candidates_generated": result.metrics.candidates_generated,
-                "nodes_explored": result.metrics.nodes_explored,
-                "edges_explored": result.metrics.edges_explored,
-                "pareto_pruned": result.metrics.pareto_pruned,
-                "feasibility_pruned": result.metrics.feasibility_pruned,
-                "cache_hit": result.metrics.cache_hit,
-            },
-        }),
-    ))
 }
 
 /// Evaluator-vs-execution invariant: no ranked route, least of all the
@@ -1135,23 +997,10 @@ fn payee_pubkey(invoice: &str) -> Option<String> {
         .map(|invoice| invoice.get_payee_pub_key().to_string())
 }
 
-fn health_observation(evidence: &Evidence<ConnectorHealth>) -> HealthObservation {
-    let health = |health| match health {
-        ConnectorHealth::Healthy => HealthState::Healthy,
-        ConnectorHealth::Degraded => HealthState::Degraded,
-        ConnectorHealth::Unavailable => HealthState::Unavailable,
-    };
-    match evidence {
-        Evidence::Known(observation) => {
-            HealthObservation::known(health(observation.value), observation.observed_at)
-        }
-        Evidence::Stale(observation) => HealthObservation {
-            state: EvidenceState::Stale,
-            health: health(observation.value),
-            observed_at: Some(observation.observed_at),
-        },
-        Evidence::Unknown => HealthObservation::unknown(),
-    }
+/// Only a fresh observation of an outage excludes a source; unknown or stale
+/// health is ranked with its penalty instead.
+fn is_unavailable(health: &Evidence<ConnectorHealth>) -> bool {
+    matches!(health, Evidence::Known(observation) if observation.value == ConnectorHealth::Unavailable)
 }
 
 fn mint_quote_json(target: &CashuObservation, quote: &QuoteObservation<MintQuote>) -> Value {
@@ -1271,23 +1120,11 @@ fn quote_json<T>(
     })
 }
 
-fn stable_destination_id(value: &str) -> String {
-    // Identifier only; this is neither an invoice hash nor a payment secret.
-    let mut hash = 1_469_598_103_934_665_603_u64;
-    for byte in value.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(1_099_511_628_211);
-    }
-    format!("{hash:016x}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fee_budget::RouteFeeBasis;
-    use ecashmesh_core::{FeeQuote, LiquidityInfo};
-
-    const INVOICE: &str = "lnbcrt10u1-fee-budget-test";
+    use ecashmesh_core::{ConnectorCapabilities, ConnectorEvidence, FeeQuote, LiquidityInfo};
 
     fn source(id: &str, connector_type: ConnectorType, fee_sats: u64) -> ConnectorSnapshot {
         let id = ConnectorId::new(id).unwrap();
@@ -1325,19 +1162,6 @@ mod tests {
         source(id, ConnectorType::Fedimint, fee_sats)
     }
 
-    fn healthy(sources: &[ConnectorSnapshot]) -> BTreeMap<ConnectorId, HealthObservation> {
-        let now = EvidenceTimestamp::from_unix_seconds(unix_now());
-        sources
-            .iter()
-            .map(|source| {
-                (
-                    source.id.clone(),
-                    HealthObservation::known(HealthState::Healthy, now),
-                )
-            })
-            .collect()
-    }
-
     fn checks(
         verdicts: &[(&str, &'static str, u64, u64)],
     ) -> BTreeMap<ConnectorId, FeeBudgetCheck> {
@@ -1364,13 +1188,11 @@ mod tests {
         sources: Vec<ConnectorSnapshot>,
         fee_checks: &BTreeMap<ConnectorId, FeeBudgetCheck>,
     ) -> Result<RankedSources, Vec<String>> {
-        let health = healthy(&sources);
         rank_feasible_sources(
             sources,
-            &health,
+            &BTreeSet::new(),
             fee_checks,
             Vec::new(),
-            INVOICE,
             Amount::from_sats(1_000),
         )
     }
@@ -1501,14 +1323,7 @@ mod tests {
     #[test]
     fn ranking_an_infeasible_source_violates_the_invariant() {
         let sources = vec![fedimint("fedimint:a", 1)];
-        let ranking = rank_sources(
-            &sources,
-            &healthy(&sources),
-            INVOICE,
-            Amount::from_sats(1_000),
-        )
-        .unwrap()
-        .0;
+        let ranking = rank_sources(&sources, Amount::from_sats(1_000));
         let feasible = checks(&[("fedimint:a", "gateway_routing_fee_budget", 0, 0)]);
         assert_eq!(fee_budget_invariant(&ranking, &feasible), Ok(()));
         let infeasible = checks(&[("fedimint:a", "gateway_routing_fee_budget", 1, 0)]);

@@ -1785,9 +1785,6 @@ dependencies = [
 [[package]]
 name = "ecashmesh-core"
 version = "0.1.0"
-dependencies = [
- "arc-swap",
-]
 
 [[package]]
 name = "ecashmesh-fedimint"
