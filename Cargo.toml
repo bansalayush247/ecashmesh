@@ -4,6 +4,7 @@ members = [
   "crates/ecashmesh-cashu",
   "crates/ecashmesh-core",
   "crates/ecashmesh-fedimint",
+  "crates/ecashmesh-ffi",
   "crates/ecashmesh-sdk",
 ]
 resolver = "2"
