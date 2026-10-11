@@ -13,10 +13,7 @@ pub use payment_request::{
     CashuPaymentRequest, CashuPaymentRequestEncoding, CashuPaymentRequestError,
     CashuSupportedMethod, CashuTransport,
 };
-pub use transport::{
-    CashuAdapter, CashuMeltExecutor, MeltExecution, MeltQuote, MintConfig, MintQuote,
-    QuoteObservation,
-};
+pub use transport::{CashuAdapter, MeltQuote, MintConfig, MintQuote, QuoteObservation};
 
 use ecashmesh_core::{
     Amount, ConfidenceLevel, ConnectorCapabilities, ConnectorEvidence, ConnectorHealth,
