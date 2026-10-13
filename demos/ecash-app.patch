@@ -5186,10 +5186,10 @@ index 7a0c0bc..654f2cc 100644
  async-stream = "0.3.6"
 diff --git a/rust/ecashapp/src/ecashmesh.rs b/rust/ecashapp/src/ecashmesh.rs
 new file mode 100644
-index 0000000..b25acc4
+index 0000000..5b83377
 --- /dev/null
 +++ b/rust/ecashapp/src/ecashmesh.rs
-@@ -0,0 +1,428 @@
+@@ -0,0 +1,443 @@
 +//! EcashMesh: which joined federation can pay a Lightning invoice, and through
 +//! which gateway.
 +//!
@@ -5373,11 +5373,26 @@ index 0000000..b25acc4
 +        amount_msats % 1_000 == 0,
 +        "EcashMesh compares whole-sat amounts only"
 +    );
-+    let names = multimint
++    let federations = multimint
 +        .federations()
 +        .await
 +        .into_iter()
 +        .map(|(selector, _)| (selector.federation_id, selector.federation_name))
++        .collect::<Vec<_>>();
++    // Joined federations can share a name (the regtest lab's all do). The card
++    // then adds the start of each one's id so they can be told apart.
++    let names = federations
++        .iter()
++        .map(|(id, name)| {
++            let shared = federations
++                .iter()
++                .any(|(other_id, other)| other_id != id && other == name);
++            if shared {
++                (*id, format!("{name} ({})", &id.to_string()[..8]))
++            } else {
++                (*id, name.clone())
++            }
++        })
 +        .collect::<Vec<_>>();
 +    let source_id = |id: &FederationId| format!("fedimint:{id}");
 +    let name = |source: &str| {

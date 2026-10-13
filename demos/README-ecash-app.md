@@ -76,6 +76,34 @@ export ECASHMESH_LAB_PAYINVOICE="lncli --rpcserver=127.0.0.1:39401 --tlscertpath
 nix develop -c sh -c 'cd demos/ecash-app/rust/ecashapp && cargo test ecashmesh::lab -- --ignored --nocapture'
 ```
 
+## Try it in the app
+
+Building the macOS app needs full Xcode and a non-Nix Flutter 3.38 (the
+fork's `scripts/run-macos.sh` explains why). The Rust core builds in
+EcashMesh's Nix shell:
+
+```sh
+nix develop -c sh -c 'cd demos/ecash-app && ROOT=$PWD ./scripts/build-macos.sh'
+cd demos/ecash-app && flutter build macos --debug   # outside Nix
+open build/macos/Build/Products/Debug/ecashapp.app
+```
+
+[`ecash-app-lab.py`](ecash-app-lab.py) drives the lab side:
+
+1. Create a wallet. `python3 demos/ecash-app-lab.py invites` prints the lab
+   federations' invite codes; join two of them with _Scan → Paste from
+   Clipboard_ (or _Settings → Discover → Enter invite code_).
+2. Fund one: _Receive → Lightning_, about 20,000 sats, then
+   `python3 demos/ecash-app-lab.py pay <bolt11>`. Larger amounts can exceed
+   the payee node's channel to the gateway and fail with `no_route`.
+3. Select the empty federation, then _Send_ and paste the invoice from
+   `python3 demos/ecash-app-lab.py invoice 5000`. The EcashMesh card
+   recommends the funded federation.
+
+The lab federations all carry devimint's default name, so the card adds the
+start of each federation id when names clash ("Devimint Federation
+(c94b2fe6)"); `invites` prints the same prefixes.
+
 ## Checks run
 
 With Flutter 3.38.10 (CI pins 3.38.3; same Dart formatter), so the
@@ -93,18 +121,14 @@ regenerated bindings carry no formatting churn:
 
 ## Not verified
 
-- **The Flutter UI was not run.** Building the macOS app needs full Xcode, and
-  this machine has only the Command Line Tools. The card itself has not been
-  seen on screen. With Xcode installed: `just run-macos` in the fork (its
-  scripts expect a Homebrew Flutter).
+- The macOS app was built and run against the lab (wallet created, two
+  federations joined, one funded), but a payment through the card's
+  **Pay from** switch has not yet been completed on screen.
 - Ecash App's own Nix shell does not build here: Google republished an
   Android platform-tools zip, so the flake's pinned hash no longer matches.
   The Rust core was built and tested in EcashMesh's Nix shell instead.
-- Untested on screen for the same reason: the **Pay from <federation>**
-  switch. `FederationId` is an opaque Rust handle in Dart with no value
-  equality, so the card resolves the recommended federation through
+- The **Pay from <federation>** switch is untested on screen.
+  `FederationId` is an opaque Rust handle in Dart with no value equality, so
+  the card resolves the recommended federation through
   `federationIdToString` (as the app does elsewhere) rather than comparing
   handles.
-- The lab's federations all carry devimint's default name, "Devimint
-  Federation", so the card's reasons cannot tell them apart in the lab; real
-  federations have their own names.
