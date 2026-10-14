@@ -16,6 +16,7 @@ its native protocol.
 | `ecashmesh-ffi` | UniFFI bindings over the SDK for Swift, Kotlin and React Native |
 | `ecashmesh-api` | HTTP host over the SDK. In the regtest lab it also implements both traits (LND/gateway probes, a JSON-lines payment history) and makes real lab payments |
 | `apps/reference-wallet` | Source list, payment form, results and explanations |
+| `apps/fedi-mini-app` | Fedi mini app: moves sats between the user's Fedi federation (WebLN) and Cashu mints, planned and checked by EcashMesh |
 | `ecashmesh-core` | Evidence model, deterministic ranking, risk penalties, explanations |
 | `ecashmesh-cashu` | Cashu mint discovery, metadata (NUT-06), keysets, melt/mint quotes |
 | `ecashmesh-fedimint` | Fedimint evidence from either `fedimint-bridge` (one process hosting native Fedimint v0.12.1 clients; fee quotes, gateway info, guardian audits) or the wallet's own Fedimint client through the `WalletClient` trait |
@@ -147,4 +148,4 @@ a payment.
 | `POST /v1/transfers/plan` | Transfer plan (above) |
 | `GET /v1/federations/setup`, `POST /v1/federations/setup/{identify,preview,connect}` | Join a federation explicitly from an invite |
 | `GET /v1/lab/results/latest` | Regtest lab only: the verified 56-route results |
-| `GET /v1/lab/sources`, `/v1/lab/balances`; `POST /v1/lab/invoice`, `/v1/lab/pay`; `GET`/`POST /v1/lab/gateway-fee` | Regtest lab only: lab sources and balances, invoices, real payments with each source's native client, the gateway-fee experiment |
+| `GET /v1/lab/sources`, `/v1/lab/balances`; `POST /v1/lab/invoice`, `/v1/lab/pay`, `/v1/lab/claim`; `GET`/`POST /v1/lab/gateway-fee` | Regtest lab only: lab sources and balances, invoices, real payments with each source's native client, claiming a lab invoice paid from outside the lab, the gateway-fee experiment |

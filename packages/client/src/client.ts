@@ -1,6 +1,7 @@
 import {
   decisionSchema,
   comparisonSchema,
+  discoverySchema,
   paymentToWire,
   splitPlanSchema,
   transferPlanSchema,
@@ -27,6 +28,18 @@ export function createEcashMeshClient(options: ClientOptions) {
         "/v1/routes/evaluate",
         paymentToWire(payment),
         decisionSchema,
+        signal,
+      );
+    },
+    /**
+     * Observes the payment's sources and destination mint without quoting:
+     * whether each mint is reachable and can send or receive.
+     */
+    discoverSources(payment: PaymentInput, signal?: AbortSignal) {
+      return post(
+        "/v1/connectors/discover",
+        paymentToWire(payment),
+        discoverySchema,
         signal,
       );
     },

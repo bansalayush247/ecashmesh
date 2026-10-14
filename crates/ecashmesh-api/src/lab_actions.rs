@@ -68,6 +68,7 @@ struct Source {
 }
 
 /// An invoice created at a lab source, to be claimed there once paid.
+#[derive(Clone)]
 struct Receive {
     destination: String,
     balance_before_sats: Option<u64>,
@@ -471,6 +472,25 @@ impl LabActions {
         }
     }
 
+    /// Claims a lab receive that something outside the lab paid, such as a
+    /// web wallet's Cashu melt. It stays claimable if not yet paid.
+    async fn claim_invoice(&self, invoice: &str) -> Result<Value, String> {
+        let receive = self
+            .receives
+            .lock()
+            .await
+            .remove(invoice)
+            .ok_or("no lab receive is waiting for this invoice")?;
+        let claimed = self.claim(receive.clone()).await;
+        if claimed["claimed"] != true {
+            self.receives
+                .lock()
+                .await
+                .insert(invoice.to_owned(), receive);
+        }
+        Ok(claimed)
+    }
+
     async fn claim(&self, receive: Receive) -> Value {
         let destination = receive.destination.clone();
         let claimed = match self.source(&destination).map(|source| source.kind.clone()) {
@@ -699,6 +719,18 @@ pub(super) async fn invoice(
 pub(super) struct PayRequest {
     source: String,
     invoice: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ClaimRequest {
+    invoice: String,
+}
+
+pub(super) async fn claim(
+    State(state): State<AppState>,
+    Json(request): Json<ClaimRequest>,
+) -> Reply {
+    reply(actions(&state)?.claim_invoice(&request.invoice).await)
 }
 
 #[derive(Deserialize)]

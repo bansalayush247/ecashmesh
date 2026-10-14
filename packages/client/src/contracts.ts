@@ -624,3 +624,46 @@ export type TransferInput = {
   to:
     { type: "cashu_mint"; url: string } | { type: "invoice"; invoice: string };
 };
+
+// What EcashMesh observes about a payment's sources and destination mint,
+// without quoting: health, capabilities and the mint's own reported issues.
+const observedValueSchema = z
+  .object({ state: z.string(), value: z.unknown().optional() })
+  .passthrough();
+export const discoverySchema = z
+  .object({
+    discovery: z
+      .object({
+        mints: z.array(
+          z
+            .object({
+              canonical_id: z.string(),
+              canonical_url: z.string(),
+              aliases: z.array(z.string()),
+            })
+            .passthrough(),
+        ),
+      })
+      .passthrough(),
+    evidence: z.array(
+      z
+        .object({
+          connector: z.string(),
+          capabilities: z
+            .object({ can_receive: z.boolean(), can_send: z.boolean() })
+            .passthrough(),
+          health: observedValueSchema,
+        })
+        .passthrough(),
+    ),
+    observations: z.array(
+      z
+        .object({
+          connector: z.string(),
+          issues: z.array(z.object({ message: z.string() }).passthrough()),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+export type Discovery = z.infer<typeof discoverySchema>;

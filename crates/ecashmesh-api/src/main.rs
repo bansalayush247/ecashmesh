@@ -115,6 +115,7 @@ fn app(mesh: EcashMesh, lab_history: Option<std::sync::Arc<lab_history::LabHisto
         .route("/v1/lab/invoice", post(lab_actions::invoice))
         .route("/v1/lab/pay", post(lab_actions::pay))
         .route("/v1/lab/pay-split", post(lab_actions::pay_split))
+        .route("/v1/lab/claim", post(lab_actions::claim))
         .route(
             "/v1/lab/gateway-fee",
             get(lab_actions::gateway_fee).post(lab_actions::set_gateway_fee),
