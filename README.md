@@ -277,6 +277,7 @@ Design decisions and trade-offs: [docs/design.md](docs/design.md).
 |---|---|
 | `crates/ecashmesh-api` | HTTP server over the SDK; also the regtest lab's probes, payment history and real lab payments |
 | `apps/reference-wallet` | Reference wallet (React Native / Expo, runs on web): sources, comparisons, lab route matrix |
+| `apps/fedi-mini-app` | Fedi mini app (web): moves sats between Fedi and Cashu mints through WebLN |
 | `lab/fedimint-runner`, `lab/cashu-runner` | Regtest mesh supervisor and native Cashu runner, built inside the pinned Fedimint and CDK checkouts |
 | `scripts/ecashmesh-lab-*` | Regtest mesh: bring-up, 56-route executor, validation, experiments |
 | `scripts/demo.sh` | Live-mode launcher |
@@ -292,6 +293,8 @@ Design decisions and trade-offs: [docs/design.md](docs/design.md).
   Fedimint clients implements `ecashmesh_fedimint::WalletClient` instead of
   running `fedimint-bridge`.
 - **Web, against a hosted server:** `@ecashmesh/client`.
+- **Fedi:** its app is not open source, but it runs WebLN mini apps;
+  [`apps/fedi-mini-app`](apps/fedi-mini-app) is one.
 
 Requests and results use one JSON contract everywhere: the
 `POST /v1/routes/evaluate` format in [docs/architecture.md](docs/architecture.md).
