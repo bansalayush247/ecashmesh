@@ -541,3 +541,20 @@ code {
   padding: 9px 4px;
   font-size: 0.82rem;
 }
+
+.saved-picker {
+  display: grid;
+  gap: 6px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.saved-picker .row {
+  align-items: center;
+}
+
+button.small {
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}

@@ -107,7 +107,12 @@ export function App() {
               onToken={refresh}
             />
           ) : (
-            <ToFedi wallet={wallet} mints={lab.mints} onDone={refresh} />
+            <ToFedi
+              wallet={wallet}
+              mints={lab.mints}
+              saved={tokens}
+              onDone={refresh}
+            />
           )}
         </>
       )}
@@ -377,6 +382,7 @@ const sameHost = (a: string, b: string) => {
 function ToFedi(props: {
   wallet: LightningWallet;
   mints: { url: string; label: string }[];
+  saved: SavedToken[];
   onDone(): void;
 }) {
   const name = (url: string) =>
@@ -412,22 +418,38 @@ function ToFedi(props: {
     }
   }
 
-  function addToken() {
-    const token = draft.trim();
+  const [notice, setNotice] = useState<string | null>(null);
+  const unused = props.saved.filter((saved) => !tokens.includes(saved.token));
+
+  function addTokens(added: string[]) {
     void run(async () => {
-      readToken(token);
-      if (tokens.includes(token))
-        throw new Error("This token is already added.");
-      setBusy("Reading the token at its mint");
-      const next = [...tokens, token];
-      const grouped = await holdings(next);
-      setTokens(next);
+      setNotice(null);
+      const fresh = added.map((token) => token.trim()).filter(Boolean);
+      for (const token of fresh) readToken(token);
+      if (fresh.every((token) => tokens.includes(token))) {
+        throw new Error("Already added.");
+      }
+      setBusy("Checking the tokens at their mints");
+      const next = [...new Set([...tokens, ...fresh])];
+      const { held: grouped, spent } = await holdings(next);
+      setTokens(next.filter((token) => !spent.includes(token)));
       setHeld(grouped);
       setDraft("");
       setRanking(null);
-      // Suggest the most one mint could send, leaving room for its fees.
-      const best = Math.max(...grouped.map(spendable));
-      setAmount(String(Math.max(1, best - Math.max(2, Math.ceil(best / 50)))));
+      setChosen(null);
+      if (spent.length > 0) {
+        setNotice(
+          `${spent.length} token${spent.length === 1 ? " was" : "s were"} already spent and ${spent.length === 1 ? "was" : "were"} left out.`,
+        );
+        props.onDone();
+      }
+      if (grouped.length > 0) {
+        // Suggest the most one mint could send, leaving room for its fees.
+        const best = Math.max(...grouped.map(spendable));
+        setAmount(
+          String(Math.max(1, best - Math.max(2, Math.ceil(best / 50)))),
+        );
+      }
     });
   }
 
@@ -498,10 +520,40 @@ function ToFedi(props: {
       <button
         className="secondary"
         disabled={!draft.trim() || busy !== null}
-        onClick={addToken}
+        onClick={() => addTokens([draft])}
       >
         Add token
       </button>
+
+      {unused.length > 0 && (
+        <div className="saved-picker">
+          <span className="note">Tokens saved in this app</span>
+          {unused.map((saved) => (
+            <div key={saved.token} className="row">
+              <span>
+                {saved.amount} sats · {mintName(saved.mintUrl)}
+              </span>
+              <button
+                className="secondary small"
+                disabled={busy !== null}
+                onClick={() => addTokens([saved.token])}
+              >
+                Add
+              </button>
+            </div>
+          ))}
+          {unused.length > 1 && (
+            <button
+              className="secondary"
+              disabled={busy !== null}
+              onClick={() => addTokens(unused.map((saved) => saved.token))}
+            >
+              Add all {unused.length} saved tokens
+            </button>
+          )}
+        </div>
+      )}
+      {notice && <p className="note">{notice}</p>}
 
       {held.length > 0 && (
         <dl className="summary">

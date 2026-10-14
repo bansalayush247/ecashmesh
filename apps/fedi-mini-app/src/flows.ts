@@ -212,15 +212,29 @@ export type Holding = {
   inputFee: number;
 };
 
-/** Reads pasted tokens and groups their proofs by mint. */
-export async function holdings(tokens: string[]): Promise<Holding[]> {
+/**
+ * Reads tokens and groups their proofs by mint. Asks each mint which proofs
+ * are still unspent (NUT-07): a spent or in-flight token cannot pay, so it is
+ * returned separately and dropped from the saved tokens.
+ */
+export async function holdings(
+  tokens: string[],
+): Promise<{ held: Holding[]; spent: string[] }> {
   const byMint: Holding[] = [];
+  const spent: string[] = [];
   for (const token of tokens) {
     const info = readToken(token);
     if (info.unit !== "sat") {
       throw new Error(`A token is in ${info.unit}; only sat tokens can move.`);
     }
     const proofs = await tokenProofs(token, info.mint);
+    const cashu = await openMint(info.mint);
+    const states = await cashu.checkProofsStates(proofs);
+    if (states.some((state) => state.state !== "UNSPENT")) {
+      spent.push(token);
+      forgetToken(token.trim());
+      continue;
+    }
     const holding = byMint.find((item) => sameUrl(item.mint, info.mint));
     if (holding) {
       holding.tokens.push(token);
@@ -240,7 +254,7 @@ export async function holdings(tokens: string[]): Promise<Holding[]> {
     const cashu = await openMint(holding.mint);
     holding.inputFee = sats(cashu.getFeesForProofs(holding.proofs));
   }
-  return byMint;
+  return { held: byMint, spent };
 }
 
 /** Spendable at a mint once its input fee is paid. */
