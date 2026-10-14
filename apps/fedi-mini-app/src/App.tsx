@@ -1,18 +1,22 @@
-import type { TransferPlan } from "@ecashmesh/client/http";
-import { useEffect, useState } from "react";
+import type { PaymentSource, RouteDecision } from "@ecashmesh/client/http";
+import { Fragment, useEffect, useState } from "react";
 
-import { readToken, type TokenInfo } from "./cashu";
+import { readToken } from "./cashu";
+import { DecisionView, humanize, SourceDetails } from "./decision";
 import {
   apiUrl,
-  checkMint,
   describe,
-  type FediPreview,
+  type Holding,
+  holdingFor,
+  holdings,
   issue,
-  type MintCheck,
   moveToCashu,
-  previewToFedi,
+  payFromMint,
+  rankForFedi,
   rankMints,
   type RankedMint,
+  type Ranking,
+  spendable,
 } from "./flows";
 import {
   forgetToken,
@@ -103,7 +107,7 @@ export function App() {
               onToken={refresh}
             />
           ) : (
-            <ToFedi wallet={wallet} onDone={refresh} />
+            <ToFedi wallet={wallet} mints={lab.mints} onDone={refresh} />
           )}
         </>
       )}
@@ -165,6 +169,7 @@ function ToCashu(props: {
   const [amount, setAmount] = useState("1000");
   const [ranked, setRanked] = useState<RankedMint[] | null>(null);
   const [chosen, setChosen] = useState<string | null>(null);
+  const [inspecting, setInspecting] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{
@@ -255,7 +260,7 @@ function ToCashu(props: {
       </div>
 
       {ranked ? (
-        <div className="ranking" role="radiogroup" aria-label="Mints">
+        <div className="ranking" aria-label="Mints">
           <p className="note">
             EcashMesh&apos;s order: online and able to receive first, then the
             lowest fee for spending the ecash later.
@@ -263,27 +268,45 @@ function ToCashu(props: {
           {ranked.map((mint, index) => {
             const usable = mint.healthy && mint.canReceive;
             return (
-              <button
+              <div
                 key={mint.url}
-                role="radio"
-                aria-checked={chosen === mint.url}
-                disabled={!usable}
-                className={`rank-row${chosen === mint.url ? " chosen" : ""}`}
-                onClick={() => setChosen(mint.url)}
+                className={`source-card${chosen === mint.url ? " chosen" : ""}${usable ? "" : " excluded"}`}
               >
-                <span className="rank">{usable ? index + 1 : "–"}</span>
-                <span className="rank-body">
-                  <span className="rank-title">
-                    {label(mint.url)}
-                    {mint === pick && <em className="badge">EcashMesh pick</em>}
-                  </span>
-                  {mint.reasons.map((reason) => (
-                    <span key={reason} className={usable ? "why" : "why bad"}>
-                      {reason}
+                <div className="source-top">
+                  <span className="rank">{usable ? index + 1 : "–"}</span>
+                  <span className="rank-body">
+                    <span className="rank-title">
+                      {label(mint.url)}
+                      {mint === pick && <em className="badge">Top match</em>}
                     </span>
-                  ))}
-                </span>
-              </button>
+                    {mint.reasons.map((reason) => (
+                      <span key={reason} className={usable ? "why" : "why bad"}>
+                        {reason}
+                      </span>
+                    ))}
+                  </span>
+                </div>
+                <div className="source-actions">
+                  <button
+                    className="secondary"
+                    aria-expanded={inspecting === mint.url}
+                    onClick={() =>
+                      setInspecting(inspecting === mint.url ? null : mint.url)
+                    }
+                  >
+                    {inspecting === mint.url ? "Hide details" : "Inspect"}
+                  </button>
+                  {usable && (
+                    <button
+                      aria-pressed={chosen === mint.url}
+                      onClick={() => setChosen(mint.url)}
+                    >
+                      {chosen === mint.url ? "Chosen" : "Receive here"}
+                    </button>
+                  )}
+                </div>
+                {inspecting === mint.url && <MintInspector mint={mint} />}
+              </div>
             );
           })}
         </div>
@@ -351,22 +374,32 @@ const sameHost = (a: string, b: string) => {
   }
 };
 
-function ToFedi(props: { wallet: LightningWallet; onDone(): void }) {
-  const [token, setToken] = useState("");
-  const [preview, setPreview] = useState<FediPreview | null>(null);
+function ToFedi(props: {
+  wallet: LightningWallet;
+  mints: { url: string; label: string }[];
+  onDone(): void;
+}) {
+  const name = (url: string) =>
+    props.mints.find((mint) => sameHost(mint.url, url))?.label;
+  const mintName = (url: string) => name(url) ?? mintHost(url);
+  const [tokens, setTokens] = useState<string[]>([]);
+  const [held, setHeld] = useState<Holding[]>([]);
+  const [draft, setDraft] = useState("");
+  const [amount, setAmount] = useState("");
+  const [ranking, setRanking] = useState<Ranking | null>(null);
+  const [chosen, setChosen] = useState<PaymentSource | null>(null);
+  const [inspecting, setInspecting] = useState<PaymentSource | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<{
     arrived: number;
+    mint: string;
     change: string | null;
     changeAmount: number;
   }>();
-  let info: TokenInfo | null = null;
-  try {
-    info = token.trim() ? readToken(token) : null;
-  } catch {
-    info = null;
-  }
+  const sats = Number.parseInt(amount, 10);
+  const total = held.reduce((sum, holding) => sum + holding.amount, 0);
+  const chosenHolding = chosen ? holdingFor(held, chosen) : undefined;
 
   async function run(work: () => Promise<void>) {
     setError(null);
@@ -379,16 +412,38 @@ function ToFedi(props: { wallet: LightningWallet; onDone(): void }) {
     }
   }
 
+  function addToken() {
+    const token = draft.trim();
+    void run(async () => {
+      readToken(token);
+      if (tokens.includes(token))
+        throw new Error("This token is already added.");
+      setBusy("Reading the token at its mint");
+      const next = [...tokens, token];
+      const grouped = await holdings(next);
+      setTokens(next);
+      setHeld(grouped);
+      setDraft("");
+      setRanking(null);
+      // Suggest the most one mint could send, leaving room for its fees.
+      const best = Math.max(...grouped.map(spendable));
+      setAmount(String(Math.max(1, best - Math.max(2, Math.ceil(best / 50)))));
+    });
+  }
+
   if (done) {
     return (
       <section className="panel">
         <h2>{done.arrived} sats arrived</h2>
-        <p>The mint paid {props.wallet.label}.</p>
+        <p>
+          {done.mint} paid {props.wallet.label}.
+        </p>
         {done.change && (
           <>
             <p>
-              Unused fee reserve came back as {done.changeAmount} sats of ecash.
-              Copy it into a Cashu wallet:
+              The rest of the spent tokens, {done.changeAmount} sats including
+              unused fee reserve, came back as new ecash. Copy it into a Cashu
+              wallet:
             </p>
             <TokenBox token={done.change} />
           </>
@@ -397,8 +452,11 @@ function ToFedi(props: { wallet: LightningWallet; onDone(): void }) {
           className="secondary"
           onClick={() => {
             setDone(undefined);
-            setPreview(null);
-            setToken("");
+            setRanking(null);
+            setChosen(null);
+            setTokens([]);
+            setHeld([]);
+            setAmount("");
           }}
         >
           Move more
@@ -407,77 +465,167 @@ function ToFedi(props: { wallet: LightningWallet; onDone(): void }) {
     );
   }
 
+  if (ranking?.decision && inspecting) {
+    return (
+      <section className="panel">
+        <SourceDetails
+          decision={ranking.decision}
+          source={inspecting}
+          onClose={() => setInspecting(null)}
+          name={name}
+        />
+      </section>
+    );
+  }
+
   return (
     <section className="panel">
-      <h2>Move a Cashu token into Fedi</h2>
+      <h2>Move Cashu tokens into Fedi</h2>
+      <p className="note">
+        Add tokens from one mint or several. EcashMesh ranks the mints that
+        could pay, the way it ranks a wallet&apos;s sources.
+      </p>
       <label>
         Cashu token
         <textarea
-          value={token}
-          rows={4}
+          value={draft}
+          rows={3}
           placeholder="cashuB…"
           spellCheck={false}
-          onChange={(event) => {
-            setToken(event.target.value);
-            setPreview(null);
-            setError(null);
-          }}
+          onChange={(event) => setDraft(event.target.value)}
         />
       </label>
-      {token.trim() && !info && (
-        <p className="error">This is not a Cashu token.</p>
-      )}
-      {info && !preview && (
-        <p className="note">
-          {info.amount} {info.unit} from {info.mint}
-        </p>
+      <button
+        className="secondary"
+        disabled={!draft.trim() || busy !== null}
+        onClick={addToken}
+      >
+        Add token
+      </button>
+
+      {held.length > 0 && (
+        <dl className="summary">
+          {held.map((holding) => (
+            <Fragment key={holding.mint}>
+              <dt>
+                {mintName(holding.mint)} · {holding.tokens.length} token
+                {holding.tokens.length === 1 ? "" : "s"}
+              </dt>
+              <dd>{holding.amount} sats</dd>
+            </Fragment>
+          ))}
+          <dt>Total</dt>
+          <dd className="strong">{total} sats</dd>
+        </dl>
       )}
 
-      {preview ? (
+      {held.length > 0 && (
+        <label>
+          Amount to move into Fedi (sats)
+          <input
+            value={amount}
+            inputMode="numeric"
+            onChange={(event) => {
+              setAmount(event.target.value.replace(/\D/g, ""));
+              setRanking(null);
+              setChosen(null);
+            }}
+          />
+        </label>
+      )}
+
+      {ranking && (
         <>
-          <MintCard check={preview.check} need="send" />
-          <Evaluation plan={preview.plan} />
-          <dl className="summary">
-            <dt>Token</dt>
-            <dd>{preview.tokenAmount} sats</dd>
-            <dt>Mint fee, at most</dt>
-            <dd>{preview.feeReserve} sats</dd>
-            {preview.inputFee > 0 && (
-              <>
-                <dt>Mint input fee</dt>
-                <dd>{preview.inputFee} sats</dd>
-              </>
-            )}
-            <dt>Arrives in {props.wallet.label}</dt>
-            <dd className="strong">{preview.arrives} sats</dd>
-          </dl>
+          {ranking.decision ? (
+            <DecisionView
+              decision={ranking.decision}
+              excluded={ranking.excluded}
+              chosen={chosen?.route_id ?? null}
+              onChoose={setChosen}
+              onInspect={setInspecting}
+              name={name}
+            />
+          ) : (
+            <>
+              <p className="error">{ranking.failure}</p>
+              <DecisionView
+                decision={emptyDecision}
+                excluded={ranking.excluded}
+                chosen={null}
+                onChoose={() => undefined}
+                onInspect={() => undefined}
+              />
+            </>
+          )}
+        </>
+      )}
+
+      {held.length > 0 && !ranking && (
+        <button
+          disabled={!(sats > 0) || busy !== null}
+          onClick={() =>
+            run(async () => {
+              const ranked = await rankForFedi(
+                props.wallet,
+                held,
+                sats,
+                setBusy,
+              );
+              setRanking(ranked);
+              setChosen(ranked.decision?.recommended_source ?? null);
+            })
+          }
+        >
+          {busy ?? "Rank my mints with EcashMesh"}
+        </button>
+      )}
+
+      {ranking && chosen && chosenHolding && (
+        <>
           <p className="note">
-            Unused fee comes back to you as a change token. If the payment
-            fails, the token stays unspent.
+            {mintName(chosenHolding.mint)} pays {ranking.amount} sats into{" "}
+            {props.wallet.label}, plus at most {chosen.fee.amount ?? "?"} sats
+            fee reserve
+            {chosenHolding.inputFee > 0
+              ? ` and ${chosenHolding.inputFee} sats input fee`
+              : ""}
+            . Unused reserve comes back as a change token; if the payment fails
+            the tokens stay unspent.
           </p>
           <button
             disabled={busy !== null}
             onClick={() =>
               run(async () => {
-                const moved = await preview.execute(setBusy);
-                setDone({ arrived: preview.arrives, ...moved });
+                const moved = await payFromMint(
+                  props.wallet,
+                  chosenHolding,
+                  ranking,
+                  setBusy,
+                );
+                setDone({
+                  arrived: ranking.amount,
+                  mint: mintName(chosenHolding.mint),
+                  change: moved.change,
+                  changeAmount: moved.changeAmount,
+                });
                 props.onDone();
               })
             }
           >
-            {busy ?? `Move ${preview.arrives} sats to Fedi`}
+            {busy ?? `Move ${ranking.amount} sats to Fedi`}
           </button>
         </>
-      ) : (
+      )}
+      {ranking && (
         <button
-          disabled={!info || busy !== null}
-          onClick={() =>
-            run(async () => {
-              setPreview(await previewToFedi(props.wallet, token, setBusy));
-            })
-          }
+          className="secondary"
+          disabled={busy !== null}
+          onClick={() => {
+            setRanking(null);
+            setChosen(null);
+          }}
         >
-          {busy ?? "Plan the move"}
+          Change amount or tokens
         </button>
       )}
       {error && <p className="error">{error}</p>}
@@ -485,91 +633,89 @@ function ToFedi(props: { wallet: LightningWallet; onDone(): void }) {
   );
 }
 
-const FLAGS: Record<string, string> = {
-  unknown_reliability: "No payment history with this mint yet",
-  unknown_solvency: "The mint's reserves cannot be verified",
-  stale_evidence: "Some of what EcashMesh read is out of date",
-  unknown_liquidity: "Whether the mint can route this amount is unknown",
+const mintHost = (url: string) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 };
 
-/** Why EcashMesh approves paying from this mint: its score and evidence. */
-function Evaluation({ plan }: { plan: TransferPlan }) {
-  const decision = plan.evaluation;
-  const source = decision.recommended_source;
-  if (!source) return null;
-  const flags = [...new Set(source.risk_flags)];
-  const meters: [string, number][] = [
-    ["Can route this amount", source.liquidity_confidence],
-    ["Payment track record", source.reliability_confidence],
-    ["Evidence freshness", source.evidence_freshness],
-  ];
-  const excluded = decision.excluded_sources?.length ?? 0;
-  const others = decision.alternative_sources?.length ?? 0;
-  return (
-    <details className="evaluation" open>
-      <summary>
-        Why EcashMesh plans this route
-        <span>
-          {others + excluded === 0
-            ? " · the token's mint is the only source that can pay it"
-            : ` · ${others} alternative${others === 1 ? "" : "s"}, ${excluded} excluded`}
-        </span>
-      </summary>
-      <p className="note">
-        Score {Math.round(source.score)} of 100. Scores rank sources against
-        each other; on its own it mostly shows how much EcashMesh knows about
-        the mint so far.
-      </p>
-      {meters.map(([name, value]) => (
-        <div key={name} className="meter">
-          <span>{name}</span>
-          <span className="bar" aria-hidden="true">
-            <span style={{ width: `${Math.round(value)}%` }} />
-          </span>
-          <span className="value">{Math.round(value)}%</span>
-        </div>
-      ))}
-      <ul>
-        {decision.explanation.reasons.map((reason) => (
-          <li key={reason.code}>{reason.message}</li>
-        ))}
-        {flags.map((flag) => (
-          <li key={flag} className="flag">
-            {FLAGS[flag] ?? flag.replace(/_/g, " ")}
-          </li>
-        ))}
-      </ul>
-    </details>
-  );
-}
+/** Shape for showing exclusions when no mint can pay at all. */
+const emptyDecision = {
+  quote_id: "none",
+  alternative_sources: [],
+  score_breakdown: {
+    liquidity: 0,
+    reliability: 0,
+    evidence_freshness: 0,
+    fees: null,
+    risk_penalty: 0,
+  },
+  risk_flags: [],
+  evidence: [],
+  explanation: { summary: "", reasons: [], alternative_weaknesses: [] },
+  expires_at: "",
+  expires_at_unix_seconds: 0,
+} as RouteDecision;
 
-function MintCard({
-  check,
-  need,
-}: {
-  check: MintCheck;
-  need: "receive" | "send";
-}) {
-  const able = need === "receive" ? check.canReceive : check.canSend;
+/** Everything EcashMesh observed about one mint. */
+function MintInspector({ mint }: { mint: RankedMint }) {
+  const [raw, setRaw] = useState(false);
+  const observation = (mint.observed.observation ?? {}) as Record<
+    string,
+    { value?: unknown; state?: string; freshness?: string } | undefined
+  >;
+  const value = (key: string) => observation[key]?.value;
+  const keysets = value("input_fees");
+  const endpoints = (
+    mint.observed.observation as { endpoints?: Record<string, string> }
+  )?.endpoints;
   return (
-    <div className={`mint-card ${able ? "ok" : "bad"}`}>
-      <strong>
-        {able
-          ? need === "receive"
-            ? "EcashMesh: this mint can receive"
-            : "EcashMesh: this mint can pay out"
-          : need === "receive"
-            ? "EcashMesh: this mint cannot receive now"
-            : "EcashMesh: this mint cannot pay out now"}
-      </strong>
-      <span>
-        {check.url} · {check.healthy ? "online" : "not responding as healthy"}
-      </span>
-      {check.issues.map((issue) => (
-        <span key={issue} className="issue">
-          {issue}
+    <div className="inspector inline">
+      <div className="row">
+        <span>Health</span>
+        <span>{String(value("health") ?? "unknown")}</span>
+      </div>
+      <div className="row">
+        <span>Reachable</span>
+        <span>{value("availability") === true ? "Yes" : "No"}</span>
+      </div>
+      <div className="row">
+        <span>Receives / pays out Lightning</span>
+        <span>
+          {mint.canReceive ? "Yes" : "No"} / {mint.canSend ? "Yes" : "No"}
         </span>
+      </div>
+      <div className="row">
+        <span>Active keysets (input fee)</span>
+        <span>
+          {Array.isArray(keysets)
+            ? (keysets as { active: boolean; input_fee_ppk: number }[])
+                .filter((keyset) => keyset.active)
+                .map((keyset) => `${keyset.input_fee_ppk} ppk`)
+                .join(", ") || "none"
+            : "Unknown"}
+        </span>
+      </div>
+      {endpoints &&
+        Object.entries(endpoints).map(([name, url]) => (
+          <div key={name} className="row">
+            <span>{humanize(name)}</span>
+            <code>{url}</code>
+          </div>
+        ))}
+      {mint.issues.map((issue) => (
+        <p key={issue} className="why bad">
+          {issue}
+        </p>
       ))}
+      <button className="secondary" onClick={() => setRaw(!raw)}>
+        {raw ? "Hide response JSON" : "Inspect response JSON"}
+      </button>
+      {raw && (
+        <pre className="raw">{JSON.stringify(mint.observed, null, 2)}</pre>
+      )}
     </div>
   );
 }

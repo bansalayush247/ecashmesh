@@ -386,3 +386,158 @@ summary {
   font-variant-numeric: tabular-nums;
   color: var(--muted);
 }
+
+.source-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--bg);
+}
+
+.source-card.chosen {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.source-card.excluded {
+  opacity: 0.8;
+}
+
+.source-top {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 10px;
+}
+
+.source-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.source-actions button {
+  padding: 9px 10px;
+  font-size: 0.9rem;
+}
+
+.inspector {
+  display: grid;
+  gap: 12px;
+}
+
+.inspector.inline {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  gap: 6px;
+}
+
+.inspector-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.inspector-head > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.score {
+  background: var(--ok-bg);
+  color: var(--ok);
+  font-weight: 800;
+  font-size: 1.4rem;
+  border-radius: 8px;
+  padding: 4px 10px;
+  text-align: center;
+}
+
+.score small {
+  display: block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.section {
+  display: grid;
+  gap: 6px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.section h3 {
+  margin: 0 0 2px;
+  font-size: 0.95rem;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.86rem;
+}
+
+.row > span:first-child {
+  color: var(--muted);
+}
+
+.row > :last-child {
+  text-align: right;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.raw {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.reasons,
+.flags {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  font-size: 0.88rem;
+}
+
+.reasons code {
+  display: block;
+  color: var(--muted);
+}
+
+.observation {
+  display: grid;
+  gap: 4px;
+  border-left: 2px solid var(--line);
+  padding-left: 10px;
+}
+
+.tabs.four {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.tabs.four button {
+  padding: 9px 4px;
+  font-size: 0.82rem;
+}

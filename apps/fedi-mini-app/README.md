@@ -17,16 +17,21 @@ choose between federations; it bridges Fedi and Cashu.
 - **Fedi → Cashu.** EcashMesh observes every candidate mint (the lab's,
   the user's recent ones, any they add) and ranks them: online and able to
   receive Lightning first, then the lowest input fee for spending the ecash
-  later. Unreachable mints show why. The user pays the pick or another
-  usable mint: the mint quotes an invoice, Fedi pays it, and the mint
-  issues ecash, handed over as a Cashu token to copy into any Cashu wallet.
-- **Cashu → Fedi.** Paste a token. Fedi creates an invoice; EcashMesh plans
-  paying it from the token's mint (`planTransfer`: the melt quote and its fee
-  reserve) and the app shows what arrives before anything is spent, with
-  EcashMesh's evaluation: how sure it is the mint can route the amount, its
-  payment track record, how fresh the evidence is, and its risk flags. The
-  token's ecash melts against that quote; unused reserve comes back as a
-  change token.
+  later. Unreachable mints show why, and **Inspect** shows everything
+  EcashMesh read from each mint (health, keysets and fees, endpoints, the raw
+  response). The mint quotes an invoice, Fedi pays it, and the mint issues
+  ecash, handed over as a Cashu token to copy into any Cashu wallet.
+- **Cashu → Fedi.** Paste tokens, from one mint or several, and an amount.
+  Fedi creates an invoice and EcashMesh ranks the token mints that could pay
+  it, as it ranks a wallet's sources (`evaluateRoute` with each mint's
+  balance): the top match, alternatives, and exclusions with the reason
+  ("The wallet holds 1000 sats at this mint; paying needs 2550"). **Inspect**
+  opens the reference wallet's inspector: Overview (why this mint, score
+  breakdown and the exact score arithmetic), Evidence (funding, fees,
+  Lightning probe, mint, reliability, evidence inventory, raw connector
+  evidence), Risks (every penalty) and Settlement (quote IDs, the response
+  JSON). Paying gets a fresh quote through `planTransfer`; the chosen mint's
+  tokens melt and the rest comes back as a new token.
 
 The mini app holds ecash only while moving it. Tokens it issues are shown at
 once and kept in local storage only until the user marks them saved, as a
@@ -55,11 +60,12 @@ API on `:5000` (`ECASHMESH_DEV_API` overrides it). Use the lab mints
 
 Verified this way, from federation A and Cashu B:
 
-| Move                                  | Result                                                                                                 |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| Fedi → Cashu, 2,000 sats              | Federation paid 2,015 (15 Lightning fee); a 2,000-sat token                                            |
-| Cashu → Fedi, that token              | Plan: fee at most 39 sats, 1,961 arrive. The mint paid 1,961, kept 3 and returned 36 as a change token |
-| Paid quote, app closed before issuing | **Issue my ecash** issued the 500 sats on reload                                                       |
+| Move                                                                    | Result                                                                                                        |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Fedi → Cashu, 2,000 sats                                                | Federation paid 2,015 (15 Lightning fee); a 2,000-sat token                                                   |
+| Cashu → Fedi, that token                                                | Plan: fee at most 39 sats, 1,961 arrive. The mint paid 1,961, kept 3 and returned 36 as a change token        |
+| Cashu → Fedi, 2,500 sats from tokens at A (3,000), B (1,000), C (5,000) | A top match, C alternative, B excluded (holds 1,000, needs 2,550). A paid 2,500; 498 came back as a new token |
+| Paid quote, app closed before issuing                                   | **Issue my ecash** issued the 500 sats on reload                                                              |
 
 ## In Fedi
 
@@ -80,7 +86,9 @@ from a phone, and that needs a mainnet deployment.
 
 ## Known behaviour
 
-- The mint's fee reserve is quoted only for a real invoice, so Cashu → Fedi
-  first asks Fedi for an invoice that leaves a 1% reserve, and asks once more
-  if the mint wants more. The first invoice is then left unpaid.
+- The mint's fee reserve is quoted only for a real invoice, so the amount
+  is chosen before ranking (the app suggests one that leaves room for fees).
+  A mint that cannot cover amount plus reserve is excluded, with the reason.
+- Fedi's federation is never among the ranked sources: a mini app cannot see
+  its balance or fees.
 - Only `sat` tokens move.

@@ -4,16 +4,22 @@
 // invoice; the Lightning wallet (Fedi) pays it; the mint issues ecash, handed
 // over as a token.
 //
-// Cashu → Fedi: the Lightning wallet makes an invoice; EcashMesh plans paying
-// it from the token's mint (its melt quote and fee reserve); the token's
-// proofs melt against that quote; unused reserve returns as a change token.
+// Cashu → Fedi: the user pastes tokens, from one mint or several. The
+// Lightning wallet makes an invoice; EcashMesh ranks the token mints that
+// could pay it, given what each holds (excluding the ones that cannot, with
+// the reason); the chosen mint's proofs melt against a fresh quote; unused
+// reserve returns as a change token.
 
 import {
   createEcashMeshClient,
   type Discovery,
   EcashMeshError,
-  type TransferPlan,
+  type PaymentSource,
+  type RouteDecision,
 } from "@ecashmesh/client/http";
+import type { Proof } from "@cashu/cashu-ts";
+
+import type { Excluded } from "./decision";
 
 import {
   encodeToken,
@@ -43,6 +49,8 @@ export type MintCheck = {
   /** Fee per 1,000 proofs spent at the mint's active keyset (NUT-02). */
   inputFeePpk: number | null;
   issues: string[];
+  /** What EcashMesh returned for this mint, for the inspector. */
+  observed: { evidence?: unknown; observation?: unknown };
 };
 
 const sameUrl = (a: string, b: string) =>
@@ -94,14 +102,9 @@ async function observeMints(
       canSend: evidence?.capabilities.can_send ?? false,
       inputFeePpk: active?.input_fee_ppk ?? null,
       issues,
+      observed: { evidence, observation },
     };
   });
-}
-
-/** What EcashMesh observes about one mint. */
-export async function checkMint(mintUrl: string, amount: number) {
-  const [check] = await observeMints([mintUrl], amount);
-  return check!;
 }
 
 export type RankedMint = MintCheck & { reasons: string[] };
@@ -199,107 +202,160 @@ export async function issue(pending: PendingIssue, step: Step) {
   return { token, amount: total(proofs) };
 }
 
-export type FediPreview = {
-  mintUrl: string;
-  tokenAmount: number;
-  /** What arrives in the Lightning wallet. */
-  arrives: number;
-  /** Upper bound; the unused part returns as a change token. */
-  feeReserve: number;
+/** Tokens the user pasted, grouped by mint. */
+export type Holding = {
+  mint: string;
+  tokens: string[];
+  proofs: Proof[];
+  amount: number;
+  /** NUT-02 fee for spending all of these proofs. */
   inputFee: number;
-  invoice: string;
-  plan: TransferPlan;
-  check: MintCheck;
-  execute(step: Step): Promise<{ change: string | null; changeAmount: number }>;
 };
 
-/** Plans Cashu → Fedi for a pasted token; nothing is spent yet. */
-export async function previewToFedi(
-  wallet: LightningWallet,
-  token: string,
-  step: Step,
-): Promise<FediPreview> {
-  const info = readToken(token);
-  if (info.unit !== "sat") {
-    throw new Error(`This token is in ${info.unit}; only sat tokens can move.`);
-  }
-  step("EcashMesh is checking the token's mint");
-  const check = await checkMint(info.mint, info.amount);
-  if (!check.canSend) {
-    throw new Error(
-      `The mint cannot pay out right now. ${check.issues.join(" ")}`.trim(),
-    );
-  }
-  const cashu = await openMint(info.mint);
-  const proofs = await tokenProofs(token, info.mint);
-  const inputFee = sats(cashu.getFeesForProofs(proofs));
-
-  // The invoice must leave room for the mint's fee reserve, which the mint
-  // quotes only for a real invoice: start from a typical 1% reserve, and
-  // ask once more if the mint wants more.
-  let reserve = Math.max(2, Math.ceil(info.amount / 100));
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const arrives = info.amount - inputFee - reserve;
-    if (arrives < 1) {
-      throw new Error(
-        `This token holds ${info.amount} sats; the mint's fees (${inputFee + reserve} sats) leave nothing to move.`,
-      );
+/** Reads pasted tokens and groups their proofs by mint. */
+export async function holdings(tokens: string[]): Promise<Holding[]> {
+  const byMint: Holding[] = [];
+  for (const token of tokens) {
+    const info = readToken(token);
+    if (info.unit !== "sat") {
+      throw new Error(`A token is in ${info.unit}; only sat tokens can move.`);
     }
-    step(`${wallet.label} is creating an invoice for ${arrives} sats`);
-    const invoice = await wallet.makeInvoice(
-      arrives,
-      "From Cashu via EcashMesh",
-    );
-    step("EcashMesh is planning the payment from the mint");
-    const plan = await mesh.planTransfer({
-      amount: arrives,
-      from: { type: "cashu_mint", url: info.mint },
-      to: { type: "invoice", invoice },
+    const proofs = await tokenProofs(token, info.mint);
+    const holding = byMint.find((item) => sameUrl(item.mint, info.mint));
+    if (holding) {
+      holding.tokens.push(token);
+      holding.proofs.push(...proofs);
+      holding.amount += total(proofs);
+    } else {
+      byMint.push({
+        mint: info.mint,
+        tokens: [token],
+        proofs: [...proofs],
+        amount: total(proofs),
+        inputFee: 0,
+      });
+    }
+  }
+  for (const holding of byMint) {
+    const cashu = await openMint(holding.mint);
+    holding.inputFee = sats(cashu.getFeesForProofs(holding.proofs));
+  }
+  return byMint;
+}
+
+/** Spendable at a mint once its input fee is paid. */
+export const spendable = (holding: Holding) =>
+  Math.max(0, holding.amount - holding.inputFee);
+
+export type Ranking = {
+  amount: number;
+  invoice: string;
+  decision: RouteDecision | null;
+  excluded: Excluded[];
+  /** Why nothing can pay, when nothing can. */
+  failure: string | null;
+};
+
+/**
+ * Asks the Lightning wallet for an invoice, then EcashMesh which token mint
+ * should pay it: the same evaluation a wallet runs, with each mint's balance.
+ */
+export async function rankForFedi(
+  wallet: LightningWallet,
+  held: Holding[],
+  amount: number,
+  step: Step,
+): Promise<Ranking> {
+  step(`${wallet.label} is creating an invoice for ${amount} sats`);
+  const invoice = await wallet.makeInvoice(amount, "From Cashu via EcashMesh");
+  step("EcashMesh is ranking your mints");
+  try {
+    const decision = await mesh.evaluateRoute({
+      amount,
+      asset: "BTC",
+      destination: { type: "lightning", value: invoice },
+      paymentIntent: "send",
+      strictSourceRegistry: true,
+      walletMintUrls: held.map((holding) => holding.mint),
+      walletMintBalances: Object.fromEntries(
+        held.map((holding) => [holding.mint, spendable(holding)]),
+      ),
+      federationConnectorIds: [],
     });
-    const quoted = plan.estimated_fee_sats ?? reserve;
-    if (
-      arrives + quoted + inputFee <= info.amount &&
-      plan.source_melt_quote_id
-    ) {
-      const meltQuoteId = plan.source_melt_quote_id;
+    return {
+      amount,
+      invoice,
+      decision,
+      excluded: (decision.excluded_sources ?? []) as Excluded[],
+      failure: null,
+    };
+  } catch (error) {
+    if (error instanceof EcashMeshError && error.code === "NO_VIABLE_ROUTE") {
       return {
-        mintUrl: info.mint,
-        tokenAmount: info.amount,
-        arrives,
-        feeReserve: quoted,
-        inputFee,
+        amount,
         invoice,
-        plan,
-        check,
-        async execute(step) {
-          step("The mint is paying the invoice");
-          const quote = await cashu.checkMeltQuoteBolt11(meltQuoteId);
-          const melted = await cashu.meltProofsBolt11(quote, proofs);
-          // Spent: if this app issued the token, it no longer needs saving.
-          forgetToken(token.trim());
-          let change: string | null = null;
-          const changeAmount = total(melted.change);
-          if (changeAmount > 0) {
-            change = encodeToken(info.mint, melted.change);
-            saveToken({
-              token: change,
-              mintUrl: info.mint,
-              amount: changeAmount,
-              kind: "change",
-              createdAt: Date.now(),
-            });
-          }
-          if (wallet.claim) {
-            step(`${wallet.label} is claiming the payment`);
-            await wallet.claim(invoice);
-          }
-          return { change, changeAmount };
-        },
+        decision: null,
+        excluded: (error.diagnostics?.excluded_sources ?? []) as Excluded[],
+        failure: describe(error),
       };
     }
-    reserve = quoted;
+    throw error;
   }
-  throw new Error("The mint's fee reserve keeps changing; try again.");
+}
+
+export const holdingFor = (held: Holding[], source: PaymentSource) =>
+  held.find((holding) =>
+    sameUrl(holding.mint, source.cashu_metrics?.mint_url ?? ""),
+  );
+
+/**
+ * Pays the ranked invoice from the chosen mint: a fresh quote through
+ * EcashMesh's transfer plan (ranking quotes expire within a minute), then
+ * the melt. Spent tokens are forgotten; change comes back as a token.
+ */
+export async function payFromMint(
+  wallet: LightningWallet,
+  holding: Holding,
+  ranking: Ranking,
+  step: Step,
+) {
+  step("EcashMesh is quoting the payment at this mint");
+  const plan = await mesh.planTransfer({
+    amount: ranking.amount,
+    from: { type: "cashu_mint", url: holding.mint },
+    to: { type: "invoice", invoice: ranking.invoice },
+  });
+  const reserve = plan.estimated_fee_sats ?? 0;
+  if (ranking.amount + reserve + holding.inputFee > holding.amount) {
+    throw new Error(
+      `This mint now wants a ${reserve}-sat fee reserve; the tokens hold ${holding.amount} sats. Lower the amount.`,
+    );
+  }
+  if (!plan.source_melt_quote_id)
+    throw new Error("The mint returned no quote.");
+  const cashu = await openMint(holding.mint);
+  step("The mint is paying the invoice");
+  const quote = await cashu.checkMeltQuoteBolt11(plan.source_melt_quote_id);
+  const melted = await cashu.meltProofsBolt11(quote, holding.proofs);
+  // Spent: tokens this app issued no longer need saving.
+  for (const token of holding.tokens) forgetToken(token.trim());
+  let change: string | null = null;
+  const changeAmount = total(melted.change);
+  if (changeAmount > 0) {
+    change = encodeToken(holding.mint, melted.change);
+    saveToken({
+      token: change,
+      mintUrl: holding.mint,
+      amount: changeAmount,
+      kind: "change",
+      createdAt: Date.now(),
+    });
+  }
+  if (wallet.claim) {
+    step(`${wallet.label} is claiming the payment`);
+    await wallet.claim(ranking.invoice);
+  }
+  return { change, changeAmount, reserve };
 }
 
 /** A readable message for any failure along the way. */
