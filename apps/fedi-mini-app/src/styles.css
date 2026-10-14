@@ -264,3 +264,125 @@ summary {
   cursor: pointer;
   font-size: 0.92rem;
 }
+
+.add-mint {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.ranking {
+  display: grid;
+  gap: 8px;
+}
+
+.rank-row {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 10px;
+  text-align: left;
+  font-weight: 400;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+.rank-row.chosen {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.rank-row:disabled {
+  opacity: 0.7;
+}
+
+.rank {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--muted);
+}
+
+.rank-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rank-title {
+  font-weight: 600;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.badge {
+  font-style: normal;
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: var(--ok-bg);
+  color: var(--ok);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.why {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.why.bad {
+  color: var(--bad);
+}
+
+.evaluation {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.evaluation summary span {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.evaluation ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 0.88rem;
+  display: grid;
+  gap: 4px;
+}
+
+.evaluation .flag {
+  color: var(--muted);
+}
+
+.meter {
+  display: grid;
+  grid-template-columns: 1fr 90px 40px;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.85rem;
+}
+
+.meter .bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.meter .bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.meter .value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}

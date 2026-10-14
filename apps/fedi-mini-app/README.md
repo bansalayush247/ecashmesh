@@ -14,12 +14,17 @@ choose between federations; it bridges Fedi and Cashu.
 
 ## What it does
 
-- **Fedi → Cashu.** EcashMesh checks that the mint is online and can receive
-  Lightning. The mint quotes an invoice, Fedi pays it, and the mint issues
-  ecash, handed over as a Cashu token to copy into any Cashu wallet.
+- **Fedi → Cashu.** EcashMesh observes every candidate mint (the lab's,
+  the user's recent ones, any they add) and ranks them: online and able to
+  receive Lightning first, then the lowest input fee for spending the ecash
+  later. Unreachable mints show why. The user pays the pick or another
+  usable mint: the mint quotes an invoice, Fedi pays it, and the mint
+  issues ecash, handed over as a Cashu token to copy into any Cashu wallet.
 - **Cashu → Fedi.** Paste a token. Fedi creates an invoice; EcashMesh plans
   paying it from the token's mint (`planTransfer`: the melt quote and its fee
-  reserve) and the app shows what arrives before anything is spent. The
+  reserve) and the app shows what arrives before anything is spent, with
+  EcashMesh's evaluation: how sure it is the mint can route the amount, its
+  payment track record, how fresh the evidence is, and its risk flags. The
   token's ecash melts against that quote; unused reserve comes back as a
   change token.
 

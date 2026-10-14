@@ -1,3 +1,4 @@
+import type { TransferPlan } from "@ecashmesh/client/http";
 import { useEffect, useState } from "react";
 
 import { readToken, type TokenInfo } from "./cashu";
@@ -10,11 +11,15 @@ import {
   type MintCheck,
   moveToCashu,
   previewToFedi,
+  rankMints,
+  type RankedMint,
 } from "./flows";
 import {
   forgetToken,
   pendingIssue,
   type PendingIssue,
+  recentMints,
+  rememberMint,
   savedTokens,
   type SavedToken,
 } from "./store";
@@ -152,28 +157,42 @@ function ToCashu(props: {
   suggestions: { url: string; label: string }[];
   onToken(): void;
 }) {
-  const [mintUrl, setMintUrl] = useState(props.suggestions[0]?.url ?? "");
+  const [candidates, setCandidates] = useState<string[]>(() => [
+    ...recentMints(),
+    ...props.suggestions.map((mint) => mint.url),
+  ]);
+  const [newMint, setNewMint] = useState("");
   const [amount, setAmount] = useState("1000");
-  const [check, setCheck] = useState<MintCheck | null>(null);
+  const [ranked, setRanked] = useState<RankedMint[] | null>(null);
+  const [chosen, setChosen] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ token: string; amount: number }>();
+  const [result, setResult] = useState<{
+    token: string;
+    amount: number;
+    mint: string;
+  }>();
   const sats = Number.parseInt(amount, 10);
-  const valid = mintUrl.trim() !== "" && Number.isSafeInteger(sats) && sats > 0;
+  const valid = candidates.length > 0 && Number.isSafeInteger(sats) && sats > 0;
+  const label = (url: string) =>
+    props.suggestions.find((mint) => sameHost(mint.url, url))?.label ??
+    new URL(url).host;
+  const pick = ranked?.find((mint) => mint.healthy && mint.canReceive);
+  const selected = ranked?.find((mint) => mint.url === chosen);
 
   const reset = () => {
-    setCheck(null);
+    setRanked(null);
+    setChosen(null);
     setError(null);
     setResult(undefined);
   };
 
-  async function run<T>(work: () => Promise<T>) {
+  async function run(work: () => Promise<void>) {
     setError(null);
     try {
-      return await work();
+      await work();
     } catch (failure) {
       setError(describe(failure));
-      return undefined;
     } finally {
       setBusy(null);
     }
@@ -184,7 +203,7 @@ function ToCashu(props: {
       <section className="panel">
         <h2>Your Cashu token</h2>
         <p>
-          {result.amount} sats of ecash at {check?.url ?? mintUrl}. Copy it into
+          {result.amount} sats of ecash at {label(result.mint)}. Copy it into
           any Cashu wallet; until you do, this token is the money.
         </p>
         <TokenBox token={result.token} />
@@ -199,26 +218,6 @@ function ToCashu(props: {
     <section className="panel">
       <h2>Get Cashu ecash, paid from Fedi</h2>
       <label>
-        Mint
-        <input
-          value={mintUrl}
-          list="mint-suggestions"
-          placeholder="https://mint.example"
-          inputMode="url"
-          onChange={(event) => {
-            setMintUrl(event.target.value);
-            reset();
-          }}
-        />
-        <datalist id="mint-suggestions">
-          {props.suggestions.map((mint) => (
-            <option key={mint.url} value={mint.url}>
-              {mint.label}
-            </option>
-          ))}
-        </datalist>
-      </label>
-      <label>
         Amount (sats)
         <input
           value={amount}
@@ -230,25 +229,93 @@ function ToCashu(props: {
         />
       </label>
 
-      {check && <MintCard check={check} need="receive" />}
+      <div className="add-mint">
+        <label>
+          Add a mint
+          <input
+            value={newMint}
+            placeholder="https://mint.example"
+            inputMode="url"
+            onChange={(event) => setNewMint(event.target.value)}
+          />
+        </label>
+        <button
+          className="secondary"
+          disabled={!/^https?:\/\/\S+$/.test(newMint.trim())}
+          onClick={() => {
+            const url = newMint.trim();
+            rememberMint(url);
+            setCandidates((list) => [url, ...list.filter((u) => u !== url)]);
+            setNewMint("");
+            reset();
+          }}
+        >
+          Add
+        </button>
+      </div>
 
-      {!check || !check.canReceive ? (
+      {ranked ? (
+        <div className="ranking" role="radiogroup" aria-label="Mints">
+          <p className="note">
+            EcashMesh&apos;s order: online and able to receive first, then the
+            lowest fee for spending the ecash later.
+          </p>
+          {ranked.map((mint, index) => {
+            const usable = mint.healthy && mint.canReceive;
+            return (
+              <button
+                key={mint.url}
+                role="radio"
+                aria-checked={chosen === mint.url}
+                disabled={!usable}
+                className={`rank-row${chosen === mint.url ? " chosen" : ""}`}
+                onClick={() => setChosen(mint.url)}
+              >
+                <span className="rank">{usable ? index + 1 : "–"}</span>
+                <span className="rank-body">
+                  <span className="rank-title">
+                    {label(mint.url)}
+                    {mint === pick && <em className="badge">EcashMesh pick</em>}
+                  </span>
+                  {mint.reasons.map((reason) => (
+                    <span key={reason} className={usable ? "why" : "why bad"}>
+                      {reason}
+                    </span>
+                  ))}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="note">
+          {candidates.length} mint{candidates.length === 1 ? "" : "s"} to
+          compare: {candidates.map(label).join(", ") || "add one above"}.
+        </p>
+      )}
+
+      {!ranked ? (
         <button
           disabled={!valid || busy !== null}
           onClick={() =>
             run(async () => {
-              setBusy("EcashMesh is checking the mint");
-              setCheck(await checkMint(mintUrl.trim(), sats));
+              setBusy("EcashMesh is checking the mints");
+              const order = await rankMints(candidates, sats);
+              setRanked(order);
+              setChosen(
+                order.find((mint) => mint.healthy && mint.canReceive)?.url ??
+                  null,
+              );
             })
           }
         >
-          {busy ?? "Check mint"}
+          {busy ?? "Compare mints"}
         </button>
-      ) : (
+      ) : selected ? (
         <>
           <p className="note">
-            {props.wallet.label} pays {sats} sats plus its own Lightning fee.
-            You get a Cashu token for {sats} sats.
+            {props.wallet.label} pays {sats} sats plus its own Lightning fee to{" "}
+            {label(selected.url)}. You get a Cashu token for {sats} sats.
           </p>
           <button
             disabled={busy !== null}
@@ -256,11 +323,11 @@ function ToCashu(props: {
               run(async () => {
                 const moved = await moveToCashu(
                   props.wallet,
-                  check.url,
+                  selected.url,
                   sats,
                   setBusy,
                 );
-                setResult(moved);
+                setResult({ ...moved, mint: selected.url });
                 props.onToken();
               })
             }
@@ -268,11 +335,21 @@ function ToCashu(props: {
             {busy ?? `Pay ${sats} sats from Fedi`}
           </button>
         </>
+      ) : (
+        <p className="error">No mint can receive right now.</p>
       )}
       {error && <p className="error">{error}</p>}
     </section>
   );
 }
+
+const sameHost = (a: string, b: string) => {
+  try {
+    return new URL(a).host === new URL(b).host;
+  } catch {
+    return false;
+  }
+};
 
 function ToFedi(props: { wallet: LightningWallet; onDone(): void }) {
   const [token, setToken] = useState("");
@@ -359,6 +436,7 @@ function ToFedi(props: { wallet: LightningWallet; onDone(): void }) {
       {preview ? (
         <>
           <MintCard check={preview.check} need="send" />
+          <Evaluation plan={preview.plan} />
           <dl className="summary">
             <dt>Token</dt>
             <dd>{preview.tokenAmount} sats</dd>
@@ -404,6 +482,64 @@ function ToFedi(props: { wallet: LightningWallet; onDone(): void }) {
       )}
       {error && <p className="error">{error}</p>}
     </section>
+  );
+}
+
+const FLAGS: Record<string, string> = {
+  unknown_reliability: "No payment history with this mint yet",
+  unknown_solvency: "The mint's reserves cannot be verified",
+  stale_evidence: "Some of what EcashMesh read is out of date",
+  unknown_liquidity: "Whether the mint can route this amount is unknown",
+};
+
+/** Why EcashMesh approves paying from this mint: its score and evidence. */
+function Evaluation({ plan }: { plan: TransferPlan }) {
+  const decision = plan.evaluation;
+  const source = decision.recommended_source;
+  if (!source) return null;
+  const flags = [...new Set(source.risk_flags)];
+  const meters: [string, number][] = [
+    ["Can route this amount", source.liquidity_confidence],
+    ["Payment track record", source.reliability_confidence],
+    ["Evidence freshness", source.evidence_freshness],
+  ];
+  const excluded = decision.excluded_sources?.length ?? 0;
+  const others = decision.alternative_sources?.length ?? 0;
+  return (
+    <details className="evaluation" open>
+      <summary>
+        Why EcashMesh plans this route
+        <span>
+          {others + excluded === 0
+            ? " · the token's mint is the only source that can pay it"
+            : ` · ${others} alternative${others === 1 ? "" : "s"}, ${excluded} excluded`}
+        </span>
+      </summary>
+      <p className="note">
+        Score {Math.round(source.score)} of 100. Scores rank sources against
+        each other; on its own it mostly shows how much EcashMesh knows about
+        the mint so far.
+      </p>
+      {meters.map(([name, value]) => (
+        <div key={name} className="meter">
+          <span>{name}</span>
+          <span className="bar" aria-hidden="true">
+            <span style={{ width: `${Math.round(value)}%` }} />
+          </span>
+          <span className="value">{Math.round(value)}%</span>
+        </div>
+      ))}
+      <ul>
+        {decision.explanation.reasons.map((reason) => (
+          <li key={reason.code}>{reason.message}</li>
+        ))}
+        {flags.map((flag) => (
+          <li key={flag} className="flag">
+            {FLAGS[flag] ?? flag.replace(/_/g, " ")}
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 

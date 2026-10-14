@@ -53,3 +53,14 @@ export function forgetToken(token: string) {
     savedTokens().filter((saved) => saved.token !== token),
   );
 }
+
+const MINTS = "ecashmesh.mints";
+
+/** Mints the user added, offered again next time. */
+export const recentMints = () => read<string[]>(MINTS, []);
+export function rememberMint(url: string) {
+  write(
+    MINTS,
+    [url, ...recentMints().filter((other) => other !== url)].slice(0, 8),
+  );
+}

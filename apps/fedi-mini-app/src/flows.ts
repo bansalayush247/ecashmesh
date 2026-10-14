@@ -40,6 +40,8 @@ export type MintCheck = {
   healthy: boolean;
   canReceive: boolean;
   canSend: boolean;
+  /** Fee per 1,000 proofs spent at the mint's active keyset (NUT-02). */
+  inputFeePpk: number | null;
   issues: string[];
 };
 
@@ -47,41 +49,100 @@ const sameUrl = (a: string, b: string) =>
   a.trim().replace(/\/+$/, "").toLowerCase() ===
   b.trim().replace(/\/+$/, "").toLowerCase();
 
-/** What EcashMesh observes about one mint, for moving `amount` through it. */
-export async function checkMint(
-  mintUrl: string,
+/** What EcashMesh observes about each mint, for moving `amount`. */
+async function observeMints(
+  urls: string[],
   amount: number,
-): Promise<MintCheck> {
+): Promise<MintCheck[]> {
+  const [first, ...rest] = urls;
+  if (!first) return [];
   const discovery: Discovery = await mesh.discoverSources({
     amount,
     asset: "BTC",
     destination: {
       type: "cashu",
-      value: `cashu://request?mint=${encodeURIComponent(mintUrl)}&amount_sats=${amount}`,
+      value: `cashu://request?mint=${encodeURIComponent(first)}&amount_sats=${amount}`,
     },
     paymentIntent: "send",
+    walletMintUrls: rest,
   });
-  const mint = discovery.discovery.mints.find((mint) =>
-    sameUrl(mint.canonical_url, mintUrl),
+  return urls.map((url) => {
+    const mint = discovery.discovery.mints.find((mint) =>
+      sameUrl(mint.canonical_url, url),
+    );
+    const ids = mint ? [mint.canonical_id, ...mint.aliases] : [];
+    const evidence = discovery.evidence.find((item) =>
+      ids.includes(item.connector),
+    );
+    const observation = discovery.observations.find((item) =>
+      ids.includes(item.connector),
+    );
+    const issues = (observation?.issues ?? []).map((issue) => issue.message);
+    if (!evidence) issues.unshift("EcashMesh could not read this mint.");
+    const fees = (
+      observation as { input_fees?: { value?: unknown } } | undefined
+    )?.input_fees?.value;
+    const active = Array.isArray(fees)
+      ? (fees as { active?: boolean; input_fee_ppk?: number }[]).find(
+          (keyset) => keyset.active,
+        )
+      : undefined;
+    return {
+      url: mint?.canonical_url ?? url,
+      healthy: evidence?.health.value === "healthy",
+      canReceive: evidence?.capabilities.can_receive ?? false,
+      canSend: evidence?.capabilities.can_send ?? false,
+      inputFeePpk: active?.input_fee_ppk ?? null,
+      issues,
+    };
+  });
+}
+
+/** What EcashMesh observes about one mint. */
+export async function checkMint(mintUrl: string, amount: number) {
+  const [check] = await observeMints([mintUrl], amount);
+  return check!;
+}
+
+export type RankedMint = MintCheck & { reasons: string[] };
+
+/**
+ * The candidate mints in the order to receive at: those that are online
+ * and can receive first, then the lowest input fee (what spending the ecash
+ * later costs), then the user's own order.
+ */
+export async function rankMints(urls: string[], amount: number) {
+  const unique = urls.filter(
+    (url, index) => urls.findIndex((other) => sameUrl(other, url)) === index,
   );
-  const ids = mint ? [mint.canonical_id, ...mint.aliases] : [];
-  const evidence = discovery.evidence.find((item) =>
-    ids.includes(item.connector),
-  );
-  const observation = discovery.observations.find((item) =>
-    ids.includes(item.connector),
-  );
-  const issues = (observation?.issues ?? []).map((issue) => issue.message);
-  if (!evidence) {
-    issues.unshift("EcashMesh could not read this mint.");
-  }
-  return {
-    url: mint?.canonical_url ?? mintUrl,
-    healthy: evidence?.health.value === "healthy",
-    canReceive: evidence?.capabilities.can_receive ?? false,
-    canSend: evidence?.capabilities.can_send ?? false,
-    issues,
-  };
+  const checks = await observeMints(unique, amount);
+  const usable = (check: MintCheck) => check.healthy && check.canReceive;
+  return checks
+    .map((check, index) => ({ check, index }))
+    .sort(
+      (a, b) =>
+        Number(usable(b.check)) - Number(usable(a.check)) ||
+        (a.check.inputFeePpk ?? Infinity) - (b.check.inputFeePpk ?? Infinity) ||
+        a.index - b.index,
+    )
+    .map(({ check }): RankedMint => {
+      const reasons = usable(check)
+        ? [
+            "Online and receives Lightning",
+            check.inputFeePpk === null
+              ? "Input fee unknown"
+              : check.inputFeePpk === 0
+                ? "No input fee when you spend this ecash"
+                : `Input fee ${check.inputFeePpk} sats per 1,000 proofs spent`,
+          ]
+        : [
+            check.healthy
+              ? "Does not receive Lightning now"
+              : "Not responding as healthy",
+            ...check.issues.slice(0, 2),
+          ];
+      return { ...check, reasons };
+    });
 }
 
 export type Step = (message: string) => void;
