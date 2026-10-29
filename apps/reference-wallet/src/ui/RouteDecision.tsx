@@ -988,7 +988,7 @@ export function RouteDetails({
               color="#FFB11B"
             />
             <Metric
-              label="Risk penalty"
+              label="Risk-free"
               value={100 - route.risk_penalty}
               color="#A8B7CF"
             />
